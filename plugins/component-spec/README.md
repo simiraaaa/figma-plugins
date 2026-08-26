@@ -15,10 +15,10 @@ npm install        # リポルートで (未実施なら)
 npm run build:spec
 ```
 
-Figma デスクトップアプリで: Plugins → Development → Import plugin from manifest…
-→ `plugins/component-spec/manifest.json` を選択。
+Figma への取り込みは[リポルート README の共通手順](../../README.md#figma-への取り込み-共通手順)を参照
+(選択する manifest は `plugins/component-spec/manifest.json`)。
 
-配布用の詳しいインストール手順 (非開発者向け) は [INSTALL.md](INSTALL.md) を参照。
+zip で配布する場合の非開発者向けインストール手順は [INSTALL.md](INSTALL.md) を参照。
 
 ## 使い方
 
@@ -31,9 +31,10 @@ Figma デスクトップアプリで: Plugins → Development → Import plugin 
 
 ### 走査の規則
 
-- 選択ツリーの INSTANCE / COMPONENT / COMPONENT_SET を検出する
+- 選択したノード自身とその配下のツリーから INSTANCE / COMPONENT / COMPONENT_SET を検出する
 - リストの粒度は ComponentSet 単位。set に属さない単独 COMPONENT はそのコンポーネント単位
-- インスタンスと単独コンポーネントの**内部は辿らない** (入れ子のアイコン等でリストが埋まるため)
+- INSTANCE と COMPONENT の**配下は、深さに依らず走査しない**
+  (走査すると入れ子のアイコン等までリストに並んで冗長になるため)
 - 非表示 (`visible: false`) のノードは対象外
 
 ## 出力 (schema: component-spec-v1)
@@ -53,7 +54,7 @@ Figma デスクトップアプリで: Plugins → Development → Import plugin 
         "ShowToggle":  { "type": "BOOLEAN", "defaultValue": true, "description": "表示切替アイコン" },
         "Label":       { "type": "TEXT",    "defaultValue": "パスワード" }
       },
-      "examples": [                        // ドキュメント順。確認済みパターンの証跡
+      "examples": [                        // document 上の並び順。確認済みパターンの証跡
         { "nodeId": "20:1", "name": "State=Default",
           "props": { "State": "Default", "ShowToggle": true },
           "screenshot": "screenshots/Input-type=password/State=Default.20-1.png" }
@@ -63,13 +64,16 @@ Figma デスクトップアプリで: Plugins → Development → Import plugin 
 }
 ```
 
-- `properties` の正は `componentPropertyDefinitions`。並んでいるインスタンスから逆算はしない
-- キーは Figma 内部 id サフィックス (`Label#12:34`) を落とした表示名。落とした結果衝突したら warning
+- `properties` の正は Figma Plugin API の `componentPropertyDefinitions`
+  (そのコンポーネントが取りうる全プロパティと値の定義)。並んでいるインスタンスから逆算はしない
+- キーは、プラグインが Figma 内部キーの `#` 以降を取り除いた表示名 (`Label#12:34` → `Label`)。
+  取り除いた結果同名になったら、後の定義で上書きして warning を出す
 - `type` は Figma API の値そのまま (`VARIANT` / `BOOLEAN` / `TEXT` / `INSTANCE_SWAP` / `SLOT`)。
   真偽値は `BOOL` ではなく `BOOLEAN`
-- `values` は VARIANT だけに付く (TEXT の実値は候補値ではないので出さない。中身は `examples` を見る)
+- `values` は VARIANT だけに付く (TEXT の実値は候補値ではないので出さない。
+  実値は出力 JSON の `examples` を見る)
 - `description` は Figma 側でプロパティに説明が書かれているときだけ付く
-- `screenshot` は ZIP 出力のときだけ付く (JSON コピーには入らない)
+- `screenshot` は ZIP 出力のときだけ付く (JSON コピーではスクリーンショットを撮らない)
 
 ZIP の中身:
 
@@ -81,7 +85,7 @@ screenshots/<ComponentSet 名>/<バリアント名>.<ノードid>.png
 ## remote コンポーネント時のフォールバック (`source`)
 
 ライブラリ (別ファイル) 発の remote コンポーネントや soft-deleted なコンポーネントでは、
-`instance.getMainComponentAsync()` で得た main が **parent を持たないことがある**
+`instance.getMainComponentAsync()` で得た main の **`parent` が null のことがある**
 (Figma の型定義にも明記されている)。また variant の ComponentNode に対する
 `componentPropertyDefinitions` は例外になりうる。この場合 ComponentSet や定義まで辿れない。
 
@@ -89,8 +93,9 @@ screenshots/<ComponentSet 名>/<バリアント名>.<ノードid>.png
 - 辿れない場合: `source: "examples"`。選択中の各インスタンスの `componentProperties` から
   propName → 出現値を集約する。**観測できた値だけ**なので取りうる全値の保証は無い。
   デフォルト値は分からないので出さない (捏造しない)
-- main そのものが辿れない場合は**インスタンス名でグループ化**する (名前を変えられた
-  インスタンスは別グループに割れる)。この場合 warning が出る
+- main そのものが辿れない場合は**インスタンス名でグループ化**する。同名のインスタンスは
+  `components` の 1 エントリにまとまり、名前が違えば別エントリに割れる (名前を変えられた
+  インスタンスは別グループになる)。この場合 warning が出る
 
 どちらの経路でも、読み取り失敗は中止せず `meta.warnings` に記録して続行する
 (壊れた ComponentSet = variant 重複などでも書き出しは止まらない)。
@@ -110,3 +115,6 @@ remote コンポーネントを含むファイルを手元に用意できない�
   (UI 側は `new Uint8Array(...)` で包み直すフォールバックあり)
 - プラグイン iframe での `document.execCommand("copy")` の可否
   (失敗時は `navigator.clipboard` → 手動コピー用 textarea へ段階的に落とす)
+
+JSON 組み立てのロジック自体は `tests/component-spec-spec.test.mts` で検証済み
+(definitions 優先・examples 集約・キー正規化・warnings の記録)。

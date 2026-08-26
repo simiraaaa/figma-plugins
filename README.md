@@ -1,6 +1,6 @@
 # figma-plugins
 
-特定の UI ライブラリ・プロジェクトに依存しない汎用の Figma プラグイン集。
+汎用の Figma プラグイン集。特定の UI ライブラリやプロジェクトには依存しない。
 どちらも「Figma のデザインを AI (Claude 等) に渡せる形に書き出す」ためのプラグインで、
 コード生成はしない (解釈とコード化は AI 側の仕事)。
 
@@ -16,11 +16,27 @@ npm install
 npm run build        # 両方ビルド (個別: build:dump / build:spec)
 ```
 
-Figma デスクトップアプリで: Plugins → Development → Import plugin from manifest…
-→ 各プラグインの `manifest.json` を選択。
+ビルドすると各プラグインの `dist/code.js` が生成される。生成物はコミットしないので、
+clone 直後や pull 直後は必ずビルドしてから Figma に読み込む。
 
-- `plugins/structure-dump/manifest.json`
-- `plugins/component-spec/manifest.json`
+## Figma への取り込み (共通手順)
+
+どちらのプラグインも手順は同じ。
+
+1. **Figma デスクトップアプリ**を用意する (ブラウザ版では開発プラグインを読み込めない。
+   未インストールなら https://www.figma.com/downloads/ から)
+2. このリポジトリを移動・削除しない場所に置き、上のセットアップでビルドしておく
+   (Figma はプラグインを実行するたびに、インポート時に指定した場所の manifest.json と
+   ビルド生成物を読み直す。リポジトリを動かすと壊れる)
+3. Figma で任意のデザインファイルを開く
+4. メニュー → **Plugins** → **Development** → **Import plugin from manifest…**
+   (日本語 UI では: **プラグイン** → **開発** → **マニフェストからプラグインをインポート…**)
+5. 読み込みたいプラグインの `manifest.json` を選択する
+   - Structure Dump: `plugins/structure-dump/manifest.json`
+   - Component Spec: `plugins/component-spec/manifest.json`
+
+インポートは初回のみ。以降はどのデザインファイルでも Plugins → Development 配下から実行でき、
+コードを更新したときは再ビルドすれば次の実行から反映される (再インポート不要)。
 
 使い方は各プラグインの README を参照。
 
@@ -29,18 +45,20 @@ Figma デスクトップアプリで: Plugins → Development → Import plugin 
 ```
 plugins/structure-dump/   構造 JSON + スクリーンショットの ZIP 書き出し
 plugins/component-spec/   variant / props の仕様書き出し
-shared/nodeOrder.ts       走査順の固定 (両プラグインで共有)
+shared/nodeOrder.ts       複数ノードを選択したときの出力順を、選択順でなく
+                          document 上の並び順に固定する (両プラグインで共有)
 ```
 
-- どちらのプラグインも `networkAccess: none` (外部送信なし)。ZIP は自前の無圧縮実装
-  (`plugins/structure-dump/src/zip.ts`) で生成する
+- どちらのプラグインも `networkAccess: none` (外部送信なし)。ZIP は圧縮なし (stored) の
+  ZIP 形式で、外部ライブラリを使わない自前実装 (`plugins/structure-dump/src/zip.ts`) で生成する
 - JSON の組み立ては Figma API 非依存の純関数に分離してある
   (`serialize.ts` / `spec.ts` / `nodeOrder.ts`)
 
 ## 開発
 
 ```sh
-npm run typecheck    # tsc --noEmit
+npm test             # node --test (Figma API 非依存の純関数を検査)
+npm run typecheck    # tsc --noEmit (プラグイン本体とテストの両方)
 ```
 
 ビルド生成物 (`plugins/*/dist/`) はコミットしない。Figma に読み込む前に必ずビルドする。
