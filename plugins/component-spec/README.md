@@ -33,8 +33,8 @@ zip で配布する場合の非開発者向けインストール手順は [INSTA
 
 - 選択したノード自身とその配下のツリーから INSTANCE / COMPONENT / COMPONENT_SET を検出する
 - リストの粒度は ComponentSet 単位。set に属さない単独 COMPONENT はそのコンポーネント単位
-- INSTANCE と COMPONENT の**配下は、深さに依らず走査しない**
-  (走査すると入れ子のアイコン等までリストに並んで冗長になるため)
+- INSTANCE と COMPONENT の**配下は走査しない**。入れ子になったインスタンスやアイコンも、
+  深さに依らずすべて対象外 (走査するとそれらまでリストに並んで冗長になるため)
 - 非表示 (`visible: false`) のノードは対象外
 
 ## 出力 (schema: component-spec-v1)
@@ -67,7 +67,7 @@ zip で配布する場合の非開発者向けインストール手順は [INSTA
 - `properties` の正は Figma Plugin API の `componentPropertyDefinitions`
   (そのコンポーネントが取りうる全プロパティと値の定義)。並んでいるインスタンスから逆算はしない
 - キーは、プラグインが Figma 内部キーの `#` 以降を取り除いた表示名 (`Label#12:34` → `Label`)。
-  取り除いた結果同名になったら、後の定義で上書きして warning を出す
+  取り除いた結果同名になったら、定義リストの並びで後にある方で上書きして warning を出す
 - `type` は Figma API の値そのまま (`VARIANT` / `BOOLEAN` / `TEXT` / `INSTANCE_SWAP` / `SLOT`)。
   真偽値は `BOOL` ではなく `BOOLEAN`
 - `values` は VARIANT だけに付く (TEXT の実値は候補値ではないので出さない。
@@ -93,6 +93,8 @@ screenshots/<ComponentSet 名>/<バリアント名>.<ノードid>.png
 - 辿れない場合: `source: "examples"`。選択中の各インスタンスの `componentProperties` から
   propName → 出現値を集約する。**観測できた値だけ**なので取りうる全値の保証は無い。
   デフォルト値は分からないので出さない (捏造しない)
+- プロパティ定義を読めたが 0 件だったコンポーネントも `source: "examples"` になる
+  (warning は「プロパティ定義が空のため」と出て、読み取り失敗とは区別される)
 - main そのものが辿れない場合は**インスタンス名でグループ化**する。同名のインスタンスは
   `components` の 1 エントリにまとまり、名前が違えば別エントリに割れる (名前を変えられた
   インスタンスは別グループになる)。この場合 warning が出る
@@ -111,8 +113,6 @@ remote コンポーネントを含むファイルを手元に用意できない�
   (入らない場合は値から `BOOLEAN` / `TEXT` を推定する保険が働く)
 - variant の ComponentNode に対する `componentPropertyDefinitions` が例外か空か
 - `figma.on("selectionchange")` 連打時のリスト追従 (古い非同期スキャンは token で破棄する実装)
-- `figma.ui.postMessage` で ZIP の `Uint8Array` が UI 側にそのまま届くこと
-  (UI 側は `new Uint8Array(...)` で包み直すフォールバックあり)
 - プラグイン iframe での `document.execCommand("copy")` の可否
   (失敗時は `navigator.clipboard` → 手動コピー用 textarea へ段階的に落とす)
 

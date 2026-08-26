@@ -60,8 +60,6 @@ assets/<imageRef>.<拡張子>               image fill の元画像
 
 開発側で実機未実測の項目。コード上は失敗時の分岐やフォールバックで扱っている。
 
-- `figma.ui.postMessage` で ZIP の `Uint8Array` が UI 側にそのまま届くこと
-  (UI 側には届いた値を `new Uint8Array(...)` で包み直すフォールバックを実装済み)
 - 巨大な選択 (数十 MB 級のスクリーンショット) での postMessage / メモリ挙動
 - SECTION や GROUP を含め、どの種類のトップレベルノードでも `node.exportAsync` が
   成功すること (失敗は warning に落として続行する設計)

@@ -300,8 +300,11 @@ export function buildComponentSpec(
     : fromExamples(group.examples, warnings, group.name);
 
   if (!useDefinitions) {
+    // definitions が非 null なら読み取り自体は成功している (定義が 0 件なだけ)
     warnings.push(
-      `definitions を辿れないため examples から集約しました (取りうる値は網羅でない可能性): ${group.name}`
+      group.definitions !== null
+        ? `プロパティ定義が空のため examples から集約しました: ${group.name}`
+        : `definitions を辿れないため examples から集約しました (取りうる値は網羅でない可能性): ${group.name}`
     );
   } else {
     // definitions にあるはずのプロパティが例側にしか出ないのは、定義と実体のずれ

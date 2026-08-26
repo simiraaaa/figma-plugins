@@ -151,7 +151,7 @@ test("VARIANT の観測値は出現順で重複を畳む", () => {
 });
 
 test("definitions が空オブジェクトでも props を観測できれば examples 集約へ落ちる", () => {
-  const { spec } = buildComponentSpec({
+  const { spec, warnings } = buildComponentSpec({
     key: "k",
     name: "Button",
     definitions: {},
@@ -159,6 +159,9 @@ test("definitions が空オブジェクトでも props を観測できれば exa
   });
   assert.equal(spec.source, "examples");
   assert.deepEqual(spec.properties.Size, { type: "VARIANT", values: ["Small"] });
+  // 読み取りは成功している。「辿れない」と誤って報告しない
+  assert.match(warnings[0], /プロパティ定義が空/);
+  assert.doesNotMatch(warnings[0], /辿れない/);
 });
 
 test("definitions に無いプロパティを example で観測したら warning に記録する", () => {
