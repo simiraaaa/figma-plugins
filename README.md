@@ -61,6 +61,25 @@ npm test             # node --test (Figma API 非依存の純関数を検査)
 npm run typecheck    # tsc --noEmit (プラグイン本体とテストの両方)
 ```
 
+## 配布 (GitHub Releases)
+
+npm を使わない人に配るときは、[Releases](https://github.com/simiraaaa/figma-plugins/releases)
+の zip (`structure-dump-plugin.zip` / `component-spec-plugin.zip`) を渡す。
+zip は manifest.json + ビルド済み code.js + ui.html の 3 点セット。
+受け取り側の手順は [component-spec の INSTALL.md](plugins/component-spec/INSTALL.md) を参照
+(structure-dump も同じ手順。フォルダ名を読み替える)。
+
+リリースの作成 (メンテナ向け):
+
+```sh
+npm run release               # test → build → zip 組み立て → gh release create
+npm run release -- --dry-run  # zip 組み立てまでで止める (公開しない)
+```
+
+package.json の `version` から tag (`v<version>`) を作る。各プラグインの
+`PLUGIN_VERSION` と version がずれていると中断する。CI (GitHub Actions) は使わず、
+実行は手元で gh CLI の認証で行う。
+
 ビルド生成物 (`plugins/*/dist/`) はコミットしない。Figma に読み込む前に必ずビルドする。
 
 ## License

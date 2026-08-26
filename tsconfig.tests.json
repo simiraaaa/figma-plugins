@@ -12,5 +12,5 @@
     "allowJs": true,
     "allowImportingTsExtensions": true
   },
-  "include": ["tests/**/*.mts"]
+  "include": ["tests/**/*.mts", "scripts/**/*.mts"]
 }

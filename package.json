@@ -11,6 +11,7 @@
     "build:spec": "esbuild plugins/component-spec/src/code.ts --bundle --outfile=plugins/component-spec/dist/code.js --target=es2017",
     "build:spec-test": "esbuild plugins/component-spec/src/spec.ts --format=esm --outdir=plugins/component-spec/dist --out-extension:.js=.mjs",
     "test": "npm run build:dump-test && npm run build:spec-test && node --test tests/*.test.mts",
+    "release": "node scripts/release.mts",
     "typecheck": "npm run build:dump-test && npm run build:spec-test && tsc --noEmit && tsc --noEmit -p tsconfig.tests.json"
   },
   "devDependencies": {
