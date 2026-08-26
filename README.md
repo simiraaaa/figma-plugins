@@ -25,7 +25,7 @@ clone 直後や pull 直後は必ずビルドしてから Figma に読み込む�
 
 1. **Figma デスクトップアプリ**を用意する (ブラウザ版では開発プラグインを読み込めない。
    未インストールなら https://www.figma.com/downloads/ から)
-2. このリポジトリを移動・削除しない場所に置き、上のセットアップでビルドしておく
+2. このリポジトリを、後で移動したり消したりしないで済む場所に置き、上のセットアップでビルドしておく
    (Figma はプラグインを実行するたびに、インポート時に指定した場所の manifest.json と
    ビルド生成物を読み直す。リポジトリを動かすと壊れる)
 3. Figma で任意のデザインファイルを開く
@@ -76,9 +76,14 @@ npm run release               # test → build → zip 組み立て → gh relea
 npm run release -- --dry-run  # zip 組み立てまでで止める (公開しない)
 ```
 
-package.json の `version` から tag (`v<version>`) を作る。各プラグインの
-`PLUGIN_VERSION` と version がずれていると中断する。CI (GitHub Actions) は使わず、
-実行は手元で gh CLI の認証で行う。
+package.json の `version` から tag (`v<version>`) を作り、検証済みの HEAD に固定して公開する。
+本実行は次を**全部**満たさないと中断する: 各プラグインの `PLUGIN_VERSION` (plugins/*/src/code.ts)
+と version が一致 / working tree がクリーン / HEAD が origin/main と一致 / tag `v<version>` が未使用。
+`--dry-run` が検査するのは version の一致だけで、git まわりの残り 3 つは見ない
+(dry-run が通っても本実行が通るとは限らない)。
+
+前提: gh CLI で認証済み (`gh auth status`) / python3 が PATH にある (テストが使う) /
+macOS または Linux (Windows は未対応)。CI (GitHub Actions) は使わず、手元で実行する。
 
 ビルド生成物 (`plugins/*/dist/`) はコミットしない。Figma に読み込む前に必ずビルドする。
 
