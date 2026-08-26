@@ -1,0 +1,91 @@
+<!doctype html>
+<html>
+<head>
+<meta charset="utf-8" />
+<style>
+  body { font: 12px/1.6 -apple-system, "Hiragino Sans", sans-serif; margin: 0; padding: 12px; color: #1a1a1a; }
+  h2 { font-size: 13px; margin: 12px 0 4px; }
+  .meta { color: #777; font-size: 11px; }
+  .warn { color: #c62828; margin: 2px 0 0; white-space: pre-wrap; }
+  pre { font: 11px/1.5 "SF Mono", Menlo, monospace; background: #f5f5f5; border-radius: 4px; padding: 8px; overflow: auto; max-height: 280px; white-space: pre-wrap; word-break: break-all; }
+  button { font-size: 12px; padding: 6px 12px; border-radius: 6px; border: 1px solid #ccc; background: #fff; cursor: pointer; margin-right: 6px; }
+  button:hover { background: #f0f0f0; }
+  #status { color: #777; }
+  #error { color: #c62828; white-space: pre-wrap; }
+</style>
+</head>
+<body>
+  <div id="status">書き出し中…</div>
+  <div id="error"></div>
+  <div id="app" style="display:none">
+    <div class="meta" id="meta"></div>
+    <div id="warnings"></div>
+    <h2>ダウンロード</h2>
+    <div>
+      <button id="download-zip">ZIPをダウンロード</button>
+      <button id="copy-json">JSONをコピー</button>
+    </div>
+    <h2>structure.json プレビュー</h2>
+    <pre id="json"></pre>
+  </div>
+
+<script>
+let payload = null;
+const PREVIEW_LIMIT = 20000;
+
+onmessage = (event) => {
+  const msg = event.data.pluginMessage;
+  if (!msg) return;
+  document.getElementById("status").textContent = "";
+
+  if (msg.type === "error") {
+    document.getElementById("error").textContent = msg.message;
+    return;
+  }
+  if (msg.type !== "result") return;
+
+  payload = msg.payload;
+  document.getElementById("app").style.display = "block";
+
+  const m = payload.meta;
+  document.getElementById("meta").textContent =
+    `${m.fileName} / ${m.scope} / 対象 ${m.targetCount} 件 / ` +
+    `スクリーンショット ${m.screenshotCount} 枚 / 画像アセット ${m.assetCount} 件 / ` +
+    `ZIP ${(m.zipBytes / 1024).toFixed(0)} KB`;
+
+  const warnEl = document.getElementById("warnings");
+  if (m.warnings.length > 0) {
+    warnEl.className = "warn";
+    warnEl.textContent = m.warnings.map((w) => `⚠ ${w}`).join("\n");
+  }
+
+  const preview =
+    payload.jsonText.length > PREVIEW_LIMIT
+      ? payload.jsonText.slice(0, PREVIEW_LIMIT) + "\n…(省略。全文はZIP内のstructure.json)"
+      : payload.jsonText;
+  document.getElementById("json").textContent = preview;
+};
+
+document.getElementById("download-zip").onclick = () => {
+  // postMessage 越しに Uint8Array が別形に落ちた場合に備えて包み直す
+  const bytes =
+    payload.zip instanceof Uint8Array ? payload.zip : new Uint8Array(payload.zip);
+  const blob = new Blob([bytes], { type: "application/zip" });
+  const a = document.createElement("a");
+  a.href = URL.createObjectURL(blob);
+  a.download = payload.zipName;
+  a.click();
+  URL.revokeObjectURL(a.href);
+};
+
+document.getElementById("copy-json").onclick = () => {
+  const ta = document.createElement("textarea");
+  ta.value = payload.jsonText;
+  document.body.appendChild(ta);
+  ta.select();
+  document.execCommand("copy");
+  document.body.removeChild(ta);
+};
+</script>
+</body>
+</html>

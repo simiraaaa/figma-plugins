@@ -1,0 +1,240 @@
+<!doctype html>
+<html>
+<head>
+<meta charset="utf-8" />
+<style>
+  body { font: 12px/1.6 -apple-system, "Hiragino Sans", sans-serif; margin: 0; padding: 12px; color: #1a1a1a; }
+  h2 { font-size: 13px; margin: 12px 0 4px; }
+  .hint { color: #777; }
+  .warn { color: #c62828; margin: 4px 0 0; white-space: pre-wrap; }
+  .row { display: flex; align-items: flex-start; gap: 6px; padding: 4px 0; border-bottom: 1px solid #eee; }
+  .row label { flex: 1; cursor: pointer; }
+  .name { font-weight: 600; word-break: break-all; }
+  .detail { color: #777; font-size: 11px; }
+  .badge { display: inline-block; font-size: 10px; border-radius: 3px; padding: 0 4px; margin-left: 4px; background: #fdecea; color: #c62828; }
+  button { font-size: 12px; padding: 6px 12px; border-radius: 6px; border: 1px solid #ccc; background: #fff; cursor: pointer; margin-right: 6px; }
+  button:hover:not(:disabled) { background: #f0f0f0; }
+  button:disabled { color: #aaa; cursor: default; }
+  .small { font-size: 11px; padding: 2px 8px; }
+  #list { max-height: 300px; overflow: auto; }
+  #status { color: #777; min-height: 1.6em; }
+  #error { color: #c62828; white-space: pre-wrap; }
+  #manual { width: 100%; height: 80px; display: none; font: 11px/1.4 "SF Mono", Menlo, monospace; }
+</style>
+</head>
+<body>
+  <div id="empty" class="hint" style="display:none">
+    仕様を書き出したいコンポーネントを含むフレームを選択してください。
+  </div>
+
+  <div id="app" style="display:none">
+    <div>
+      <button class="small" id="check-all">全選択</button>
+      <button class="small" id="uncheck-all">全解除</button>
+      <span class="hint" id="summary"></span>
+    </div>
+    <div id="list"></div>
+    <h2>書き出し</h2>
+    <div>
+      <button id="copy-json">JSON をコピー</button>
+      <button id="download-zip">ZIP を DL</button>
+    </div>
+    <div id="status"></div>
+    <div id="warnings"></div>
+    <textarea id="manual" readonly></textarea>
+  </div>
+
+  <div id="error"></div>
+
+<script>
+/** key → チェック状態。選択変更で作り直すリストでも状態を持ち越す */
+const checkedByKey = new Map();
+let groups = [];
+let lastWarnings = [];
+
+const el = (id) => document.getElementById(id);
+
+function checkedKeys() {
+  return groups.filter((g) => checkedByKey.get(g.key) !== false).map((g) => g.key);
+}
+
+function renderSummary() {
+  const keys = checkedKeys();
+  el("summary").textContent = `${keys.length} / ${groups.length} 件を選択中`;
+  const disabled = keys.length === 0;
+  el("copy-json").disabled = disabled;
+  el("download-zip").disabled = disabled;
+}
+
+function renderList() {
+  const list = el("list");
+  list.textContent = "";
+
+  for (let i = 0; i < groups.length; i += 1) {
+    const group = groups[i];
+    const row = document.createElement("div");
+    row.className = "row";
+
+    const box = document.createElement("input");
+    box.type = "checkbox";
+    box.checked = checkedByKey.get(group.key) !== false;
+    box.id = `chk-${i}`;
+    box.onchange = () => {
+      checkedByKey.set(group.key, box.checked);
+      renderSummary();
+    };
+
+    const label = document.createElement("label");
+    label.htmlFor = box.id;
+
+    const name = document.createElement("div");
+    name.className = "name";
+    name.textContent = group.name;
+    if (group.source === "examples") {
+      const badge = document.createElement("span");
+      badge.className = "badge";
+      badge.textContent = "examples 集約";
+      name.appendChild(badge);
+    }
+
+    const detail = document.createElement("div");
+    detail.className = "detail";
+    detail.textContent = `example ${group.exampleCount} 件 / プロパティ ${group.propertyCount} 件`;
+
+    label.appendChild(name);
+    label.appendChild(detail);
+    row.appendChild(box);
+    row.appendChild(label);
+    list.appendChild(row);
+  }
+
+  el("app").style.display = groups.length > 0 ? "block" : "none";
+  el("empty").style.display = groups.length > 0 ? "none" : "block";
+  if (groups.length === 0) {
+    el("empty").textContent =
+      "選択の中にコンポーネント (インスタンス / コンポーネント / バリアントセット) が見つかりません。";
+  }
+  showWarnings(lastWarnings);
+  renderSummary();
+}
+
+function showWarnings(warnings) {
+  const box = el("warnings");
+  lastWarnings = warnings || [];
+  box.textContent = "";
+  box.className = "";
+  if (!warnings || warnings.length === 0) return;
+  box.className = "warn";
+  box.textContent = warnings.map((w) => `⚠ ${w}`).join("\n");
+}
+
+/**
+ * Figma プラグインの iframe では navigator.clipboard が拒否されることがあるため
+ * textarea + execCommand を先に試し、両方だめなら手動コピー用に本文を残す
+ */
+function copyText(text) {
+  const ta = document.createElement("textarea");
+  ta.value = text;
+  ta.style.position = "fixed";
+  ta.style.opacity = "0";
+  document.body.appendChild(ta);
+  ta.select();
+  let ok = false;
+  try {
+    ok = document.execCommand("copy");
+  } catch (e) {
+    ok = false;
+  }
+  document.body.removeChild(ta);
+  if (ok) return Promise.resolve(true);
+  if (navigator.clipboard && navigator.clipboard.writeText) {
+    return navigator.clipboard.writeText(text).then(
+      () => true,
+      () => false
+    );
+  }
+  return Promise.resolve(false);
+}
+
+onmessage = (event) => {
+  const msg = event.data.pluginMessage;
+  if (!msg) return;
+  el("error").textContent = "";
+
+  if (msg.type === "error") {
+    el("error").textContent = msg.message;
+    el("status").textContent = "";
+    return;
+  }
+
+  if (msg.type === "empty") {
+    groups = [];
+    el("app").style.display = "none";
+    el("empty").style.display = "block";
+    el("empty").textContent = "仕様を書き出したいコンポーネントを含むフレームを選択してください。";
+    return;
+  }
+
+  if (msg.type === "list") {
+    groups = msg.groups;
+    el("status").textContent = "";
+    el("manual").style.display = "none";
+    lastWarnings = msg.warnings || [];
+    renderList();
+    return;
+  }
+
+  if (msg.type === "json") {
+    const m = msg.payload.meta;
+    copyText(msg.payload.jsonText).then((ok) => {
+      el("status").textContent = ok
+        ? `コピーしました (component ${m.componentCount} 件 / example ${m.exampleCount} 件)`
+        : "クリップボードに書けませんでした。下の内容を手動でコピーしてください";
+      if (!ok) {
+        const manual = el("manual");
+        manual.style.display = "block";
+        manual.value = msg.payload.jsonText;
+        manual.select();
+      }
+    });
+    showWarnings(m.warnings);
+    return;
+  }
+
+  if (msg.type === "zip") {
+    const payload = msg.payload;
+    // postMessage 越しに Uint8Array が別形に落ちた場合に備えて包み直す
+    const bytes = payload.zip instanceof Uint8Array ? payload.zip : new Uint8Array(payload.zip);
+    const blob = new Blob([bytes], { type: "application/zip" });
+    const a = document.createElement("a");
+    a.href = URL.createObjectURL(blob);
+    a.download = payload.zipName;
+    a.click();
+    URL.revokeObjectURL(a.href);
+    const m = payload.meta;
+    el("status").textContent =
+      `${payload.zipName} を書き出しました (component ${m.componentCount} 件 / ` +
+      `スクリーンショット ${m.screenshotCount} 枚 / ${(m.zipBytes / 1024).toFixed(0)} KB)`;
+    showWarnings(m.warnings);
+  }
+};
+
+el("check-all").onclick = () => {
+  for (const group of groups) checkedByKey.set(group.key, true);
+  renderList();
+};
+el("uncheck-all").onclick = () => {
+  for (const group of groups) checkedByKey.set(group.key, false);
+  renderList();
+};
+el("copy-json").onclick = () => {
+  el("status").textContent = "組み立て中…";
+  parent.postMessage({ pluginMessage: { type: "export-json", keys: checkedKeys() } }, "*");
+};
+el("download-zip").onclick = () => {
+  el("status").textContent = "スクリーンショットを書き出し中…";
+  parent.postMessage({ pluginMessage: { type: "export-zip", keys: checkedKeys() } }, "*");
+};
+</script>
+</body>
+</html>
