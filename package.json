@@ -7,11 +7,15 @@
   "scripts": {
     "build": "npm run build:dump && npm run build:spec",
     "build:dump": "esbuild plugins/structure-dump/src/code.ts --bundle --outfile=plugins/structure-dump/dist/code.js --target=es2017",
+    "build:dump-test": "esbuild plugins/structure-dump/src/serialize.ts plugins/structure-dump/src/zip.ts --format=esm --outdir=plugins/structure-dump/dist --out-extension:.js=.mjs",
     "build:spec": "esbuild plugins/component-spec/src/code.ts --bundle --outfile=plugins/component-spec/dist/code.js --target=es2017",
-    "typecheck": "tsc --noEmit"
+    "build:spec-test": "esbuild plugins/component-spec/src/spec.ts --format=esm --outdir=plugins/component-spec/dist --out-extension:.js=.mjs",
+    "test": "npm run build:dump-test && npm run build:spec-test && node --test tests/*.test.mts",
+    "typecheck": "npm run build:dump-test && npm run build:spec-test && tsc --noEmit && tsc --noEmit -p tsconfig.tests.json"
   },
   "devDependencies": {
     "@figma/plugin-typings": "^1.123.0",
+    "@types/node": "^26.1.2",
     "esbuild": "^0.25.12",
     "typescript": "^5.6.0"
   }
