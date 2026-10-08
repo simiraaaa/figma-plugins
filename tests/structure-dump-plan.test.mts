@@ -230,6 +230,20 @@ test("セクション外の選択は型とサイズを問わず ZIP 直下の画
   assert.deepEqual(ids(plan.hiddenRoots), ["5:3"]);
 });
 
+test("セクションの中のフレームだけを直接選ぶと ZIP 直下に section: null で置き、x/y は Figma 上の親基準のまま", () => {
+  const inner = frame("9:2", "Inner", { w: 390, h: 844, x: 10, y: 20 });
+  page([section("9:1", "Flow", { w: 2000, h: 1000, x: 50, y: 60, children: [inner] })]);
+
+  const plan = planOf([inner]);
+  assert.deepEqual(plan.sections, []);
+  assert.deepEqual(ids(plan.frames), ["9:2"]);
+  const f = plan.frames[0];
+  assert.equal(f.section, null);
+  assert.equal(f.png, "Inner.9-2.png");
+  assert.equal(f.json, "Inner.9-2.json");
+  assert.deepEqual([f.x, f.y, f.absoluteX, f.absoluteY], [10, 20, 60, 80]);
+});
+
 test("負例: 非表示の祖先と表示中の子孫を両方選ぶと、どちらも出ず非表示の祖先が除外として返る", () => {
   const child = frame("7:2", "Visible child", { w: 390, h: 844 });
   const hiddenParent = frame("7:1", "Hidden parent", { w: 800, h: 900, hidden: true, children: [child] });

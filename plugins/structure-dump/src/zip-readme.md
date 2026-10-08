@@ -63,6 +63,9 @@ assets/<imageRef>.<拡張子>           image fill の元画像
   直接選ばれたノードの親は、出力に含まれないことがある (フレームの中の部品を選んだ場合など)。
 - `absoluteX` / `absoluteY`: ページ全体での絶対座標。
 
+ここでの「親」は、GROUP と BOOLEAN_OPERATION を飛ばした外側の container (FRAME・COMPONENT・INSTANCE・SECTION・ページ) を指す (Figma の仕様)。
+GROUP の子の `x` / `y` は GROUP ではなく外側の container に対する値なので、`group.x + child.x` のように足さない。
+
 画面どうしの位置関係 (遷移の並び・矢印の向き先) を見るときは、絶対座標を比べる。
 
 ## index.json
@@ -76,7 +79,7 @@ assets/<imageRef>.<拡張子>           image fill の元画像
 ```
 
 - `meta.scope`: `selection` (選択を書き出した) か `page:<ページ名>` (未選択でページ直下を書き出した)。
-- `meta.warnings`: 書き出し中に起きた失敗 (スクリーンショット失敗・画像の取得失敗など)。
+- `meta.warnings`: 書き出し中に起きた失敗 (スクリーンショット失敗・画像の取得失敗など) と、非表示のため除外したノード (`非表示のため除外: <name> (<id>)`)。
 - `sections`: トップレベルのセクション。document 順に並ぶ。
 - `frames`: ZIP 直下に置いた画面フレーム (直接選ばれたノード・ページ直下のノード)。
 
@@ -115,7 +118,7 @@ assets/<imageRef>.<拡張子>           image fill の元画像
 - `section`: そのフレームを置いたセクションのディレクトリ。
   ZIP 直下のフレームでは、Figma 上でセクションの中にあっても `null`。
 - `node`: 画面フレーム自身とその子孫 (下の「ノードの読み方」)。
-  `node.x` / `node.y` は親に対する相対座標。
+  `node.x` / `node.y` は親 (上の「座標」の意味。GROUP は親にならない) に対する相対座標。
 
 ## _section.json
 
@@ -141,9 +144,11 @@ assets/<imageRef>.<拡張子>           image fill の元画像
 - `layoutMode` / `padding: [上,右,下,左]` / `itemSpacing` / `layoutSizingHorizontal` / `layoutSizingVertical`: auto layout。
 - `x` / `y` が付くのは次のどれか。
   それ以外は auto layout が座標を決めるので出ない。
-  - 画面フレームの json の `node` と、`_section.json` の `nodes[]` の各要素 (親に対する相対座標)
+  - 画面フレームの json の `node` と、`_section.json` の `nodes[]` の各要素
   - 親が auto layout でない子
   - `layoutPositioning: "ABSOLUTE"` の子
+- `x` / `y` の値は、どの場合も「座標」の節でいう親 (GROUP と BOOLEAN_OPERATION を飛ばした外側の container) に対する相対座標。
+  GROUP の子の `x` / `y` に GROUP の `x` / `y` を足さない。
 - 色は `#rrggbb` に正規化済み。透明度は `opacity` / `alpha`。
 - `componentName` / `componentSetName` / `props`: インスタンスの由来と variant。
   props のキーは Figma 内部キーの `#` 以降を取り除いた表示名 (`Label#12:34` → `Label`)。
