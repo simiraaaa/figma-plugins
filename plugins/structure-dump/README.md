@@ -22,8 +22,10 @@ Figma への取り込みは[リポルート README の共通手順](../../README
 
 1. 書き出したいセクションやフレームを選択する (未選択なら現在ページ直下の全ノードが対象)
 2. プラグイン「Structure Dump」を実行
-3. 「ZIPをダウンロード」で保存し、展開してコーディング対象のリポジトリに置く
-4. AI には展開したフォルダを渡し、まず `README.md` を読ませる
+3. 「ZIPをダウンロード」で保存し、展開した中身をコーディング対象のリポジトリの専用フォルダ
+   (例: `design-dump/`) に置く。ZIP 直下に `README.md` があるので、リポのルートへ直接展開すると
+   既存の `README.md` と衝突する
+4. AI には展開したフォルダを渡し、まずその中の `README.md` を読ませる
 
 ## ZIP の中身 (schema: dump-v2)
 
@@ -34,7 +36,7 @@ index.json                           セクション → 画面フレームの�
 <セクション>/<フレーム名>.<id>.json   その画面フレーム以下の構造
 <セクション>/_section.json           画面フレームでもセクションでもない子の構造
 <フレーム名>.<id>.png / .json         直接選んだノード・ページ直下のノード (ZIP 直下)
-assets/<imageRef>.<拡張子>           image fill の元画像
+assets/<imageRef>.<拡張子>           image fill の元画像 (index.json の assets から引く)
 ```
 
 - 何が画面フレームになるか、JSON の各キー、ノードの読み方は ZIP 内の `README.md` に書いてある。
@@ -55,12 +57,14 @@ assets/<imageRef>.<拡張子>           image fill の元画像
 - どの種類のノード (GROUP・インスタンス・ベクター等) でも `node.exportAsync` が成功すること
   (失敗は warning に落とし、index.json ではそのフレームを `png` 無しで載せて続行する設計)
 - セクション直下のノードの `x` / `y` がセクションに対する相対座標であること
-- SECTION とその子の `absoluteBoundingBox` がページ全体の絶対座標を返すこと
-  (null のときは `absoluteTransform` の平行移動成分で代用する)
+- SECTION とその子の `absoluteTransform` の平行移動成分が、ノードの原点のページ座標であること
+  (`absoluteX` / `absoluteY` はここから取る)
 - セクション内のノードを、そのセクションを選ばずに直接選んだときも ZIP 直下に置く挙動が
   使い勝手として妥当か
+- 進捗表示 (`progress` メッセージ) が、書き出し中の UI に実際に反映されること
 
-計画 (どのノードをどのパスへ出すか) と JSON 化、ZIP 生成のロジック自体は
+計画 (どのノードをどのパスへ出すか) と JSON 化、ZIP 生成、取得結果の振り分けのロジック自体は
 `tests/structure-dump-*.test.mts` で検証済み (画面フレームの型の判定・ネストしたディレクトリ・
-重複選択の除去・非表示ルートの除外・index.json の形・実物の ZIP リーダーと unzip CLI で開ける・
-壊れたバイト列が CRC で落ちる・剪定規則)。
+重複選択の除去・非表示ルートの除外・ファイル名の正規化・index.json の形と assets の対応表・
+長いパスの検出・実物の ZIP リーダーと unzip CLI で開ける・壊れたバイト列が CRC で落ちる・
+エントリ数の上限・剪定規則)。

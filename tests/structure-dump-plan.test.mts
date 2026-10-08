@@ -20,7 +20,14 @@ const {
   buildFrameJson,
   buildIndex,
   buildSectionJson,
+  dropDescendants,
+  emptyMessage,
+  longPaths,
+  MAX_ZIP_PATH_CHARS,
+  newExportOutput,
   planDump,
+  recordAsset,
+  recordScreenshot,
   safeName,
 } = planDist as unknown as typeof import("../plugins/structure-dump/src/plan.ts");
 
@@ -52,7 +59,8 @@ interface TestNode {
   y: number;
   width: number;
   height: number;
-  absoluteBoundingBox: { x: number; y: number } | null;
+  /** plan は読まない。回転ノードで transform と食い違う値を置き、使っていないことを確かめる */
+  absoluteBoundingBox?: { x: number; y: number };
   absoluteTransform: number[][];
   parent: TestNode | null;
   children: TestNode[];
@@ -64,8 +72,6 @@ interface Spec {
   x?: number;
   y?: number;
   hidden?: boolean;
-  /** absoluteBoundingBox を null にして absoluteTransform からの取得を通す */
-  noBoundingBox?: boolean;
   children?: TestNode[];
 }
 
@@ -79,7 +85,6 @@ function node(type: string, id: string, name: string, spec: Spec): TestNode {
     y: spec.y ?? 0,
     width: spec.w,
     height: spec.h,
-    absoluteBoundingBox: spec.noBoundingBox ? null : { x: 0, y: 0 },
     absoluteTransform: [
       [1, 0, 0],
       [0, 1, 0],
@@ -94,13 +99,12 @@ function node(type: string, id: string, name: string, spec: Spec): TestNode {
 const frame = (id: string, name: string, spec: Spec) => node("FRAME", id, name, spec);
 const section = (id: string, name: string, spec: Spec) => node("SECTION", id, name, spec);
 
-/** 親を辿って絶対座標を埋める (bounding box と transform の両方) */
+/** 親を辿って absoluteTransform の平行移動成分を埋める (回転なし) */
 function page(children: TestNode[]): TestNode {
   const root = node("PAGE", "0:1", "Page 1", { w: 0, h: 0, children });
   const place = (n: TestNode, ox: number, oy: number): void => {
     const ax = ox + n.x;
     const ay = oy + n.y;
-    if (n.absoluteBoundingBox) n.absoluteBoundingBox = { x: ax, y: ay };
     n.absoluteTransform = [
       [1, 0, ax],
       [0, 1, ay],
@@ -305,22 +309,21 @@ test("同名フレームは id で区別され、ZIP 内パスが衝突しない
   );
 });
 
-test("absoluteBoundingBox が null なら absoluteTransform から絶対座標を取る", () => {
-  const p = page([frame("6:1", "Rotated", { w: 390, h: 844, x: 12.345, y: 7, noBoundingBox: true })]);
-  const f = planOf(p.children).frames[0];
-  assert.deepEqual([f.absoluteX, f.absoluteY], [12.35, 7]);
-});
+test("absoluteX/Y は absoluteTransform の平行移動成分 (回転ノードでも親の absoluteX + x と一致し、bbox は使わない)", () => {
+  const rotated = frame("6:2", "Rotated", { w: 390, h: 844, x: 10.004, y: 20 });
+  const sec = section("6:1", "Flow", { w: 2000, h: 1000, x: 50, y: 60, children: [rotated] });
+  page([sec]);
+  // 90 度回転。外接矩形の左上は原点から左へ height ぶんずれる
+  rotated.absoluteTransform = [
+    [0, -1, 60.004],
+    [1, 0, 80],
+  ];
+  rotated.absoluteBoundingBox = { x: 60.004 - 844, y: 80 };
 
-test("absoluteBoundingBox と absoluteTransform が食い違うときは bounding box を使う", () => {
-  const p = page([frame("6:2", "Rotated", { w: 390, h: 844, x: 100, y: 200 })]);
-  const target = p.children[0];
-  target.absoluteBoundingBox = { x: 90.5, y: 180.25 };
-  const f = planOf(p.children).frames[0];
-  assert.deepEqual(target.absoluteTransform, [
-    [1, 0, 100],
-    [0, 1, 200],
-  ]);
-  assert.deepEqual([f.absoluteX, f.absoluteY], [90.5, 180.25]);
+  const s = planOf([sec]).sections[0];
+  const f = s.frames[0];
+  assert.deepEqual([f.absoluteX, f.absoluteY], [60, 80]);
+  assert.deepEqual([s.absoluteX + f.x, s.absoluteY + f.y], [f.absoluteX, f.absoluteY]);
 });
 
 test("index.json・画面フレーム json・_section.json の形", () => {
@@ -359,7 +362,9 @@ test("index.json・画面フレーム json・_section.json の形", () => {
     warnings: ["スクリーンショット失敗: Broken (2:2): x"],
   };
 
-  assert.deepEqual(buildIndex(plan, meta, written), {
+  const assets = new Map([["abc123", "assets/abc123.png"]]);
+
+  assert.deepEqual(buildIndex(plan, meta, written, assets), {
     meta: { ...meta, schemaVersion: "dump-v2" },
     sections: [
       {
@@ -442,6 +447,7 @@ test("index.json・画面フレーム json・_section.json の形", () => {
         height: 100,
       },
     ],
+    assets: { abc123: "assets/abc123.png" },
   });
 
   const home: FramePlan<TestNode> = plan.sections[0].frames[0];
@@ -473,4 +479,162 @@ test("index.json・画面フレーム json・_section.json の形", () => {
     },
     nodes: [memo],
   });
+});
+
+test("safeName: 制御文字は - に置き換える", () => {
+  assert.equal(safeName("a\u0001b\u001fc\u007fd"), "a-b-c-d");
+  assert.equal(safeName("tab\tand\u0000nul"), "tab-and-nul");
+});
+
+test("safeName: 先頭の . を取り、隠しファイル・隠しディレクトリにしない", () => {
+  assert.equal(safeName(".hidden"), "hidden");
+  assert.equal(safeName("...dots"), "dots");
+  assert.equal(safeName(". leading space"), "leading-space");
+});
+
+test("safeName: Windows の予約名は先頭に _ を付ける (大文字小文字を問わない)", () => {
+  for (const reserved of ["CON", "prn", "Aux", "NUL", "COM1", "com9", "LPT1", "lpt9"]) {
+    assert.equal(safeName(reserved), `_${reserved}`, reserved);
+  }
+  for (const ordinary of ["COM10", "CONSOLE", "LPT0", "NULL", "AUX-1"]) {
+    assert.equal(safeName(ordinary), ordinary, ordinary);
+  }
+});
+
+test("safeName: 空の名前と記号だけの名前は node になる", () => {
+  for (const name of ["", "   ", "///", '*?:"<>|', "...", ".-.-"]) {
+    assert.equal(safeName(name), "node", JSON.stringify(name));
+  }
+});
+
+test("dropDescendants: 祖先の parent が循環していても停止し、ノードを残す", () => {
+  const p = node("FRAME", "c:1", "p", { w: 1, h: 1 });
+  const q = node("FRAME", "c:2", "q", { w: 1, h: 1 });
+  const x = frame("c:3", "x", { w: 390, h: 844 });
+  x.parent = p;
+  p.parent = q;
+  q.parent = p;
+  assert.deepEqual(ids(dropDescendants([x])), ["c:3"]);
+});
+
+test("非表示のセクションの中の表示中の子は、ネストしていてもどこにも出ない", () => {
+  const visibleChild = frame("d:3", "Visible", { w: 390, h: 844 });
+  const hiddenInner = section("d:2", "Hidden inner", {
+    w: 1000,
+    h: 1000,
+    hidden: true,
+    children: [visibleChild],
+  });
+  const outer = section("d:1", "Outer", { w: 3000, h: 3000, children: [hiddenInner] });
+  const hiddenTop = section("d:4", "Hidden top", {
+    w: 1000,
+    h: 1000,
+    y: 4000,
+    hidden: true,
+    children: [frame("d:5", "Visible too", { w: 390, h: 844 })],
+  });
+  const p = page([outer, hiddenTop]);
+
+  const plan = planOf(p.children);
+  assert.deepEqual(ids(allSections(plan)), ["d:1"]);
+  assert.deepEqual(allFrames(plan), []);
+  assert.deepEqual(plan.sections[0].others, []);
+  assert.deepEqual(ids(plan.hiddenRoots), ["d:4"]);
+});
+
+test("emptyMessage: 出すものがあれば null、無ければ非表示の有無と選択の有無で出し分ける", () => {
+  const shown = frame("e:1", "Shown", { w: 390, h: 844 });
+  const hidden = frame("e:2", "Hidden", { w: 390, h: 844, hidden: true });
+  page([shown, hidden]);
+
+  assert.equal(emptyMessage(planOf([shown, hidden]), true), null);
+  assert.equal(emptyMessage(planOf([hidden]), true), "選択したノードはすべて非表示です");
+  assert.equal(emptyMessage(planOf([hidden]), false), "ページ直下のノードはすべて非表示です");
+  assert.equal(
+    emptyMessage(planOf([]), false),
+    "対象がありません (何かを選択するか、空でないページで実行してください)"
+  );
+  const emptySection = section("e:3", "Empty", { w: 100, h: 100 });
+  page([emptySection]);
+  assert.equal(emptyMessage(planOf([emptySection]), true), null);
+});
+
+test("longPaths: 上限を超えるセクション・画面フレーム・_section.json のパスを文字数付きで返す", () => {
+  const longName = "あ".repeat(40);
+  const deep = section("f:3", longName, {
+    w: 1000,
+    h: 1000,
+    children: [
+      frame("f:4", longName, { w: 390, h: 844 }),
+      node("TEXT", "f:5", "memo", { w: 10, h: 10 }),
+    ],
+  });
+  const mid = section("f:2", longName, { w: 2000, h: 2000, children: [deep] });
+  const top = section("f:1", longName, { w: 3000, h: 3000, children: [mid] });
+  const short = frame("f:6", "Short", { w: 390, h: 844, y: 5000 });
+  const p = page([top, short]);
+  const plan = planOf(p.children);
+
+  const dirOf = (depth: number) =>
+    Array.from({ length: depth }, (_, i) => `${longName}.f-${i + 1}`).join("/");
+  const sectionDir = dirOf(3);
+  const framePng = `${sectionDir}/${longName}.f-4.png`;
+  const frameJson = `${sectionDir}/${longName}.f-4.json`;
+  const sectionJson = `${sectionDir}/_section.json`;
+  const entry = (path: string) => ({ path, length: Array.from(path).length });
+
+  assert.equal(Array.from(dirOf(2)).length <= 130, true);
+  assert.deepEqual(longPaths(plan, 130), [
+    entry(sectionDir),
+    entry(framePng),
+    entry(frameJson),
+    entry(sectionJson),
+  ]);
+  assert.deepEqual(longPaths(plan, 1000), []);
+  assert.equal(MAX_ZIP_PATH_CHARS, 200);
+});
+
+const PNG_BYTES = new Uint8Array([0x89, 0x50, 0x4e, 0x47, 1, 2, 3]);
+
+test("recordScreenshot: 成功は entry と writtenPngs、失敗と空の PNG は warning だけ", () => {
+  const out = newExportOutput(["既存"]);
+  const ok = { id: "1:1", name: "Home", png: "Home.1-1.png" };
+  const failed = { id: "1:2", name: "Broken", png: "Broken.1-2.png" };
+  const empty = { id: "1:3", name: "Empty", png: "Empty.1-3.png" };
+
+  recordScreenshot(out, ok, { ok: true, bytes: PNG_BYTES });
+  recordScreenshot(out, failed, { ok: false, error: new Error("render failed") });
+  recordScreenshot(out, empty, { ok: true, bytes: new Uint8Array(0) });
+
+  assert.deepEqual(out.entries.map((e) => e.name), ["Home.1-1.png"]);
+  assert.deepEqual([...out.writtenPngs], ["Home.1-1.png"]);
+  assert.deepEqual(out.warnings, [
+    "既存",
+    "スクリーンショット失敗: Broken (1:2): render failed",
+    "スクリーンショット失敗: Empty (1:3): 空の PNG",
+  ]);
+});
+
+test("recordAsset: 成功は assets 対応表に入り、失敗と画像なしはキーが無く warning に残る", () => {
+  const out = newExportOutput();
+  recordAsset(out, "aa11", { ok: true, bytes: PNG_BYTES });
+  recordAsset(out, "bb22", { ok: false, error: "network" });
+  recordAsset(out, "cc33", null);
+
+  assert.deepEqual(out.entries.map((e) => e.name), ["assets/aa11.png"]);
+  assert.deepEqual(Object.fromEntries(out.writtenAssets), { aa11: "assets/aa11.png" });
+  assert.deepEqual(out.warnings, [
+    "画像の取得に失敗: imageRef bb22: network",
+    "画像が見つかりません: imageRef cc33",
+  ]);
+
+  const shown = frame("g:1", "Shown", { w: 390, h: 844 });
+  page([shown]);
+  const index = buildIndex(
+    planOf([shown]),
+    { fileName: "f", pluginVersion: "0", exportedAt: "t", scope: "s", warnings: out.warnings },
+    out.writtenPngs,
+    out.writtenAssets
+  );
+  assert.deepEqual(index.assets, { aa11: "assets/aa11.png" });
 });

@@ -33,10 +33,23 @@
 let payload = null;
 const PREVIEW_LIMIT = 20000;
 
+function setStatus(text) {
+  document.getElementById("status").textContent = text;
+}
+
+function failureDetail(e) {
+  return e instanceof Error ? e.message : String(e);
+}
+
 onmessage = (event) => {
   const msg = event.data.pluginMessage;
   if (!msg) return;
-  document.getElementById("status").textContent = "";
+
+  if (msg.type === "progress") {
+    setStatus(`書き出し中… ${msg.done}/${msg.total} ${msg.name}`);
+    return;
+  }
+  setStatus("");
 
   if (msg.type === "error") {
     document.getElementById("error").textContent = msg.message;
@@ -68,24 +81,39 @@ onmessage = (event) => {
 };
 
 document.getElementById("download-zip").onclick = () => {
-  // postMessage 越しに Uint8Array が別形に落ちた場合に備えて包み直す
-  const bytes =
-    payload.zip instanceof Uint8Array ? payload.zip : new Uint8Array(payload.zip);
-  const blob = new Blob([bytes], { type: "application/zip" });
-  const a = document.createElement("a");
-  a.href = URL.createObjectURL(blob);
-  a.download = payload.zipName;
-  a.click();
-  URL.revokeObjectURL(a.href);
+  try {
+    // postMessage 越しに Uint8Array が別形に落ちた場合に備えて包み直す
+    const bytes =
+      payload.zip instanceof Uint8Array ? payload.zip : new Uint8Array(payload.zip);
+    const blob = new Blob([bytes], { type: "application/zip" });
+    const a = document.createElement("a");
+    a.href = URL.createObjectURL(blob);
+    a.download = payload.zipName;
+    a.click();
+    URL.revokeObjectURL(a.href);
+    setStatus(`ダウンロードを開始しました: ${payload.zipName}`);
+  } catch (e) {
+    setStatus(`ダウンロードに失敗しました: ${failureDetail(e)}`);
+  }
 };
 
 document.getElementById("copy-json").onclick = () => {
   const ta = document.createElement("textarea");
-  ta.value = payload.indexText;
-  document.body.appendChild(ta);
-  ta.select();
-  document.execCommand("copy");
-  document.body.removeChild(ta);
+  try {
+    ta.value = payload.indexText;
+    document.body.appendChild(ta);
+    ta.select();
+    const copied = document.execCommand("copy");
+    setStatus(
+      copied
+        ? "index.json をコピーしました"
+        : "index.json のコピーに失敗しました (ブラウザがコピーを拒否しました)"
+    );
+  } catch (e) {
+    setStatus(`index.json のコピーに失敗しました: ${failureDetail(e)}`);
+  } finally {
+    if (ta.parentNode) ta.parentNode.removeChild(ta);
+  }
 };
 </script>
 </body>

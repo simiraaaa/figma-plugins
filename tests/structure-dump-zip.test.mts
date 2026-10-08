@@ -94,6 +94,13 @@ test("中央ディレクトリの version made by が Unix (create_system=3)", (
   assert.equal(out.toString().trim(), "3");
 });
 
+test("エントリが 65535 件を超えると壊れた ZIP を作らずに Error を投げる", () => {
+  const empty = new Uint8Array(0);
+  const entries = Array.from({ length: 0x10000 }, (_, i) => ({ name: `${i}`, data: empty }));
+  assert.throws(() => buildZip(entries), /65535/);
+  assert.doesNotThrow(() => buildZip(entries.slice(0, 0xffff)));
+});
+
 test("負例: 内容が壊れた ZIP は CRC 検査で落ちる", () => {
   const zip = buildZip([{ name: "structure.json", data: utf8Encode('{"a":1}') }]);
   // local header (30 bytes) + name (14 bytes) の直後 = 格納データの先頭を破壊

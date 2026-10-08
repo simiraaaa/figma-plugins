@@ -71,7 +71,15 @@ const METHOD_STORED = 0;
 /** 1980-01-01 (DOS date の最小値)。生成日時は meta 側に持つため固定でよい */
 const DOS_DATE_1980_01_01 = 0x21;
 
+/** EOCD のエントリ数は 16 bit。超えると件数が切り詰められた壊れた ZIP になる (ZIP64 は未対応) */
+const MAX_ENTRIES = 0xffff;
+
 export function buildZip(entries: readonly ZipEntry[]): Uint8Array {
+  if (entries.length > MAX_ENTRIES) {
+    throw new Error(
+      `ZIP のエントリが多すぎます (${entries.length} 件。上限 ${MAX_ENTRIES} 件)`
+    );
+  }
   const located = entries.map((entry) => ({
     nameBytes: utf8Encode(entry.name),
     data: entry.data,
