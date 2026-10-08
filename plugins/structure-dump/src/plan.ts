@@ -88,8 +88,16 @@ export interface DumpPlan<T extends PlanNode> {
 // ---------------------------------------------------------------------------
 
 const UNSAFE_NAME_CHARS = /[\/\\:*?"<>|\s\u0000-\u001f\u007f]+/g;
-/** Windows は拡張子付き (`CON.1-2.png`) でも予約名として扱う */
 const WINDOWS_RESERVED_NAME = /^(con|prn|aux|nul|com[1-9]|lpt[1-9])$/i;
+
+/**
+ * Windows は拡張子付き (`CON.notes`・`CON.1-2.png`) でも予約名として扱うので、
+ * 最初のドットより前 (末尾の空白・ドットを除く) で判定する
+ */
+function isWindowsReservedName(name: string): boolean {
+  const stem = name.split(".")[0].replace(/[ .]+$/, "");
+  return WINDOWS_RESERVED_NAME.test(stem);
+}
 
 /** ZIP 内・展開後のファイルシステム双方で安全な名前にする (Windows 含む) */
 export function safeName(name: string): string {
@@ -98,7 +106,7 @@ export function safeName(name: string): string {
   // UTF-16 単位で切るとサロゲートペアが割れ、ZIP に不正な UTF-8 の名前が入る
   const trimmed = Array.from(cleaned).slice(0, 40).join("");
   if (trimmed.length === 0) return "node";
-  return WINDOWS_RESERVED_NAME.test(trimmed) ? `_${trimmed}` : trimmed;
+  return isWindowsReservedName(trimmed) ? `_${trimmed}` : trimmed;
 }
 
 /** ノード ID ("123:456") や imageRef をファイル名に使える形へ */
@@ -479,6 +487,8 @@ export function recordAsset(
     out.warnings.push(`画像が見つかりません: imageRef ${imageRef}`);
   } else if (!result.ok) {
     out.warnings.push(`画像の取得に失敗: imageRef ${imageRef}: ${errorDetail(result.error)}`);
+  } else if (result.bytes.length === 0) {
+    out.warnings.push(`画像の取得に失敗: imageRef ${imageRef}: 空のデータ`);
   } else {
     const path = `assets/${safeId(imageRef)}.${imageExtension(result.bytes)}`;
     out.entries.push({ name: path, data: result.bytes });

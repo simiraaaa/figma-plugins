@@ -29,7 +29,7 @@ assets/<imageRef>.<拡張子>           image fill の元画像 (index.json の 
   ネストしたセクションはディレクトリもネストする (`Flow-A.1-2/Sub.3-4/...`)。
 - 名前の中の空白・制御文字と `/ \ : * ? " < > |` は `-` に置き換え (連続は 1 つにまとめる)、40 字で切る。
   先頭の `.` は取る。
-  Windows の予約名 (`CON`・`PRN`・`AUX`・`NUL`・`COM1`〜`COM9`・`LPT1`〜`LPT9`) は先頭に `_` を付ける。
+  最初の `.` より前が Windows の予約名 (`CON`・`PRN`・`AUX`・`NUL`・`COM1`〜`COM9`・`LPT1`〜`LPT9`) なら、先頭に `_` を付ける (`CON.notes` → `_CON.notes`)。
   空になった名前は `node` にする。
   id の `:` などは `-` に置き換える (`12:34` → `12-34`)。
   同名のフレームも id で区別されるので、ファイル名は衝突しない。
@@ -66,7 +66,8 @@ assets/<imageRef>.<拡張子>           image fill の元画像 (index.json の 
   直接選ばれたノードの親は、出力に含まれないことがある (フレームの中の部品を選んだ場合など)。
 - `absoluteX` / `absoluteY`: ノードの原点 (回転前の左上) のページ座標。
   回転したノードでも、外接矩形の左上ではない。
-  そのため、回転していても「親の `absoluteX` + `x` = `absoluteX`」が成り立つ。
+  そのため、ノード自身が回転していても「親の `absoluteX` + `x` = `absoluteX`」が成り立つ。
+  親 (セクションなど) が回転している場合は、`x` / `y` が親の回転した座標系での値になるので、この式は成り立たない。
 
 ここでの「親」は、GROUP と BOOLEAN_OPERATION を飛ばした外側の container (FRAME・COMPONENT・COMPONENT_SET・INSTANCE・SECTION・ページ) を指す (Figma の仕様)。
 GROUP の子の `x` / `y` は GROUP ではなく外側の container に対する値なので、`group.x + child.x` のように足さない。

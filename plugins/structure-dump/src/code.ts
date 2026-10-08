@@ -52,6 +52,12 @@ function jsonEntry(name: string, value: unknown): ZipEntry {
   return { name, data: utf8Encode(JSON.stringify(value, null, 2)) };
 }
 
+type ProgressPhase = "frames" | "sections" | "assets";
+
+function postProgress(phase: ProgressPhase, done: number, total: number, name?: string): void {
+  figma.ui.postMessage({ type: "progress", phase, done, total, name });
+}
+
 async function fetchBytes(get: () => Promise<Uint8Array>): Promise<FetchResult> {
   try {
     return { ok: true, bytes: await get() };
@@ -121,20 +127,24 @@ async function run(): Promise<void> {
       })
     );
     recordScreenshot(out, frame, shot);
-    figma.ui.postMessage({ type: "progress", done: i + 1, total: frames.length, name: frame.name });
+    postProgress("frames", i + 1, frames.length, frame.name);
   }
 
-  for (const section of sections) {
-    if (section.sectionJson === undefined) continue;
+  const sectionsWithJson = sections.filter((section) => section.sectionJson !== undefined);
+  for (let i = 0; i < sectionsWithJson.length; i += 1) {
+    const section = sectionsWithJson[i];
     const nodes: DumpNode[] = [];
     for (const node of section.others) {
       nodes.push(await serialize(node));
     }
-    out.entries.push(jsonEntry(section.sectionJson, buildSectionJson(section, nodes)));
+    out.entries.push(jsonEntry(section.sectionJson as string, buildSectionJson(section, nodes)));
+    postProgress("sections", i + 1, sectionsWithJson.length);
   }
 
   // image fill の元画像。index.json の assets で imageRef → ZIP 内パスを引けるようにする
-  for (const hash of imageHashes) {
+  const hashes = Array.from(imageHashes);
+  for (let i = 0; i < hashes.length; i += 1) {
+    const hash = hashes[i];
     let result: FetchResult | null;
     try {
       const image = figma.getImageByHash(hash);
@@ -143,6 +153,7 @@ async function run(): Promise<void> {
       result = { ok: false, error };
     }
     recordAsset(out, hash, result);
+    postProgress("assets", i + 1, hashes.length);
   }
 
   const scope =

@@ -46,7 +46,10 @@ onmessage = (event) => {
   if (!msg) return;
 
   if (msg.type === "progress") {
-    setStatus(`書き出し中… ${msg.done}/${msg.total} ${msg.name}`);
+    const count = `${msg.done}/${msg.total}`;
+    if (msg.phase === "frames") setStatus(`書き出し中… 画面 ${count} ${msg.name}`);
+    else if (msg.phase === "sections") setStatus(`書き出し中… セクション ${count}`);
+    else if (msg.phase === "assets") setStatus(`書き出し中… 画像 ${count}`);
     return;
   }
   setStatus("");

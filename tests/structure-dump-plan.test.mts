@@ -496,9 +496,16 @@ test("safeName: Windows の予約名は先頭に _ を付ける (大文字小文
   for (const reserved of ["CON", "prn", "Aux", "NUL", "COM1", "com9", "LPT1", "lpt9"]) {
     assert.equal(safeName(reserved), `_${reserved}`, reserved);
   }
-  for (const ordinary of ["COM10", "CONSOLE", "LPT0", "NULL", "AUX-1"]) {
+  for (const ordinary of ["COM10", "CONSOLE", "LPT0", "NULL", "AUX-1", "notes.CON"]) {
     assert.equal(safeName(ordinary), ordinary, ordinary);
   }
+});
+
+test("safeName: 最初のドットより前が予約名なら、拡張子が付いていても _ を付ける", () => {
+  assert.equal(safeName("CON.notes"), "_CON.notes");
+  assert.equal(safeName("nul.backup"), "_nul.backup");
+  assert.equal(safeName("Com1.a.b"), "_Com1.a.b");
+  assert.equal(safeName("CONSOLE.notes"), "CONSOLE.notes");
 });
 
 test("safeName: 空の名前と記号だけの名前は node になる", () => {
@@ -620,12 +627,14 @@ test("recordAsset: 成功は assets 対応表に入り、失敗と画像なし�
   recordAsset(out, "aa11", { ok: true, bytes: PNG_BYTES });
   recordAsset(out, "bb22", { ok: false, error: "network" });
   recordAsset(out, "cc33", null);
+  recordAsset(out, "dd44", { ok: true, bytes: new Uint8Array(0) });
 
   assert.deepEqual(out.entries.map((e) => e.name), ["assets/aa11.png"]);
   assert.deepEqual(Object.fromEntries(out.writtenAssets), { aa11: "assets/aa11.png" });
   assert.deepEqual(out.warnings, [
     "画像の取得に失敗: imageRef bb22: network",
     "画像が見つかりません: imageRef cc33",
+    "画像の取得に失敗: imageRef dd44: 空のデータ",
   ]);
 
   const shown = frame("g:1", "Shown", { w: 390, h: 844 });
