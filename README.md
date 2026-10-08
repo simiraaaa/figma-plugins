@@ -6,7 +6,7 @@
 
 | プラグイン | 用途 |
 |---|---|
-| [Structure Dump](plugins/structure-dump/) | 選択フレームの構造 JSON + スクリーンショットを 1 つの ZIP で書き出す |
+| [Structure Dump](plugins/structure-dump/) | 選択範囲をセクション・画面フレームごとの構造 JSON + スクリーンショットに分け、1 つの ZIP で書き出す |
 | [Component Spec](plugins/component-spec/) | 選択中のコンポーネント群から variant / props の仕様 JSON を書き出す |
 
 ## セットアップ

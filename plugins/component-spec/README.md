@@ -41,7 +41,7 @@ zip で配布する場合の非開発者向けインストール手順は [INSTA
 
 ```jsonc
 {
-  "meta": { "fileName": "...", "pluginVersion": "0.1.0", "schemaVersion": "component-spec-v1",
+  "meta": { "fileName": "...", "pluginVersion": "0.2.0", "schemaVersion": "component-spec-v1",
             "exportedAt": "...", "warnings": [] },
   "components": [
     {

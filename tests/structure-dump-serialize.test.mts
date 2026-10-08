@@ -1,5 +1,5 @@
 /**
- * structure-dump serializer (dump-v1) の検査
+ * structure-dump serializer の検査
  *
  * 実行: npm test
  * Figma API 非依存の純関数なので、素のオブジェクトでツリーを組んで
@@ -16,7 +16,7 @@ import type {
 } from "../plugins/structure-dump/src/serialize.ts";
 
 /**
- * DumpNode の追加フィールドは Record<string, unknown>(dump-v1 は形を固定しない)。
+ * DumpNode の追加フィールドは Record<string, unknown>(serializer は形を固定しない)。
  * この検査が入れ子を辿るフィールドにだけ形を与える。
  * 省略可にしないのは、無ければ検査が落ちるべき前提だから。
  */
@@ -36,8 +36,9 @@ const { serializeNode } = serializeDist as unknown as {
 
 const MIXED = Symbol("mixed");
 
-function makeCtx(): { ctx: SerializeContext; images: string[] } {
+function makeCtx(): { ctx: SerializeContext; images: string[]; warnings: string[] } {
   const images: string[] = [];
+  const warnings: string[] = [];
   const known: Record<string, string> = { "VariableID:1:2": "color/primary" };
   return {
     ctx: {
@@ -46,8 +47,12 @@ function makeCtx(): { ctx: SerializeContext; images: string[] } {
       registerImage: (hash) => {
         images.push(hash);
       },
+      warn: (message) => {
+        warnings.push(message);
+      },
     },
     images,
+    warnings,
   };
 }
 
@@ -251,7 +256,7 @@ test("effects と mixed cornerRadius が正規化される", async () => {
 });
 
 test("壊れたComponentSet(variantProperties が例外)でも中止せず extractionError を記録する", async () => {
-  const { ctx } = makeCtx();
+  const { ctx, warnings } = makeCtx();
   const brokenComponent = {
     id: "8:1",
     name: "Density=Compact, State=Default",
@@ -267,10 +272,12 @@ test("壊れたComponentSet(variantProperties が例外)でも中止せず extra
   assert.equal(out.componentSetName, "Input type=text");
   assert.match(out.extractionError, /existing errors/);
   assert.equal(out.props, undefined);
+  assert.equal(warnings.length, 1);
+  assert.match(warnings[0], /Density=Compact, State=Default \(8:1\).*existing errors/);
 });
 
 test("壊れたComponentSet参照のINSTANCE(componentProperties が例外)でも中止せず記録する", async () => {
-  const { ctx } = makeCtx();
+  const { ctx, warnings } = makeCtx();
   const brokenInstance = {
     id: "8:2",
     name: "Input type=text",
@@ -283,4 +290,22 @@ test("壊れたComponentSet参照のINSTANCE(componentProperties が例外)で�
   });
   const out = await serializeNode(brokenInstance, ctx);
   assert.match(out.extractionError, /existing errors/);
+  assert.equal(warnings.length, 1);
+  assert.match(warnings[0], /Input type=text \(8:2\).*existing errors/);
+});
+
+test("INSTANCE の main component 取得が失敗しても中止せず warning に残す", async () => {
+  const { ctx, warnings } = makeCtx();
+  const remoteInstance = {
+    id: "8:3",
+    name: "Remote button",
+    type: "INSTANCE",
+    getMainComponentAsync: async () => {
+      throw new Error("library not available");
+    },
+  };
+  const out = await serializeNode(remoteInstance, ctx);
+  assert.equal(out.componentName, undefined);
+  assert.equal(warnings.length, 1);
+  assert.match(warnings[0], /Remote button \(8:3\).*library not available/);
 });

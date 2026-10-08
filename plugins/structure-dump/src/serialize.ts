@@ -1,5 +1,5 @@
 /**
- * Figma ノードツリー → AI 可読の構造 JSON (schema: dump-v1)
+ * Figma ノードツリー → AI 可読の構造 JSON (ノード 1 つぶんの形。schema の版は plan.ts が持つ)
  *
  * Figma API 非依存の純関数 (figma グローバルを参照しない)。
  * mixed 番兵・Variables 解決・image fill の収集は ctx で注入し、
@@ -15,6 +15,12 @@ export interface SerializeContext {
   resolveVariableName(id: string): string;
   /** image fill の imageRef を収集する (bytes の取得と書き出しは呼び出し側) */
   registerImage(hash: string): void;
+  /** 中止せずに続行した失敗を、利用者に見える warning として残す */
+  warn(message: string): void;
+}
+
+function errorMessage(e: unknown): string {
+  return e instanceof Error ? e.message : String(e);
 }
 
 export type DumpNode = { id: string; name: string; type: string } & Record<string, unknown>;
@@ -229,7 +235,12 @@ function propKeyName(key: string): string {
   return hash === -1 ? key : key.slice(0, hash);
 }
 
-async function serializeComponentInfo(node: AnyNode, out: DumpNode): Promise<void> {
+async function serializeComponentInfo(
+  node: AnyNode,
+  out: DumpNode,
+  ctx: SerializeContext
+): Promise<void> {
+  const label = `${node.name} (${node.id})`;
   if (node.type === "INSTANCE") {
     if (typeof node.getMainComponentAsync === "function") {
       try {
@@ -244,6 +255,7 @@ async function serializeComponentInfo(node: AnyNode, out: DumpNode): Promise<voi
         }
       } catch (e) {
         // remote component 等で失敗しても構造出力は続行
+        ctx.warn(`main component の取得に失敗: ${label}: ${errorMessage(e)}`);
       }
     }
     try {
@@ -259,7 +271,8 @@ async function serializeComponentInfo(node: AnyNode, out: DumpNode): Promise<voi
       }
     } catch (e) {
       // componentProperties が無い、または参照先ComponentSetが壊れている。中止せず記録
-      out.extractionError = e instanceof Error ? e.message : String(e);
+      out.extractionError = errorMessage(e);
+      ctx.warn(`componentProperties の読み取りに失敗: ${label}: ${out.extractionError}`);
     }
   }
 
@@ -273,7 +286,8 @@ async function serializeComponentInfo(node: AnyNode, out: DumpNode): Promise<voi
         if (vp && Object.keys(vp).length > 0) out.props = vp;
       } catch (e) {
         // ComponentSetが壊れている(バリアント重複等)と読み取りが例外になる。中止せず記録
-        out.extractionError = e instanceof Error ? e.message : String(e);
+        out.extractionError = errorMessage(e);
+        ctx.warn(`variantProperties の読み取りに失敗: ${label}: ${out.extractionError}`);
       }
     }
   }
@@ -310,7 +324,7 @@ export async function serializeNode(
   const node = input as AnyNode;
   const out: DumpNode = { id: node.id, name: node.name, type: node.type };
 
-  await serializeComponentInfo(node, out);
+  await serializeComponentInfo(node, out, ctx);
 
   // Auto Layout
   const hasAutoLayout = typeof node.layoutMode === "string" && node.layoutMode !== "NONE";

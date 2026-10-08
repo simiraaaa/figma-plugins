@@ -23,9 +23,9 @@
     <h2>ダウンロード</h2>
     <div>
       <button id="download-zip">ZIPをダウンロード</button>
-      <button id="copy-json">JSONをコピー</button>
+      <button id="copy-json">index.jsonをコピー</button>
     </div>
-    <h2>structure.json プレビュー</h2>
+    <h2>index.json プレビュー</h2>
     <pre id="json"></pre>
   </div>
 
@@ -33,10 +33,26 @@
 let payload = null;
 const PREVIEW_LIMIT = 20000;
 
+function setStatus(text) {
+  document.getElementById("status").textContent = text;
+}
+
+function failureDetail(e) {
+  return e instanceof Error ? e.message : String(e);
+}
+
 onmessage = (event) => {
   const msg = event.data.pluginMessage;
   if (!msg) return;
-  document.getElementById("status").textContent = "";
+
+  if (msg.type === "progress") {
+    const count = `${msg.done}/${msg.total}`;
+    if (msg.phase === "frames") setStatus(`書き出し中… 画面 ${count} ${msg.name}`);
+    else if (msg.phase === "sections") setStatus(`書き出し中… セクション ${count}`);
+    else if (msg.phase === "assets") setStatus(`書き出し中… 画像 ${count}`);
+    return;
+  }
+  setStatus("");
 
   if (msg.type === "error") {
     document.getElementById("error").textContent = msg.message;
@@ -49,8 +65,9 @@ onmessage = (event) => {
 
   const m = payload.meta;
   document.getElementById("meta").textContent =
-    `${m.fileName} / ${m.scope} / 対象 ${m.targetCount} 件 / ` +
-    `スクリーンショット ${m.screenshotCount} 枚 / 画像アセット ${m.assetCount} 件 / ` +
+    `${m.fileName} / ${m.scope} / ` +
+    `画面フレーム ${m.frameCount} 枚 (スクリーンショット ${m.screenshotCount} 枚) / ` +
+    `セクション ${m.sectionCount} 件 / 画像アセット ${m.assetCount} 件 / ` +
     `ZIP ${(m.zipBytes / 1024).toFixed(0)} KB`;
 
   const warnEl = document.getElementById("warnings");
@@ -60,31 +77,46 @@ onmessage = (event) => {
   }
 
   const preview =
-    payload.jsonText.length > PREVIEW_LIMIT
-      ? payload.jsonText.slice(0, PREVIEW_LIMIT) + "\n…(省略。全文はZIP内のstructure.json)"
-      : payload.jsonText;
+    payload.indexText.length > PREVIEW_LIMIT
+      ? payload.indexText.slice(0, PREVIEW_LIMIT) + "\n…(省略。全文はZIP内のindex.json)"
+      : payload.indexText;
   document.getElementById("json").textContent = preview;
 };
 
 document.getElementById("download-zip").onclick = () => {
-  // postMessage 越しに Uint8Array が別形に落ちた場合に備えて包み直す
-  const bytes =
-    payload.zip instanceof Uint8Array ? payload.zip : new Uint8Array(payload.zip);
-  const blob = new Blob([bytes], { type: "application/zip" });
-  const a = document.createElement("a");
-  a.href = URL.createObjectURL(blob);
-  a.download = payload.zipName;
-  a.click();
-  URL.revokeObjectURL(a.href);
+  try {
+    // postMessage 越しに Uint8Array が別形に落ちた場合に備えて包み直す
+    const bytes =
+      payload.zip instanceof Uint8Array ? payload.zip : new Uint8Array(payload.zip);
+    const blob = new Blob([bytes], { type: "application/zip" });
+    const a = document.createElement("a");
+    a.href = URL.createObjectURL(blob);
+    a.download = payload.zipName;
+    a.click();
+    URL.revokeObjectURL(a.href);
+    setStatus(`ダウンロードを開始しました: ${payload.zipName}`);
+  } catch (e) {
+    setStatus(`ダウンロードに失敗しました: ${failureDetail(e)}`);
+  }
 };
 
 document.getElementById("copy-json").onclick = () => {
   const ta = document.createElement("textarea");
-  ta.value = payload.jsonText;
-  document.body.appendChild(ta);
-  ta.select();
-  document.execCommand("copy");
-  document.body.removeChild(ta);
+  try {
+    ta.value = payload.indexText;
+    document.body.appendChild(ta);
+    ta.select();
+    const copied = document.execCommand("copy");
+    setStatus(
+      copied
+        ? "index.json をコピーしました"
+        : "index.json のコピーに失敗しました (ブラウザがコピーを拒否しました)"
+    );
+  } catch (e) {
+    setStatus(`index.json のコピーに失敗しました: ${failureDetail(e)}`);
+  } finally {
+    if (ta.parentNode) ta.parentNode.removeChild(ta);
+  }
 };
 </script>
 </body>

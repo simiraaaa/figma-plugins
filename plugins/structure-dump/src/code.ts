@@ -2,17 +2,34 @@
  * Structure Dump - plugin main
  *
  * 特定の UI ライブラリに依存しない汎用の構造書き出しプラグイン。
- * 選択ノード (未選択なら現在ページ) を走査して構造 JSON を作り、
- * トップレベル各ノードのスクリーンショット PNG と image fill の元画像を
- * 1 つの ZIP (無圧縮) に束ねて UI へ渡す。コード生成はしない (AI 側の仕事)。
+ * 選択ノード (未選択なら現在ページ直下) をセクション単位・画面フレーム単位に分け、
+ * 画面フレームごとの構造 JSON とスクリーンショット PNG、image fill の元画像、
+ * 読み方の README を 1 つの ZIP (無圧縮) に束ねて UI へ渡す。コード生成はしない (AI 側の仕事)。
  */
 
 import { sortInDocumentOrder } from "../../../shared/nodeOrder";
 import { DumpNode, SerializeContext, serializeNode } from "./serialize";
+import {
+  allFrames,
+  allSections,
+  buildFrameJson,
+  buildIndex,
+  buildSectionJson,
+  emptyMessage,
+  errorDetail,
+  FetchResult,
+  longPaths,
+  MAX_ZIP_PATH_CHARS,
+  newExportOutput,
+  planDump,
+  recordAsset,
+  recordScreenshot,
+  safeName,
+} from "./plan";
+import zipReadme from "./zip-readme.md";
 import { buildZip, utf8Encode, ZipEntry } from "./zip";
 
-const PLUGIN_VERSION = "0.1.0";
-const SCHEMA_VERSION = "dump-v1";
+const PLUGIN_VERSION = "0.2.0";
 const SCREENSHOT_SCALE = 1;
 
 // ---------------------------------------------------------------------------
@@ -31,49 +48,27 @@ async function loadVariables(): Promise<void> {
   }
 }
 
-// ---------------------------------------------------------------------------
-// ファイル名
-// ---------------------------------------------------------------------------
-
-/** ZIP 内・展開後のファイルシステム双方で安全な名前にする (Windows 含む) */
-function safeName(name: string): string {
-  const cleaned = name.replace(/[\/\\:*?"<>|\s]+/g, "-").replace(/^-+|-+$/g, "");
-  const trimmed = cleaned.slice(0, 40);
-  return trimmed.length > 0 ? trimmed : "node";
+function jsonEntry(name: string, value: unknown): ZipEntry {
+  return { name, data: utf8Encode(JSON.stringify(value, null, 2)) };
 }
 
-/** ノード ID ("123:456") や imageRef をファイル名に使える形へ */
-function safeId(id: string): string {
-  return id.replace(/[^0-9a-zA-Z]+/g, "-");
+type ProgressPhase = "frames" | "sections" | "assets";
+
+function postProgress(phase: ProgressPhase, done: number, total: number, name?: string): void {
+  figma.ui.postMessage({ type: "progress", phase, done, total, name });
 }
 
-function imageExtension(bytes: Uint8Array): string {
-  if (bytes.length >= 4 && bytes[0] === 0x89 && bytes[1] === 0x50) return "png";
-  if (bytes.length >= 2 && bytes[0] === 0xff && bytes[1] === 0xd8) return "jpg";
-  if (bytes.length >= 3 && bytes[0] === 0x47 && bytes[1] === 0x49 && bytes[2] === 0x46) {
-    return "gif";
+async function fetchBytes(get: () => Promise<Uint8Array>): Promise<FetchResult> {
+  try {
+    return { ok: true, bytes: await get() };
+  } catch (error) {
+    return { ok: false, error };
   }
-  if (
-    bytes.length >= 12 &&
-    bytes[0] === 0x52 &&
-    bytes[1] === 0x49 &&
-    bytes[8] === 0x57 &&
-    bytes[9] === 0x45
-  ) {
-    return "webp";
-  }
-  return "bin";
 }
 
 // ---------------------------------------------------------------------------
 // main
 // ---------------------------------------------------------------------------
-
-interface ScreenshotMeta {
-  id: string;
-  name: string;
-  file: string;
-}
 
 async function run(): Promise<void> {
   figma.showUI(__html__, { width: 480, height: 600 });
@@ -81,19 +76,24 @@ async function run(): Promise<void> {
   await loadVariables();
 
   const selection = figma.currentPage.selection;
-  const targets = sortInDocumentOrder(
-    selection.length > 0 ? selection : figma.currentPage.children
-  ).filter((node) => node.visible);
-
-  if (targets.length === 0) {
-    figma.ui.postMessage({
-      type: "error",
-      message: "対象がありません (何かを選択するか、空でないページで実行してください)",
-    });
+  const plan = planDump(
+    selection.length > 0 ? selection : figma.currentPage.children,
+    sortInDocumentOrder
+  );
+  const empty = emptyMessage(plan, selection.length > 0);
+  if (empty !== null) {
+    figma.ui.postMessage({ type: "error", message: empty });
     return;
   }
+  const frames = allFrames(plan);
+  const sections = allSections(plan);
 
-  const warnings: string[] = [];
+  const out = newExportOutput(
+    plan.hiddenRoots.map((node) => `非表示のため除外: ${node.name} (${node.id})`)
+  );
+  for (const long of longPaths(plan, MAX_ZIP_PATH_CHARS)) {
+    out.warnings.push(`パスが長い (${long.length} 文字): ${long.path}`);
+  }
   const imageHashes = new Set<string>();
   const ctx: SerializeContext = {
     mixed: figma.mixed,
@@ -101,81 +101,97 @@ async function run(): Promise<void> {
     registerImage: (hash) => {
       imageHashes.add(hash);
     },
+    warn: (message) => {
+      out.warnings.push(message);
+    },
   };
 
-  const tree: DumpNode[] = [];
-  for (const node of targets) {
-    tree.push(await serializeNode(node, ctx));
-  }
-
-  // スクリーンショット: トップレベル各ノードを PNG で書き出し、id で JSON と対応付ける
-  const entries: ZipEntry[] = [];
-  const screenshots: ScreenshotMeta[] = [];
-  for (const node of targets) {
-    if (!("exportAsync" in node)) continue;
-    const file = `screenshots/${safeName(node.name)}.${safeId(node.id)}.png`;
+  // 失敗したノードを黙って省くと出力が欠けたことに気づけないので、中止してノードを示す
+  const serialize = async (node: SceneNode): Promise<DumpNode> => {
     try {
-      const bytes = await node.exportAsync({
+      return await serializeNode(node, ctx, "NONE");
+    } catch (e) {
+      throw new Error(`構造の書き出しに失敗: ${node.name} (${node.id}): ${errorDetail(e)}`);
+    }
+  };
+
+  // 画面フレームは構造 JSON と PNG を拡張子違いの同じパスに置き、index.json から引けるようにする
+  for (let i = 0; i < frames.length; i += 1) {
+    const frame = frames[i];
+    const dumped = await serialize(frame.node);
+    out.entries.push(jsonEntry(frame.json, buildFrameJson(frame, dumped)));
+    const shot = await fetchBytes(() =>
+      frame.node.exportAsync({
         format: "PNG",
         constraint: { type: "SCALE", value: SCREENSHOT_SCALE },
-      });
-      entries.push({ name: file, data: bytes });
-      screenshots.push({ id: node.id, name: node.name, file });
-    } catch (e) {
-      const detail = e instanceof Error ? e.message : String(e);
-      warnings.push(`スクリーンショット失敗: ${node.name} (${node.id}): ${detail}`);
-    }
+      })
+    );
+    recordScreenshot(out, frame, shot);
+    postProgress("frames", i + 1, frames.length, frame.name);
   }
 
-  // image fill の元画像。JSON 側の imageRef とファイル名 (hash) で対応付ける
-  for (const hash of imageHashes) {
+  const sectionsWithJson = sections.filter((section) => section.sectionJson !== undefined);
+  for (let i = 0; i < sectionsWithJson.length; i += 1) {
+    const section = sectionsWithJson[i];
+    const nodes: DumpNode[] = [];
+    for (const node of section.others) {
+      nodes.push(await serialize(node));
+    }
+    out.entries.push(jsonEntry(section.sectionJson as string, buildSectionJson(section, nodes)));
+    postProgress("sections", i + 1, sectionsWithJson.length);
+  }
+
+  // image fill の元画像。index.json の assets で imageRef → ZIP 内パスを引けるようにする
+  const hashes = Array.from(imageHashes);
+  for (let i = 0; i < hashes.length; i += 1) {
+    const hash = hashes[i];
+    let result: FetchResult | null;
     try {
       const image = figma.getImageByHash(hash);
-      if (!image) {
-        warnings.push(`画像が見つかりません: imageRef ${hash}`);
-        continue;
-      }
-      const bytes = await image.getBytesAsync();
-      entries.push({ name: `assets/${safeId(hash)}.${imageExtension(bytes)}`, data: bytes });
-    } catch (e) {
-      const detail = e instanceof Error ? e.message : String(e);
-      warnings.push(`画像の取得に失敗: imageRef ${hash}: ${detail}`);
+      result = image ? { ok: true, bytes: await image.getBytesAsync() } : null;
+    } catch (error) {
+      result = { ok: false, error };
     }
+    recordAsset(out, hash, result);
+    postProgress("assets", i + 1, hashes.length);
   }
 
   const scope =
     selection.length > 0 ? "selection" : `page:${figma.currentPage.name}`;
-  const json = {
-    meta: {
+  const index = buildIndex(
+    plan,
+    {
       fileName: figma.root.name,
       pluginVersion: PLUGIN_VERSION,
-      schemaVersion: SCHEMA_VERSION,
       exportedAt: new Date().toISOString(),
       scope,
-      screenshots,
-      warnings,
+      warnings: out.warnings,
     },
-    tree,
-  };
-  const jsonText = JSON.stringify(json, null, 2);
-  entries.unshift({ name: "structure.json", data: utf8Encode(jsonText) });
-
-  const zip = buildZip(entries);
+    out.writtenPngs,
+    out.writtenAssets
+  );
+  const indexText = JSON.stringify(index, null, 2);
+  const zip = buildZip([
+    { name: "README.md", data: utf8Encode(zipReadme) },
+    { name: "index.json", data: utf8Encode(indexText) },
+    ...out.entries,
+  ]);
 
   figma.ui.postMessage({
     type: "result",
     payload: {
       zipName: `${safeName(figma.root.name)}-dump.zip`,
       zip,
-      jsonText,
+      indexText,
       meta: {
         fileName: figma.root.name,
         scope,
-        targetCount: targets.length,
-        screenshotCount: screenshots.length,
-        assetCount: imageHashes.size,
+        frameCount: frames.length,
+        screenshotCount: out.writtenPngs.size,
+        sectionCount: sections.length,
+        assetCount: out.writtenAssets.size,
         zipBytes: zip.length,
-        warnings,
+        warnings: out.warnings,
       },
     },
   });
