@@ -1,6 +1,6 @@
 {
   "name": "figma-plugins",
-  "version": "0.1.0",
+  "version": "0.2.0",
   "private": true,
   "type": "module",
   "description": "General-purpose Figma plugins: structure-dump (structure JSON + screenshots ZIP export) and component-spec (variant/props spec export)",
