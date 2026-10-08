@@ -2,17 +2,27 @@
  * Structure Dump - plugin main
  *
  * 特定の UI ライブラリに依存しない汎用の構造書き出しプラグイン。
- * 選択ノード (未選択なら現在ページ) を走査して構造 JSON を作り、
- * トップレベル各ノードのスクリーンショット PNG と image fill の元画像を
- * 1 つの ZIP (無圧縮) に束ねて UI へ渡す。コード生成はしない (AI 側の仕事)。
+ * 選択ノード (未選択なら現在ページ直下) をセクション単位・画面フレーム単位に分け、
+ * 画面フレームごとの構造 JSON とスクリーンショット PNG、image fill の元画像、
+ * 読み方の README を 1 つの ZIP (無圧縮) に束ねて UI へ渡す。コード生成はしない (AI 側の仕事)。
  */
 
 import { sortInDocumentOrder } from "../../../shared/nodeOrder";
 import { DumpNode, SerializeContext, serializeNode } from "./serialize";
+import {
+  allFrames,
+  allSections,
+  buildFrameJson,
+  buildIndex,
+  buildSectionJson,
+  planDump,
+  safeId,
+  safeName,
+} from "./plan";
+import zipReadme from "./zip-readme.md";
 import { buildZip, utf8Encode, ZipEntry } from "./zip";
 
 const PLUGIN_VERSION = "0.1.0";
-const SCHEMA_VERSION = "dump-v1";
 const SCREENSHOT_SCALE = 1;
 
 // ---------------------------------------------------------------------------
@@ -29,22 +39,6 @@ async function loadVariables(): Promise<void> {
     // Variables 未使用ファイル等では空のままでよい
     variableNameById = new Map();
   }
-}
-
-// ---------------------------------------------------------------------------
-// ファイル名
-// ---------------------------------------------------------------------------
-
-/** ZIP 内・展開後のファイルシステム双方で安全な名前にする (Windows 含む) */
-function safeName(name: string): string {
-  const cleaned = name.replace(/[\/\\:*?"<>|\s]+/g, "-").replace(/^-+|-+$/g, "");
-  const trimmed = cleaned.slice(0, 40);
-  return trimmed.length > 0 ? trimmed : "node";
-}
-
-/** ノード ID ("123:456") や imageRef をファイル名に使える形へ */
-function safeId(id: string): string {
-  return id.replace(/[^0-9a-zA-Z]+/g, "-");
 }
 
 function imageExtension(bytes: Uint8Array): string {
@@ -65,15 +59,13 @@ function imageExtension(bytes: Uint8Array): string {
   return "bin";
 }
 
+function jsonEntry(name: string, value: unknown): ZipEntry {
+  return { name, data: utf8Encode(JSON.stringify(value, null, 2)) };
+}
+
 // ---------------------------------------------------------------------------
 // main
 // ---------------------------------------------------------------------------
-
-interface ScreenshotMeta {
-  id: string;
-  name: string;
-  file: string;
-}
 
 async function run(): Promise<void> {
   figma.showUI(__html__, { width: 480, height: 600 });
@@ -81,11 +73,14 @@ async function run(): Promise<void> {
   await loadVariables();
 
   const selection = figma.currentPage.selection;
-  const targets = sortInDocumentOrder(
-    selection.length > 0 ? selection : figma.currentPage.children
-  ).filter((node) => node.visible);
+  const plan = planDump(
+    selection.length > 0 ? selection : figma.currentPage.children,
+    sortInDocumentOrder
+  );
+  const frames = allFrames(plan);
+  const sections = allSections(plan);
 
-  if (targets.length === 0) {
+  if (frames.length === 0 && sections.length === 0) {
     figma.ui.postMessage({
       type: "error",
       message: "対象がありません (何かを選択するか、空でないページで実行してください)",
@@ -103,28 +98,33 @@ async function run(): Promise<void> {
     },
   };
 
-  const tree: DumpNode[] = [];
-  for (const node of targets) {
-    tree.push(await serializeNode(node, ctx));
-  }
-
-  // スクリーンショット: トップレベル各ノードを PNG で書き出し、id で JSON と対応付ける
   const entries: ZipEntry[] = [];
-  const screenshots: ScreenshotMeta[] = [];
-  for (const node of targets) {
-    if (!("exportAsync" in node)) continue;
-    const file = `screenshots/${safeName(node.name)}.${safeId(node.id)}.png`;
+  const writtenPngs = new Set<string>();
+
+  // 画面フレームは構造 JSON と PNG を拡張子違いの同じパスに置き、index.json から引けるようにする
+  for (const frame of frames) {
+    const dumped = await serializeNode(frame.node, ctx, "NONE");
+    entries.push(jsonEntry(frame.json, buildFrameJson(frame, dumped)));
     try {
-      const bytes = await node.exportAsync({
+      const bytes = await frame.node.exportAsync({
         format: "PNG",
         constraint: { type: "SCALE", value: SCREENSHOT_SCALE },
       });
-      entries.push({ name: file, data: bytes });
-      screenshots.push({ id: node.id, name: node.name, file });
+      entries.push({ name: frame.png, data: bytes });
+      writtenPngs.add(frame.png);
     } catch (e) {
       const detail = e instanceof Error ? e.message : String(e);
-      warnings.push(`スクリーンショット失敗: ${node.name} (${node.id}): ${detail}`);
+      warnings.push(`スクリーンショット失敗: ${frame.name} (${frame.id}): ${detail}`);
     }
+  }
+
+  for (const section of sections) {
+    if (section.sectionJson === undefined) continue;
+    const nodes: DumpNode[] = [];
+    for (const node of section.others) {
+      nodes.push(await serializeNode(node, ctx, "NONE"));
+    }
+    entries.push(jsonEntry(section.sectionJson, buildSectionJson(section, nodes)));
   }
 
   // image fill の元画像。JSON 側の imageRef とファイル名 (hash) で対応付ける
@@ -145,20 +145,22 @@ async function run(): Promise<void> {
 
   const scope =
     selection.length > 0 ? "selection" : `page:${figma.currentPage.name}`;
-  const json = {
-    meta: {
+  const index = buildIndex(
+    plan,
+    {
       fileName: figma.root.name,
       pluginVersion: PLUGIN_VERSION,
-      schemaVersion: SCHEMA_VERSION,
       exportedAt: new Date().toISOString(),
       scope,
-      screenshots,
       warnings,
     },
-    tree,
-  };
-  const jsonText = JSON.stringify(json, null, 2);
-  entries.unshift({ name: "structure.json", data: utf8Encode(jsonText) });
+    writtenPngs
+  );
+  const indexText = JSON.stringify(index, null, 2);
+  entries.unshift(
+    { name: "README.md", data: utf8Encode(zipReadme) },
+    { name: "index.json", data: utf8Encode(indexText) }
+  );
 
   const zip = buildZip(entries);
 
@@ -167,12 +169,12 @@ async function run(): Promise<void> {
     payload: {
       zipName: `${safeName(figma.root.name)}-dump.zip`,
       zip,
-      jsonText,
+      indexText,
       meta: {
         fileName: figma.root.name,
         scope,
-        targetCount: targets.length,
-        screenshotCount: screenshots.length,
+        frameCount: frames.length,
+        sectionCount: sections.length,
         assetCount: imageHashes.size,
         zipBytes: zip.length,
         warnings,

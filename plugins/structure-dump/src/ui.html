@@ -23,9 +23,9 @@
     <h2>ダウンロード</h2>
     <div>
       <button id="download-zip">ZIPをダウンロード</button>
-      <button id="copy-json">JSONをコピー</button>
+      <button id="copy-json">index.jsonをコピー</button>
     </div>
-    <h2>structure.json プレビュー</h2>
+    <h2>index.json プレビュー</h2>
     <pre id="json"></pre>
   </div>
 
@@ -49,8 +49,8 @@ onmessage = (event) => {
 
   const m = payload.meta;
   document.getElementById("meta").textContent =
-    `${m.fileName} / ${m.scope} / 対象 ${m.targetCount} 件 / ` +
-    `スクリーンショット ${m.screenshotCount} 枚 / 画像アセット ${m.assetCount} 件 / ` +
+    `${m.fileName} / ${m.scope} / 画面フレーム ${m.frameCount} 枚 / ` +
+    `セクション ${m.sectionCount} 件 / 画像アセット ${m.assetCount} 件 / ` +
     `ZIP ${(m.zipBytes / 1024).toFixed(0)} KB`;
 
   const warnEl = document.getElementById("warnings");
@@ -60,9 +60,9 @@ onmessage = (event) => {
   }
 
   const preview =
-    payload.jsonText.length > PREVIEW_LIMIT
-      ? payload.jsonText.slice(0, PREVIEW_LIMIT) + "\n…(省略。全文はZIP内のstructure.json)"
-      : payload.jsonText;
+    payload.indexText.length > PREVIEW_LIMIT
+      ? payload.indexText.slice(0, PREVIEW_LIMIT) + "\n…(省略。全文はZIP内のindex.json)"
+      : payload.indexText;
   document.getElementById("json").textContent = preview;
 };
 
@@ -80,7 +80,7 @@ document.getElementById("download-zip").onclick = () => {
 
 document.getElementById("copy-json").onclick = () => {
   const ta = document.createElement("textarea");
-  ta.value = payload.jsonText;
+  ta.value = payload.indexText;
   document.body.appendChild(ta);
   ta.select();
   document.execCommand("copy");
