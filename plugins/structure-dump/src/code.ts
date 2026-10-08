@@ -59,6 +59,10 @@ function imageExtension(bytes: Uint8Array): string {
   return "bin";
 }
 
+function errorDetail(e: unknown): string {
+  return e instanceof Error ? e.message : String(e);
+}
+
 function jsonEntry(name: string, value: unknown): ZipEntry {
   return { name, data: utf8Encode(JSON.stringify(value, null, 2)) };
 }
@@ -81,14 +85,20 @@ async function run(): Promise<void> {
   const sections = allSections(plan);
 
   if (frames.length === 0 && sections.length === 0) {
-    figma.ui.postMessage({
-      type: "error",
-      message: "対象がありません (何かを選択するか、空でないページで実行してください)",
-    });
+    let message = "対象がありません (何かを選択するか、空でないページで実行してください)";
+    if (plan.hiddenRoots.length > 0) {
+      message =
+        selection.length > 0
+          ? "選択したノードはすべて非表示です"
+          : "ページ直下のノードはすべて非表示です";
+    }
+    figma.ui.postMessage({ type: "error", message });
     return;
   }
 
-  const warnings: string[] = [];
+  const warnings: string[] = plan.hiddenRoots.map(
+    (node) => `非表示のため除外: ${node.name} (${node.id})`
+  );
   const imageHashes = new Set<string>();
   const ctx: SerializeContext = {
     mixed: figma.mixed,
@@ -96,6 +106,18 @@ async function run(): Promise<void> {
     registerImage: (hash) => {
       imageHashes.add(hash);
     },
+    warn: (message) => {
+      warnings.push(message);
+    },
+  };
+
+  // 失敗したノードを黙って省くと出力が欠けたことに気づけないので、中止してノードを示す
+  const serialize = async (node: SceneNode): Promise<DumpNode> => {
+    try {
+      return await serializeNode(node, ctx, "NONE");
+    } catch (e) {
+      throw new Error(`構造の書き出しに失敗: ${node.name} (${node.id}): ${errorDetail(e)}`);
+    }
   };
 
   const entries: ZipEntry[] = [];
@@ -103,7 +125,7 @@ async function run(): Promise<void> {
 
   // 画面フレームは構造 JSON と PNG を拡張子違いの同じパスに置き、index.json から引けるようにする
   for (const frame of frames) {
-    const dumped = await serializeNode(frame.node, ctx, "NONE");
+    const dumped = await serialize(frame.node);
     entries.push(jsonEntry(frame.json, buildFrameJson(frame, dumped)));
     try {
       const bytes = await frame.node.exportAsync({
@@ -113,8 +135,7 @@ async function run(): Promise<void> {
       entries.push({ name: frame.png, data: bytes });
       writtenPngs.add(frame.png);
     } catch (e) {
-      const detail = e instanceof Error ? e.message : String(e);
-      warnings.push(`スクリーンショット失敗: ${frame.name} (${frame.id}): ${detail}`);
+      warnings.push(`スクリーンショット失敗: ${frame.name} (${frame.id}): ${errorDetail(e)}`);
     }
   }
 
@@ -122,7 +143,7 @@ async function run(): Promise<void> {
     if (section.sectionJson === undefined) continue;
     const nodes: DumpNode[] = [];
     for (const node of section.others) {
-      nodes.push(await serializeNode(node, ctx, "NONE"));
+      nodes.push(await serialize(node));
     }
     entries.push(jsonEntry(section.sectionJson, buildSectionJson(section, nodes)));
   }
@@ -138,8 +159,7 @@ async function run(): Promise<void> {
       const bytes = await image.getBytesAsync();
       entries.push({ name: `assets/${safeId(hash)}.${imageExtension(bytes)}`, data: bytes });
     } catch (e) {
-      const detail = e instanceof Error ? e.message : String(e);
-      warnings.push(`画像の取得に失敗: imageRef ${hash}: ${detail}`);
+      warnings.push(`画像の取得に失敗: imageRef ${hash}: ${errorDetail(e)}`);
     }
   }
 
@@ -174,6 +194,7 @@ async function run(): Promise<void> {
         fileName: figma.root.name,
         scope,
         frameCount: frames.length,
+        screenshotCount: writtenPngs.size,
         sectionCount: sections.length,
         assetCount: imageHashes.size,
         zipBytes: zip.length,

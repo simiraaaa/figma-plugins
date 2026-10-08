@@ -8,7 +8,7 @@
 import { test } from "node:test";
 import assert from "node:assert/strict";
 import { execFileSync } from "node:child_process";
-import { mkdtempSync, writeFileSync } from "node:fs";
+import { mkdtempSync, readFileSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 // 実行するのは esbuild 産物、型は同じソースから取る(産物側は型を持たない)
@@ -56,6 +56,42 @@ test("生成した ZIP を実物のリーダーで開けて内容が一致する
 
   assert.equal(readViaPython(zip, "structure.json").toString("utf8"), jsonText);
   assert.deepEqual([...readViaPython(zip, "screenshots/画面A.1-23.png")], [...binary]);
+});
+
+function hasUnzipCli(): boolean {
+  try {
+    execFileSync("unzip", ["-v"], { stdio: "ignore" });
+    return true;
+  } catch {
+    return false;
+  }
+}
+
+test(
+  "日本語のディレクトリ名を含む ZIP を unzip CLI で展開できる (UTF-8 名を CP437 扱いされない)",
+  { skip: hasUnzipCli() ? false : "unzip CLI が無い" },
+  () => {
+    const name = "画面一覧.1-2/ログイン画面.3-4.json";
+    const data = utf8Encode('{"a":"画面"}');
+    const dir = mkdtempSync(join(tmpdir(), "structure-dump-unzip-"));
+    const zipPath = join(dir, "out.zip");
+    writeFileSync(zipPath, buildZip([{ name, data }]));
+    const outDir = join(dir, "out");
+    execFileSync("unzip", ["-q", zipPath, "-d", outDir], { stdio: "pipe" });
+    assert.deepEqual([...readFileSync(join(outDir, name))], [...data]);
+  }
+);
+
+test("中央ディレクトリの version made by が Unix (create_system=3)", () => {
+  const dir = mkdtempSync(join(tmpdir(), "structure-dump-zip-"));
+  const zipPath = join(dir, "out.zip");
+  writeFileSync(zipPath, buildZip([{ name: "a.txt", data: utf8Encode("a") }]));
+  const out = execFileSync("python3", [
+    "-c",
+    "import sys, zipfile; print(zipfile.ZipFile(sys.argv[1]).infolist()[0].create_system)",
+    zipPath,
+  ]);
+  assert.equal(out.toString().trim(), "3");
 });
 
 test("負例: 内容が壊れた ZIP は CRC 検査で落ちる", () => {

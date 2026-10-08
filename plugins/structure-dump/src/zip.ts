@@ -59,6 +59,13 @@ const LOCAL_HEADER_SIZE = 30;
 const CENTRAL_HEADER_SIZE = 46;
 const EOCD_SIZE = 22;
 const VERSION = 20;
+/**
+ * 上位バイト 3 = Unix。0 (MS-DOS) のままだと macOS の unzip が bit 11 を無視して
+ * 名前を CP437 として扱い、日本語のパスで展開に失敗する
+ */
+const VERSION_MADE_BY_UNIX = (3 << 8) | VERSION;
+/** made by = Unix のとき上位 16 bit が st_mode として使われる。0 だと権限なしで展開される */
+const EXTERNAL_ATTR_REGULAR_FILE_0644 = (0o100644 << 16) >>> 0;
 const FLAG_UTF8_NAME = 0x0800;
 const METHOD_STORED = 0;
 /** 1980-01-01 (DOS date の最小値)。生成日時は meta 側に持つため固定でよい */
@@ -117,7 +124,7 @@ export function buildZip(entries: readonly ZipEntry[]): Uint8Array {
   const centralOffset = pos;
   for (const e of located) {
     u32(0x02014b50); // central directory header signature
-    u16(VERSION); // version made by
+    u16(VERSION_MADE_BY_UNIX);
     u16(VERSION); // version needed
     u16(FLAG_UTF8_NAME);
     u16(METHOD_STORED);
@@ -131,7 +138,7 @@ export function buildZip(entries: readonly ZipEntry[]): Uint8Array {
     u16(0); // comment length
     u16(0); // disk number start
     u16(0); // internal attributes
-    u32(0); // external attributes
+    u32(EXTERNAL_ATTR_REGULAR_FILE_0644);
     u32(e.offset);
     raw(e.nameBytes);
   }

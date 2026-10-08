@@ -21,6 +21,7 @@ const {
   buildIndex,
   buildSectionJson,
   planDump,
+  safeName,
 } = planDist as unknown as typeof import("../plugins/structure-dump/src/plan.ts");
 
 /** code.ts が渡すのと同じ並べ替えを、Figma 環境なしで読む (バンドルして ESM として import) */
@@ -121,23 +122,27 @@ function allPaths(plan: DumpPlan<TestNode>): string[] {
   return paths;
 }
 
-test("画面フレームのしきい値: 380x700 は画面、379x700 と 380x699 は _section.json 側", () => {
+test("セクション直下の判定は型だけで決まる: FRAME は大きさを問わず画面、それ以外は _section.json 側", () => {
   const p = page([
     section("1:1", "Flow", {
-      w: 2000,
+      w: 4000,
       h: 1000,
       children: [
-        frame("2:1", "Exact", { w: 380, h: 700 }),
-        frame("2:2", "Narrow", { w: 379, h: 700, x: 400 }),
-        frame("2:3", "Short", { w: 380, h: 699, x: 800 }),
-        frame("2:4", "Big", { w: 1440, h: 1024, x: 1200 }),
+        frame("2:1", "Small frame", { w: 100, h: 100 }),
+        node("VECTOR", "2:2", "Big vector", { w: 390, h: 844, x: 200 }),
+        node("INSTANCE", "2:3", "Big instance", { w: 390, h: 844, x: 700 }),
+        node("GROUP", "2:4", "Group", { w: 390, h: 844, x: 1200 }),
+        node("TEXT", "2:5", "memo", { w: 200, h: 40, x: 1700 }),
+        node("COMPONENT", "2:6", "Component", { w: 390, h: 844, x: 2000 }),
+        node("LINE", "2:7", "arrow", { w: 300, h: 0, x: 2500 }),
+        frame("2:8", "Screen", { w: 1440, h: 1024, x: 2600 }),
       ],
     }),
   ]);
   const plan = planOf(p.children);
   const s = plan.sections[0];
-  assert.deepEqual(ids(s.frames), ["2:1", "2:4"]);
-  assert.deepEqual(ids(s.others), ["2:2", "2:3"]);
+  assert.deepEqual(ids(s.frames), ["2:1", "2:8"]);
+  assert.deepEqual(ids(s.others), ["2:2", "2:3", "2:4", "2:5", "2:6", "2:7"]);
   assert.equal(s.sectionJson, "Flow.1-1/_section.json");
 });
 
@@ -172,7 +177,7 @@ test("ネストしたセクションはディレクトリもネストし、パ�
           y: 200,
           children: [
             frame("10:3", "Login: top", { w: 390, h: 844, x: 10, y: 20 }),
-            frame("10:4", "note", { w: 200, h: 100, x: 500, y: 20 }),
+            node("TEXT", "10:4", "note", { w: 200, h: 100, x: 500, y: 20 }),
           ],
         }),
       ],
@@ -212,8 +217,8 @@ test("祖先と子孫を両方選んだら子孫を落として 1 回だけ出�
   assert.deepEqual(ids(allFrames(plan)), ["2:1", "4:1"]);
 });
 
-test("セクション外の選択はサイズに関係なく ZIP 直下の画面フレーム・document 順・非表示は除く", () => {
-  const small = frame("5:1", "Icon", { w: 24, h: 24 });
+test("セクション外の選択は型とサイズを問わず ZIP 直下の画面フレーム・document 順・非表示は除いて返す", () => {
+  const small = node("VECTOR", "5:1", "Icon", { w: 24, h: 24 });
   const big = frame("5:2", "Screen", { w: 390, h: 844, x: 100 });
   const hidden = frame("5:3", "Hidden", { w: 390, h: 844, x: 600, hidden: true });
   page([small, big, hidden]);
@@ -222,6 +227,28 @@ test("セクション外の選択はサイズに関係なく ZIP 直下の画面
   assert.deepEqual(ids(plan.frames), ["5:1", "5:2"]);
   assert.equal(plan.frames[0].png, "Icon.5-1.png");
   assert.equal(plan.frames[0].section, null);
+  assert.deepEqual(ids(plan.hiddenRoots), ["5:3"]);
+});
+
+test("負例: 非表示の祖先と表示中の子孫を両方選ぶと、どちらも出ず非表示の祖先が除外として返る", () => {
+  const child = frame("7:2", "Visible child", { w: 390, h: 844 });
+  const hiddenParent = frame("7:1", "Hidden parent", { w: 800, h: 900, hidden: true, children: [child] });
+  page([hiddenParent]);
+
+  const plan = planOf([child, hiddenParent]);
+  assert.deepEqual(plan.frames, []);
+  assert.deepEqual(plan.sections, []);
+  assert.deepEqual(ids(plan.hiddenRoots), ["7:1"]);
+});
+
+test("負例: 39 字の ASCII + 絵文字の名前でもサロゲートペアを割らない", () => {
+  const name = "a".repeat(39) + "😀";
+  assert.equal(safeName(name), name);
+  assert.equal(safeName(name + "b"), name);
+  const p = page([frame("8:1", name, { w: 390, h: 844 })]);
+  const f = planOf(p.children).frames[0];
+  assert.equal(f.png, `${name}.8-1.png`);
+  assert.doesNotMatch(f.png, /[\uD800-\uDBFF](?![\uDC00-\uDFFF])|(?<![\uD800-\uDBFF])[\uDC00-\uDFFF]/);
 });
 
 test("同名フレームは id で区別され、ZIP 内パスが衝突しない", () => {
@@ -232,8 +259,9 @@ test("同名フレームは id で区別され、ZIP 内パスが衝突しない
       children: [
         frame("2:1", "Home", { w: 390, h: 844 }),
         frame("2:2", "Home", { w: 390, h: 844, x: 400 }),
-        frame("2:3", "Home", { w: 10, h: 10, x: 800 }),
+        node("TEXT", "2:3", "Home", { w: 10, h: 10, x: 800 }),
         section("2:4", "Flow", { w: 1000, h: 1000, x: 900 }),
+        frame("2:5", "Home", { w: 10, h: 10, x: 2000 }),
       ],
     }),
     section("1:2", "Flow", {
@@ -252,6 +280,7 @@ test("同名フレームは id で区別され、ZIP 内パスが衝突しない
     [
       "Flow.1-1/Home.2-1.png",
       "Flow.1-1/Home.2-2.png",
+      "Flow.1-1/Home.2-5.png",
       "Flow.1-2/Home.3-1.png",
       "Home.1-3.png",
     ]
@@ -268,6 +297,18 @@ test("absoluteBoundingBox が null なら absoluteTransform から絶対座標�
   assert.deepEqual([f.absoluteX, f.absoluteY], [12.35, 7]);
 });
 
+test("absoluteBoundingBox と absoluteTransform が食い違うときは bounding box を使う", () => {
+  const p = page([frame("6:2", "Rotated", { w: 390, h: 844, x: 100, y: 200 })]);
+  const target = p.children[0];
+  target.absoluteBoundingBox = { x: 90.5, y: 180.25 };
+  const f = planOf(p.children).frames[0];
+  assert.deepEqual(target.absoluteTransform, [
+    [1, 0, 100],
+    [0, 1, 200],
+  ]);
+  assert.deepEqual([f.absoluteX, f.absoluteY], [90.5, 180.25]);
+});
+
 test("index.json・画面フレーム json・_section.json の形", () => {
   const p = page([
     section("1:1", "Flow", {
@@ -278,7 +319,7 @@ test("index.json・画面フレーム json・_section.json の形", () => {
       children: [
         frame("2:1", "Home", { w: 390, h: 844, x: 10, y: 20 }),
         frame("2:2", "Broken", { w: 390, h: 844, x: 500, y: 20 }),
-        frame("2:3", "memo", { w: 200, h: 100, x: 10, y: 900 }),
+        node("TEXT", "2:3", "memo", { w: 200, h: 100, x: 10, y: 900 }),
         section("2:4", "Sub", {
           w: 500,
           h: 900,

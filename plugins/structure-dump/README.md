@@ -32,16 +32,13 @@ README.md                            読み方 (index.json と各 json のルー
 index.json                           セクション → 画面フレームの一覧 (id・名前・サイズ・座標)
 <セクション>/<フレーム名>.<id>.png    画面フレームのスクリーンショット (1x)
 <セクション>/<フレーム名>.<id>.json   その画面フレーム以下の構造
-<セクション>/_section.json           画面フレーム以外の子 (メモ・矢印・小さいフレームなど) の構造
+<セクション>/_section.json           画面フレームでもセクションでもない子の構造
+<フレーム名>.<id>.png / .json         直接選んだノード・ページ直下のノード (ZIP 直下)
 assets/<imageRef>.<拡張子>           image fill の元画像
 ```
 
-- 画面フレームは、セクション直下の子のうち幅 380 以上かつ高さ 700 以上のもの。
-  セクションの外で選んだノード (未選択時はページ直下のノード) は、SECTION 以外ならサイズに
-  関係なく画面フレームとして ZIP 直下に置く
-- ネストしたセクションはディレクトリもネストする
-- JSON の各キーとノードの読み方は ZIP 内の `README.md` に書いてある。正本は
-  [`src/zip-readme.md`](src/zip-readme.md) で、ビルド時に code.js へ埋め込まれる
+- 何が画面フレームになるか、JSON の各キー、ノードの読み方は ZIP 内の `README.md` に書いてある。
+  正本は [`src/zip-readme.md`](src/zip-readme.md) で、ビルド時に code.js へ埋め込まれる
   (esbuild の `--loader:.md=text`)
 
 ## AI への渡し方のヒント
@@ -64,6 +61,6 @@ assets/<imageRef>.<拡張子>           image fill の元画像
   使い勝手として妥当か
 
 計画 (どのノードをどのパスへ出すか) と JSON 化、ZIP 生成のロジック自体は
-`tests/structure-dump-*.test.mts` で検証済み (画面フレームのしきい値・ネストしたディレクトリ・
-重複選択の除去・index.json の形・実物の ZIP リーダーで開ける・壊れたバイト列が CRC で落ちる・
-剪定規則)。
+`tests/structure-dump-*.test.mts` で検証済み (画面フレームの型の判定・ネストしたディレクトリ・
+重複選択の除去・非表示ルートの除外・index.json の形・実物の ZIP リーダーと unzip CLI で開ける・
+壊れたバイト列が CRC で落ちる・剪定規則)。

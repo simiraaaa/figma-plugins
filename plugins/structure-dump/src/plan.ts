@@ -13,9 +13,6 @@
 
 export const SCHEMA_VERSION = "dump-v2";
 
-/** セクション直下の子を画面フレームとみなす最小サイズ (両方以上で画面) */
-export const SCREEN_FRAME_MIN_SIZE = { width: 380, height: 700 } as const;
-
 export const SECTION_JSON_NAME = "_section.json";
 
 /** shared/nodeOrder.ts の OrderableNode と同じ形 */
@@ -82,6 +79,8 @@ export interface SectionPlan<T extends PlanNode> extends Placement {
 export interface DumpPlan<T extends PlanNode> {
   sections: SectionPlan<T>[];
   frames: FramePlan<T>[];
+  /** 渡されたルートのうち非表示のため除いたもの (呼び出し側が warning に残す) */
+  hiddenRoots: T[];
 }
 
 // ---------------------------------------------------------------------------
@@ -91,7 +90,8 @@ export interface DumpPlan<T extends PlanNode> {
 /** ZIP 内・展開後のファイルシステム双方で安全な名前にする (Windows 含む) */
 export function safeName(name: string): string {
   const cleaned = name.replace(/[\/\\:*?"<>|\s]+/g, "-").replace(/^-+|-+$/g, "");
-  const trimmed = cleaned.slice(0, 40);
+  // UTF-16 単位で切るとサロゲートペアが割れ、ZIP に不正な UTF-8 の名前が入る
+  const trimmed = Array.from(cleaned).slice(0, 40).join("");
   return trimmed.length > 0 ? trimmed : "node";
 }
 
@@ -112,10 +112,12 @@ export function isSection(node: PlanNode): boolean {
   return node.type === "SECTION";
 }
 
+/**
+ * セクション直下の子の判定。Figma データとして FRAME なら大きさを問わず画面フレームにする
+ * (ノイズは読む側が除く。プラグインはデータを落とさない)
+ */
 export function isScreenFrame(node: PlanNode): boolean {
-  return (
-    node.width >= SCREEN_FRAME_MIN_SIZE.width && node.height >= SCREEN_FRAME_MIN_SIZE.height
-  );
+  return node.type === "FRAME";
 }
 
 function r2(n: number): number {
@@ -208,23 +210,27 @@ function planSection<T extends PlanNode>(
 
 /**
  * roots は選択ノード、または未選択時のページ直下のノード。
- * SECTION は再帰し、それ以外はサイズに関係なく ZIP 直下の画面フレームにする。
+ * SECTION は再帰し、それ以外は型とサイズを問わず ZIP 直下の画面フレームにする。
  * sort には shared/nodeOrder.ts の sortInDocumentOrder を渡す
  */
 export function planDump<T extends PlanNode>(
   roots: readonly T[],
   sort: DocumentOrderSort
 ): DumpPlan<T> {
-  const plan: DumpPlan<T> = { sections: [], frames: [] };
-  const targets = sort(dropDescendants(roots)).filter((n) => n.visible);
-  for (const node of targets) {
-    if (isSection(node)) plan.sections.push(planSection(node, "", sort));
+  const plan: DumpPlan<T> = { sections: [], frames: [], hiddenRoots: [] };
+  for (const node of sort(dropDescendants(roots))) {
+    if (!node.visible) plan.hiddenRoots.push(node);
+    else if (isSection(node)) plan.sections.push(planSection(node, "", sort));
     else plan.frames.push(planFrame(node, "", null));
   }
   return plan;
 }
 
-/** 画面フレームを document 順 (セクションの深さ優先) で列挙する */
+/**
+ * 画面フレームを列挙する。順序は、トップレベルのセクションごとに
+ * 「そのセクション直下のフレーム → ネストしたセクションを同じ規則で再帰」、
+ * 最後に ZIP 直下のフレーム
+ */
 export function allFrames<T extends PlanNode>(plan: DumpPlan<T>): FramePlan<T>[] {
   const out: FramePlan<T>[] = [];
   const walk = (section: SectionPlan<T>): void => {
