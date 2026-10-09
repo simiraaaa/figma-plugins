@@ -126,10 +126,10 @@ function allPaths(plan: DumpPlan<TestNode>): string[] {
   return paths;
 }
 
-test("セクション直下の判定は型だけで決まる: FRAME は大きさを問わず画面、それ以外は _section.json 側", () => {
+test("セクション直下の判定は型だけで決まる: FRAME・INSTANCE・COMPONENT・GROUP は大きさを問わず画面、それ以外は _section.json 側", () => {
   const p = page([
     section("1:1", "Flow", {
-      w: 4000,
+      w: 5000,
       h: 1000,
       children: [
         frame("2:1", "Small frame", { w: 100, h: 100 }),
@@ -140,13 +140,15 @@ test("セクション直下の判定は型だけで決まる: FRAME は大きさ
         node("COMPONENT", "2:6", "Component", { w: 390, h: 844, x: 2000 }),
         node("LINE", "2:7", "arrow", { w: 300, h: 0, x: 2500 }),
         frame("2:8", "Screen", { w: 1440, h: 1024, x: 2600 }),
+        node("INSTANCE", "2:9", "Small instance", { w: 24, h: 24, x: 4100 }),
+        node("COMPONENT_SET", "2:10", "Variants", { w: 390, h: 844, x: 4200 }),
       ],
     }),
   ]);
   const plan = planOf(p.children);
   const s = plan.sections[0];
-  assert.deepEqual(ids(s.frames), ["2:1", "2:8"]);
-  assert.deepEqual(ids(s.others), ["2:2", "2:3", "2:4", "2:5", "2:6", "2:7"]);
+  assert.deepEqual(ids(s.frames), ["2:1", "2:3", "2:4", "2:6", "2:8", "2:9"]);
+  assert.deepEqual(ids(s.others), ["2:2", "2:5", "2:7", "2:10"]);
   assert.equal(s.sectionJson, "Flow.1-1/_section.json");
 });
 
@@ -166,6 +168,64 @@ test("_section.json は画面フレーム以外の子が無ければ作らない
   assert.deepEqual(ids(s.frames), ["2:1"]);
   assert.deepEqual(s.others, []);
   assert.equal(s.sectionJson, undefined);
+});
+
+test("ネストしたセクションでも INSTANCE・COMPONENT・GROUP は画面になり、index.json に png 付きで載る", () => {
+  const p = page([
+    section("20:1", "Flow", {
+      w: 5000,
+      h: 2000,
+      children: [
+        section("20:2", "Mixed", {
+          w: 2000,
+          h: 1000,
+          children: [
+            node("INSTANCE", "20:3", "Screen", { w: 390, h: 844 }),
+            node("COMPONENT_SET", "20:4", "Variants", { w: 390, h: 844, x: 500 }),
+            node("INSTANCE", "20:5", "hidden screen", { w: 390, h: 844, x: 1000, hidden: true }),
+          ],
+        }),
+        section("20:6", "Only screens", {
+          w: 2000,
+          h: 1000,
+          x: 2100,
+          children: [
+            node("GROUP", "20:7", "Grouped", { w: 390, h: 844 }),
+            node("COMPONENT", "20:8", "Component", { w: 390, h: 844, x: 500 }),
+          ],
+        }),
+      ],
+    }),
+  ]);
+  const plan = planOf(p.children);
+  const [mixed, onlyScreens] = plan.sections[0].sections;
+  assert.deepEqual(ids(mixed.frames), ["20:3"]);
+  assert.deepEqual(ids(mixed.others), ["20:4"]);
+  assert.equal(mixed.sectionJson, "Flow.20-1/Mixed.20-2/_section.json");
+  assert.deepEqual(ids(onlyScreens.frames), ["20:7", "20:8"]);
+  assert.equal(onlyScreens.sectionJson, undefined);
+
+  const index = buildIndex(
+    plan,
+    { fileName: "f", pluginVersion: "0", exportedAt: "t", scope: "s", warnings: [] },
+    new Set(allFrames(plan).map((f) => f.png)),
+    new Map()
+  );
+  const nested = (index.sections as { sections: { frames: { id: string; png?: string }[]; sectionJson?: string }[] }[])[0]
+    .sections;
+  assert.deepEqual(
+    nested.map((s) => [s.frames.map((f) => [f.id, f.png]), s.sectionJson]),
+    [
+      [[["20:3", "Flow.20-1/Mixed.20-2/Screen.20-3.png"]], "Flow.20-1/Mixed.20-2/_section.json"],
+      [
+        [
+          ["20:7", "Flow.20-1/Only-screens.20-6/Grouped.20-7.png"],
+          ["20:8", "Flow.20-1/Only-screens.20-6/Component.20-8.png"],
+        ],
+        undefined,
+      ],
+    ]
+  );
 });
 
 test("ネストしたセクションはディレクトリもネストし、パスは safeName.safeId", () => {

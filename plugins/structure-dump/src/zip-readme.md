@@ -7,7 +7,8 @@ AI (Claude Code 等) が最初に読む前提で書いている。
 
 1. `index.json` で、セクションと画面フレームの一覧を見る。
 2. 実装する画面を 1 枚ずつ選び、その `.json` (構造) と `.png` (見た目) をセットで読む。
-3. 画面の間の注記・矢印・小さい部品が要るときは、そのセクションの `_section.json` を読む。
+3. 画面の間の注記・矢印が要るときは、そのセクションの `_section.json` を読む。
+   ただし `GROUP` にまとめた矢印や、部品の `INSTANCE` は、`_section.json` ではなく画面フレームとして `index.json` に載る (下の「何が画面フレームになるか」)。
 4. 画像の中身が要るときは、ノードの `fills[].imageRef` を `index.json` の `assets` で引き、`assets/` のファイルのパスを得る。
 
 ZIP 全体を一度に読み込む必要はない。
@@ -20,7 +21,7 @@ README.md                            このファイル
 index.json                           セクション → 画面フレームの一覧
 <セクション>/<フレーム名>.<id>.png    画面フレームのスクリーンショット (1x)
 <セクション>/<フレーム名>.<id>.json   その画面フレーム以下の構造
-<セクション>/_section.json           FRAME でもセクションでもない子 (テキスト・矢印・インスタンスなど) の構造
+<セクション>/_section.json           画面フレームでもセクションでもない子 (テキスト・矢印など) の構造
 <フレーム名>.<id>.png / .json         直接選ばれたノード・ページ直下のノード (ZIP 直下)
 assets/<imageRef>.<拡張子>           image fill の元画像 (index.json の assets から引く)
 ```
@@ -41,13 +42,13 @@ assets/<imageRef>.<拡張子>           image fill の元画像 (index.json の 
 
 | 置き場所 | 型 | 扱い |
 |---|---|---|
-| セクション直下の子 | `FRAME` | 画面フレーム (png + json) |
+| セクション直下の子 | `FRAME`・`INSTANCE`・`COMPONENT`・`GROUP` | 画面フレーム (png + json) |
 | セクション直下の子 | `SECTION` | ネストしたセクション (ディレクトリ) |
-| セクション直下の子 | それ以外 (`VECTOR`・`LINE`・`TEXT`・`GROUP`・`INSTANCE`・`COMPONENT` など) | そのセクションの `_section.json` |
+| セクション直下の子 | それ以外 (`VECTOR`・`LINE`・`TEXT`・`COMPONENT_SET` など) | そのセクションの `_section.json` |
 | 直接選ばれたノード・未選択時のページ直下のノード | `SECTION` | セクション (ディレクトリ) |
 | 直接選ばれたノード・未選択時のページ直下のノード | それ以外 (型とサイズを問わない) | ZIP 直下の画面フレーム (png + json) |
 
-プラグインはデータを落とさないので、アイコンのような小さい `FRAME` も画面フレームとして出る。
+プラグインはデータを落とさないので、アイコンのような小さい `FRAME` や部品の `INSTANCE`、矢印をまとめた `GROUP` も画面フレームとして出る。
 画面でないものは読む側で除く (`width` / `height` や名前で見分ける)。
 
 `_section.json` に入る子が無いセクションには `_section.json` が無い。
