@@ -170,6 +170,64 @@ test("_section.json は画面フレーム以外の子が無ければ作らない
   assert.equal(s.sectionJson, undefined);
 });
 
+test("ネストしたセクションでも INSTANCE・COMPONENT・GROUP は画面になり、index.json に png 付きで載る", () => {
+  const p = page([
+    section("20:1", "Flow", {
+      w: 5000,
+      h: 2000,
+      children: [
+        section("20:2", "Mixed", {
+          w: 2000,
+          h: 1000,
+          children: [
+            node("INSTANCE", "20:3", "Screen", { w: 390, h: 844 }),
+            node("COMPONENT_SET", "20:4", "Variants", { w: 390, h: 844, x: 500 }),
+            node("INSTANCE", "20:5", "hidden screen", { w: 390, h: 844, x: 1000, hidden: true }),
+          ],
+        }),
+        section("20:6", "Only screens", {
+          w: 2000,
+          h: 1000,
+          x: 2100,
+          children: [
+            node("GROUP", "20:7", "Grouped", { w: 390, h: 844 }),
+            node("COMPONENT", "20:8", "Component", { w: 390, h: 844, x: 500 }),
+          ],
+        }),
+      ],
+    }),
+  ]);
+  const plan = planOf(p.children);
+  const [mixed, onlyScreens] = plan.sections[0].sections;
+  assert.deepEqual(ids(mixed.frames), ["20:3"]);
+  assert.deepEqual(ids(mixed.others), ["20:4"]);
+  assert.equal(mixed.sectionJson, "Flow.20-1/Mixed.20-2/_section.json");
+  assert.deepEqual(ids(onlyScreens.frames), ["20:7", "20:8"]);
+  assert.equal(onlyScreens.sectionJson, undefined);
+
+  const index = buildIndex(
+    plan,
+    { fileName: "f", pluginVersion: "0", exportedAt: "t", scope: "s", warnings: [] },
+    new Set(allFrames(plan).map((f) => f.png)),
+    new Map()
+  );
+  const nested = (index.sections as { sections: { frames: { id: string; png?: string }[]; sectionJson?: string }[] }[])[0]
+    .sections;
+  assert.deepEqual(
+    nested.map((s) => [s.frames.map((f) => [f.id, f.png]), s.sectionJson]),
+    [
+      [[["20:3", "Flow.20-1/Mixed.20-2/Screen.20-3.png"]], "Flow.20-1/Mixed.20-2/_section.json"],
+      [
+        [
+          ["20:7", "Flow.20-1/Only-screens.20-6/Grouped.20-7.png"],
+          ["20:8", "Flow.20-1/Only-screens.20-6/Component.20-8.png"],
+        ],
+        undefined,
+      ],
+    ]
+  );
+});
+
 test("ネストしたセクションはディレクトリもネストし、パスは safeName.safeId", () => {
   const p = page([
     section("10:1", "Flow A", {
