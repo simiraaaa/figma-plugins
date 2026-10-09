@@ -126,12 +126,15 @@ export function isSection(node: PlanNode): boolean {
   return node.type === "SECTION";
 }
 
+/** 画面はコンポーネントの配置 (INSTANCE) やグループで作られることもあるので、FRAME と同列に扱う */
+const SCREEN_FRAME_TYPES: ReadonlySet<string> = new Set(["FRAME", "INSTANCE", "COMPONENT", "GROUP"]);
+
 /**
- * セクション直下の子の判定。Figma データとして FRAME なら大きさを問わず画面フレームにする
+ * セクション直下の子の判定。型が SCREEN_FRAME_TYPES なら大きさを問わず画面フレームにする
  * (ノイズは読む側が除く。プラグインはデータを落とさない)
  */
 export function isScreenFrame(node: PlanNode): boolean {
-  return node.type === "FRAME";
+  return SCREEN_FRAME_TYPES.has(node.type);
 }
 
 function r2(n: number): number {

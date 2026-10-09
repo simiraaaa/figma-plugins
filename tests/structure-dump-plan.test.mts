@@ -126,10 +126,10 @@ function allPaths(plan: DumpPlan<TestNode>): string[] {
   return paths;
 }
 
-test("セクション直下の判定は型だけで決まる: FRAME は大きさを問わず画面、それ以外は _section.json 側", () => {
+test("セクション直下の判定は型だけで決まる: FRAME・INSTANCE・COMPONENT・GROUP は大きさを問わず画面、それ以外は _section.json 側", () => {
   const p = page([
     section("1:1", "Flow", {
-      w: 4000,
+      w: 5000,
       h: 1000,
       children: [
         frame("2:1", "Small frame", { w: 100, h: 100 }),
@@ -140,13 +140,15 @@ test("セクション直下の判定は型だけで決まる: FRAME は大きさ
         node("COMPONENT", "2:6", "Component", { w: 390, h: 844, x: 2000 }),
         node("LINE", "2:7", "arrow", { w: 300, h: 0, x: 2500 }),
         frame("2:8", "Screen", { w: 1440, h: 1024, x: 2600 }),
+        node("INSTANCE", "2:9", "Small instance", { w: 24, h: 24, x: 4100 }),
+        node("COMPONENT_SET", "2:10", "Variants", { w: 390, h: 844, x: 4200 }),
       ],
     }),
   ]);
   const plan = planOf(p.children);
   const s = plan.sections[0];
-  assert.deepEqual(ids(s.frames), ["2:1", "2:8"]);
-  assert.deepEqual(ids(s.others), ["2:2", "2:3", "2:4", "2:5", "2:6", "2:7"]);
+  assert.deepEqual(ids(s.frames), ["2:1", "2:3", "2:4", "2:6", "2:8", "2:9"]);
+  assert.deepEqual(ids(s.others), ["2:2", "2:5", "2:7", "2:10"]);
   assert.equal(s.sectionJson, "Flow.1-1/_section.json");
 });
 
