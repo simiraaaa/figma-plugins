@@ -16,6 +16,19 @@ export const SCHEMA_VERSION = "dump-v2";
 
 export const SECTION_JSON_NAME = "_section.json";
 
+/** プラグインのメニューのコマンド → スクリーンショットの倍率。manifest.json の menu と同じ集合にする */
+export const SCREENSHOT_SCALE_BY_COMMAND: Readonly<Record<string, number>> = {
+  "export-2x": 2,
+  "export-1x": 1,
+};
+const DEFAULT_SCREENSHOT_SCALE = 2;
+
+export function screenshotScaleFor(command: string): number {
+  return Object.prototype.hasOwnProperty.call(SCREENSHOT_SCALE_BY_COMMAND, command)
+    ? SCREENSHOT_SCALE_BY_COMMAND[command]
+    : DEFAULT_SCREENSHOT_SCALE;
+}
+
 /** shared/nodeOrder.ts の OrderableNode と同じ形 */
 export interface DocNode {
   readonly id: string;
@@ -279,14 +292,25 @@ export interface IndexMeta {
   pluginVersion: string;
   exportedAt: string;
   scope: string;
+  screenshotScale: number;
   warnings: string[];
+}
+
+/** 画面フレームの由来のコンポーネント。構造の書き出し (serialize) の結果から集める */
+export interface FrameComponent {
+  componentName?: string;
+  componentSetName?: string;
 }
 
 function frameEntry<T extends PlanNode>(
   frame: FramePlan<T>,
-  writtenPngs: ReadonlySet<string>
+  writtenPngs: ReadonlySet<string>,
+  components: ReadonlyMap<string, FrameComponent>
 ): Record<string, unknown> {
-  const entry: Record<string, unknown> = { id: frame.id, name: frame.name };
+  const entry: Record<string, unknown> = { id: frame.id, name: frame.name, type: frame.node.type };
+  const component = components.get(frame.id);
+  if (component?.componentName !== undefined) entry.componentName = component.componentName;
+  if (component?.componentSetName !== undefined) entry.componentSetName = component.componentSetName;
   if (writtenPngs.has(frame.png)) entry.png = frame.png;
   entry.json = frame.json;
   return { ...entry, ...placementOf(frame) };
@@ -305,15 +329,16 @@ function placementOf(p: Placement): Placement {
 
 function sectionEntry<T extends PlanNode>(
   section: SectionPlan<T>,
-  writtenPngs: ReadonlySet<string>
+  writtenPngs: ReadonlySet<string>,
+  components: ReadonlyMap<string, FrameComponent>
 ): Record<string, unknown> {
   const entry: Record<string, unknown> = {
     id: section.id,
     name: section.name,
     dir: section.dir,
     ...placementOf(section),
-    frames: section.frames.map((f) => frameEntry(f, writtenPngs)),
-    sections: section.sections.map((s) => sectionEntry(s, writtenPngs)),
+    frames: section.frames.map((f) => frameEntry(f, writtenPngs, components)),
+    sections: section.sections.map((s) => sectionEntry(s, writtenPngs, components)),
   };
   if (section.sectionJson !== undefined) entry.sectionJson = section.sectionJson;
   return entry;
@@ -321,13 +346,15 @@ function sectionEntry<T extends PlanNode>(
 
 /**
  * writtenPngs は書き出しに成功した png のパス。失敗したフレームは png キー無しで載せる。
- * writtenAssets は書き出しに成功した imageRef → ZIP 内パス。失敗した imageRef はキーを作らない
+ * writtenAssets は書き出しに成功した imageRef → ZIP 内パス。失敗した imageRef はキーを作らない。
+ * components は画面フレームの id → 由来のコンポーネント。無いフレームはキー無しで載せる
  */
 export function buildIndex<T extends PlanNode>(
   plan: DumpPlan<T>,
   meta: IndexMeta,
   writtenPngs: ReadonlySet<string>,
-  writtenAssets: ReadonlyMap<string, string>
+  writtenAssets: ReadonlyMap<string, string>,
+  components: ReadonlyMap<string, FrameComponent>
 ): Record<string, unknown> {
   return {
     meta: {
@@ -336,10 +363,11 @@ export function buildIndex<T extends PlanNode>(
       schemaVersion: SCHEMA_VERSION,
       exportedAt: meta.exportedAt,
       scope: meta.scope,
+      screenshotScale: meta.screenshotScale,
       warnings: meta.warnings,
     },
-    sections: plan.sections.map((s) => sectionEntry(s, writtenPngs)),
-    frames: plan.frames.map((f) => frameEntry(f, writtenPngs)),
+    sections: plan.sections.map((s) => sectionEntry(s, writtenPngs, components)),
+    frames: plan.frames.map((f) => frameEntry(f, writtenPngs, components)),
     assets: assetsObject(writtenAssets),
   };
 }

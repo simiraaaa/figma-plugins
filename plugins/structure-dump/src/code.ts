@@ -18,6 +18,7 @@ import {
   emptyMessage,
   errorDetail,
   FetchResult,
+  FrameComponent,
   longPaths,
   MAX_ZIP_PATH_CHARS,
   newExportOutput,
@@ -25,12 +26,12 @@ import {
   recordAsset,
   recordScreenshot,
   safeName,
+  screenshotScaleFor,
 } from "./plan";
 import zipReadme from "./zip-readme.md";
 import { buildZip, utf8Encode, ZipEntry } from "./zip";
 
-const PLUGIN_VERSION = "0.2.0";
-const SCREENSHOT_SCALE = 1;
+const PLUGIN_VERSION = "0.3.0";
 
 // ---------------------------------------------------------------------------
 // Variables 一括ロード (ノード毎の非同期解決を避ける)
@@ -115,15 +116,25 @@ async function run(): Promise<void> {
     }
   };
 
+  const screenshotScale = screenshotScaleFor(figma.command);
+  const frameComponents = new Map<string, FrameComponent>();
+
   // 画面フレームは構造 JSON と PNG を拡張子違いの同じパスに置き、index.json から引けるようにする
   for (let i = 0; i < frames.length; i += 1) {
     const frame = frames[i];
     const dumped = await serialize(frame.node);
     out.entries.push(jsonEntry(frame.json, buildFrameJson(frame, dumped)));
+    const componentName =
+      typeof dumped.componentName === "string" ? dumped.componentName : undefined;
+    const componentSetName =
+      typeof dumped.componentSetName === "string" ? dumped.componentSetName : undefined;
+    if (componentName !== undefined || componentSetName !== undefined) {
+      frameComponents.set(frame.id, { componentName, componentSetName });
+    }
     const shot = await fetchBytes(() =>
       frame.node.exportAsync({
         format: "PNG",
-        constraint: { type: "SCALE", value: SCREENSHOT_SCALE },
+        constraint: { type: "SCALE", value: screenshotScale },
       })
     );
     recordScreenshot(out, frame, shot);
@@ -165,10 +176,12 @@ async function run(): Promise<void> {
       pluginVersion: PLUGIN_VERSION,
       exportedAt: new Date().toISOString(),
       scope,
+      screenshotScale,
       warnings: out.warnings,
     },
     out.writtenPngs,
-    out.writtenAssets
+    out.writtenAssets,
+    frameComponents
   );
   const indexText = JSON.stringify(index, null, 2);
   const zip = buildZip([
@@ -188,6 +201,7 @@ async function run(): Promise<void> {
         scope,
         frameCount: frames.length,
         screenshotCount: out.writtenPngs.size,
+        screenshotScale,
         sectionCount: sections.length,
         assetCount: out.writtenAssets.size,
         zipBytes: zip.length,

@@ -19,7 +19,7 @@ ZIP 全体を一度に読み込む必要はない。
 ```
 README.md                            このファイル
 index.json                           セクション → 画面フレームの一覧
-<セクション>/<フレーム名>.<id>.png    画面フレームのスクリーンショット (1x)
+<セクション>/<フレーム名>.<id>.png    画面フレームのスクリーンショット (倍率は meta.screenshotScale)
 <セクション>/<フレーム名>.<id>.json   その画面フレーム以下の構造
 <セクション>/_section.json           画面フレームでもセクションでもない子 (テキスト・矢印など) の構造
 <フレーム名>.<id>.png / .json         直接選ばれたノード・ページ直下のノード (ZIP 直下)
@@ -49,7 +49,7 @@ assets/<imageRef>.<拡張子>           image fill の元画像 (index.json の 
 | 直接選ばれたノード・未選択時のページ直下のノード | それ以外 (型とサイズを問わない) | ZIP 直下の画面フレーム (png + json) |
 
 プラグインはデータを落とさないので、アイコンのような小さい `FRAME` や部品の `INSTANCE`、矢印をまとめた `GROUP` も画面フレームとして出る。
-画面でないものは読む側で除く (`width` / `height` や名前で見分ける)。
+画面でないものは読む側で除く (`index.json` の画面フレームの `type`・`componentSetName`・`width` / `height`・名前で見分ける)。
 
 `_section.json` に入る子が無いセクションには `_section.json` が無い。
 非表示のノードはどこにも出ない。
@@ -79,7 +79,7 @@ GROUP の子の `x` / `y` は GROUP ではなく外側の container に対する
 
 ```
 {
-  "meta": { "fileName", "pluginVersion", "schemaVersion": "dump-v2", "exportedAt", "scope", "warnings": [] },
+  "meta": { "fileName", "pluginVersion", "schemaVersion": "dump-v2", "exportedAt", "scope", "screenshotScale", "warnings": [] },
   "sections": [ <セクション> ],
   "frames": [ <画面フレーム> ],
   "assets": { "<imageRef>": "assets/<imageRef>.<拡張子>" }
@@ -87,6 +87,9 @@ GROUP の子の `x` / `y` は GROUP ではなく外側の container に対する
 ```
 
 - `meta.scope`: `selection` (選択を書き出した) か `page:<ページ名>` (未選択でページ直下を書き出した)。
+- `meta.screenshotScale`: スクリーンショットの倍率 (`2` か `1`)。
+  png のピクセル数は、`width` / `height` にこの倍率を掛けた値になる。
+  座標を png のピクセルに当てるときは、座標にこの倍率を掛ける。
 - `meta.warnings`: 次のものが 1 行ずつ入る。
   - 書き出し中に起きた失敗 (スクリーンショット失敗・空の PNG・画像の取得失敗・コンポーネント情報の読み取り失敗など)
   - 非表示のため除外したノード (`非表示のため除外: <name> (<id>)`)
@@ -111,9 +114,14 @@ GROUP の子の `x` / `y` は GROUP ではなく外側の container に対する
 画面フレームの形は次のとおり。
 
 ```
-{ "id", "name", "png", "json", "x", "y", "absoluteX", "absoluteY", "width", "height" }
+{ "id", "name", "type", "componentName", "componentSetName", "png", "json",
+  "x", "y", "absoluteX", "absoluteY", "width", "height" }
 ```
 
+- `type`: Figma のノード種別 (`FRAME`・`INSTANCE`・`COMPONENT`・`GROUP` など)。
+- `componentName` / `componentSetName`: `INSTANCE` の元のコンポーネントの名前と、それが属するコンポーネントセットの名前。
+  バリアントの `componentName` は `Property 1=Default` のような形なので、画面を名前で拾うときは `componentSetName` を見る。
+  画面フレームの json の `node` にある同名のキーと同じ値で、そちらに無いときはここにも無い。
 - `png` / `json`: ZIP 内のパス。
 - スクリーンショットに失敗したフレームには `png` キーが無い。
   理由は `meta.warnings` にある。

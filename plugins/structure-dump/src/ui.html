@@ -71,7 +71,7 @@ onmessage = (event) => {
   const m = payload.meta;
   document.getElementById("meta").textContent =
     `${m.fileName} / ${m.scope} / ` +
-    `画面フレーム ${m.frameCount} 枚 (スクリーンショット ${m.screenshotCount} 枚) / ` +
+    `画面フレーム ${m.frameCount} 枚 (スクリーンショット ${m.screenshotCount} 枚・${m.screenshotScale}x) / ` +
     `セクション ${m.sectionCount} 件 / 画像アセット ${m.assetCount} 件 / ` +
     `ZIP ${(m.zipBytes / 1024).toFixed(0)} KB`;
 

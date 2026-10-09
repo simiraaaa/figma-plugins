@@ -22,7 +22,7 @@ import {
   summarizeGroup,
 } from "./spec";
 
-const PLUGIN_VERSION = "0.2.0";
+const PLUGIN_VERSION = "0.3.0";
 const SCREENSHOT_SCALE = 1;
 
 type SpecTarget = InstanceNode | ComponentNode | ComponentSetNode;
