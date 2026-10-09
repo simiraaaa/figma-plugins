@@ -18,19 +18,22 @@ import {
   emptyMessage,
   errorDetail,
   FetchResult,
+  FrameComponent,
+  frameComponentOf,
   longPaths,
   MAX_ZIP_PATH_CHARS,
   newExportOutput,
+  overflowsBounds,
   planDump,
   recordAsset,
   recordScreenshot,
   safeName,
+  screenshotScaleFor,
 } from "./plan";
 import zipReadme from "./zip-readme.md";
 import { buildZip, utf8Encode, ZipEntry } from "./zip";
 
-const PLUGIN_VERSION = "0.2.0";
-const SCREENSHOT_SCALE = 1;
+const PLUGIN_VERSION = "0.3.0";
 
 // ---------------------------------------------------------------------------
 // Variables 一括ロード (ノード毎の非同期解決を避ける)
@@ -115,15 +118,28 @@ async function run(): Promise<void> {
     }
   };
 
+  const screenshotScale = screenshotScaleFor(figma.command);
+  const frameComponents = new Map<string, FrameComponent>();
+
   // 画面フレームは構造 JSON と PNG を拡張子違いの同じパスに置き、index.json から引けるようにする
   for (let i = 0; i < frames.length; i += 1) {
     const frame = frames[i];
     const dumped = await serialize(frame.node);
     out.entries.push(jsonEntry(frame.json, buildFrameJson(frame, dumped)));
+    const component = frameComponentOf(dumped);
+    if (component !== undefined) frameComponents.set(frame.id, component);
+    const node = frame.node;
+    const box = "absoluteBoundingBox" in node ? node.absoluteBoundingBox : null;
+    const render = "absoluteRenderBounds" in node ? node.absoluteRenderBounds : null;
+    if (overflowsBounds(box, render)) {
+      out.warnings.push(`枠の外に描画があり、png は枠で切った: ${frame.name} (${frame.id})`);
+    }
+    // 枠 (width × height) の範囲で書き出し、png の左上を枠の左上に合わせる (座標で png を指せるようにする)
     const shot = await fetchBytes(() =>
-      frame.node.exportAsync({
+      node.exportAsync({
         format: "PNG",
-        constraint: { type: "SCALE", value: SCREENSHOT_SCALE },
+        useAbsoluteBounds: true,
+        constraint: { type: "SCALE", value: screenshotScale },
       })
     );
     recordScreenshot(out, frame, shot);
@@ -165,10 +181,12 @@ async function run(): Promise<void> {
       pluginVersion: PLUGIN_VERSION,
       exportedAt: new Date().toISOString(),
       scope,
+      screenshotScale,
       warnings: out.warnings,
     },
     out.writtenPngs,
-    out.writtenAssets
+    out.writtenAssets,
+    frameComponents
   );
   const indexText = JSON.stringify(index, null, 2);
   const zip = buildZip([
@@ -188,6 +206,7 @@ async function run(): Promise<void> {
         scope,
         frameCount: frames.length,
         screenshotCount: out.writtenPngs.size,
+        screenshotScale,
         sectionCount: sections.length,
         assetCount: out.writtenAssets.size,
         zipBytes: zip.length,

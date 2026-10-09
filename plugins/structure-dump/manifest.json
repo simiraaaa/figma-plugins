@@ -6,6 +6,10 @@
   "ui": "src/ui.html",
   "editorType": ["figma"],
   "documentAccess": "dynamic-page",
+  "menu": [
+    { "name": "書き出し (スクリーンショット 2x)", "command": "export-2x" },
+    { "name": "書き出し (スクリーンショット 1x)", "command": "export-1x" }
+  ],
   "networkAccess": {
     "allowedDomains": ["none"]
   }

@@ -7,6 +7,7 @@
  */
 import { test } from "node:test";
 import assert from "node:assert/strict";
+import { readFileSync } from "node:fs";
 import path from "node:path";
 import { fileURLToPath } from "node:url";
 import { buildSync } from "esbuild";
@@ -29,6 +30,10 @@ const {
   recordAsset,
   recordScreenshot,
   safeName,
+  frameComponentOf,
+  overflowsBounds,
+  SCREENSHOT_SCALE_BY_COMMAND,
+  screenshotScaleFor,
 } = planDist as unknown as typeof import("../plugins/structure-dump/src/plan.ts");
 
 /** code.ts が渡すのと同じ並べ替えを、Figma 環境なしで読む (バンドルして ESM として import) */
@@ -207,8 +212,9 @@ test("ネストしたセクションでも INSTANCE・COMPONENT・GROUP は画�
 
   const index = buildIndex(
     plan,
-    { fileName: "f", pluginVersion: "0", exportedAt: "t", scope: "s", warnings: [] },
+    { fileName: "f", pluginVersion: "0", exportedAt: "t", scope: "s", screenshotScale: 2, warnings: [] },
     new Set(allFrames(plan).map((f) => f.png)),
+    new Map(),
     new Map()
   );
   const nested = (index.sections as { sections: { frames: { id: string; png?: string }[]; sectionJson?: string }[] }[])[0]
@@ -406,7 +412,7 @@ test("index.json・画面フレーム json・_section.json の形", () => {
         }),
       ],
     }),
-    frame("1:2", "Loose", { w: 100, h: 100, x: 3000, y: 0 }),
+    node("INSTANCE", "1:2", "Loose", { w: 100, h: 100, x: 3000, y: 0 }),
   ]);
   const plan = planOf(p.children);
   const written = new Set(
@@ -419,12 +425,16 @@ test("index.json・画面フレーム json・_section.json の形", () => {
     pluginVersion: "0.1.0",
     exportedAt: "2026-10-08T00:00:00.000Z",
     scope: "page:Page 1",
+    screenshotScale: 2,
     warnings: ["スクリーンショット失敗: Broken (2:2): x"],
   };
 
   const assets = new Map([["abc123", "assets/abc123.png"]]);
+  const components = new Map([
+    ["1:2", { componentName: "Property 1=Default", componentSetName: "Card" }],
+  ]);
 
-  assert.deepEqual(buildIndex(plan, meta, written, assets), {
+  assert.deepEqual(buildIndex(plan, meta, written, assets, components), {
     meta: { ...meta, schemaVersion: "dump-v2" },
     sections: [
       {
@@ -441,6 +451,7 @@ test("index.json・画面フレーム json・_section.json の形", () => {
           {
             id: "2:1",
             name: "Home",
+            type: "FRAME",
             png: "Flow.1-1/Home.2-1.png",
             json: "Flow.1-1/Home.2-1.json",
             x: 10,
@@ -453,6 +464,7 @@ test("index.json・画面フレーム json・_section.json の形", () => {
           {
             id: "2:2",
             name: "Broken",
+            type: "FRAME",
             json: "Flow.1-1/Broken.2-2.json",
             x: 500,
             y: 20,
@@ -477,6 +489,7 @@ test("index.json・画面フレーム json・_section.json の形", () => {
               {
                 id: "3:1",
                 name: "Modal",
+                type: "FRAME",
                 png: "Flow.1-1/Sub.2-4/Modal.3-1.png",
                 json: "Flow.1-1/Sub.2-4/Modal.3-1.json",
                 x: 5,
@@ -497,6 +510,9 @@ test("index.json・画面フレーム json・_section.json の形", () => {
       {
         id: "1:2",
         name: "Loose",
+        type: "INSTANCE",
+        componentName: "Property 1=Default",
+        componentSetName: "Card",
         png: "Loose.1-2.png",
         json: "Loose.1-2.json",
         x: 3000,
@@ -701,9 +717,66 @@ test("recordAsset: 成功は assets 対応表に入り、失敗と画像なし�
   page([shown]);
   const index = buildIndex(
     planOf([shown]),
-    { fileName: "f", pluginVersion: "0", exportedAt: "t", scope: "s", warnings: out.warnings },
+    { fileName: "f", pluginVersion: "0", exportedAt: "t", scope: "s", screenshotScale: 2, warnings: out.warnings },
     out.writtenPngs,
-    out.writtenAssets
+    out.writtenAssets,
+    new Map()
   );
   assert.deepEqual(index.assets, { aa11: "assets/aa11.png" });
+});
+
+test("スクリーンショットの倍率はメニューのコマンドで決まり、既定は 2x", () => {
+  assert.equal(screenshotScaleFor("export-1x"), 1);
+  assert.equal(screenshotScaleFor("export-2x"), 2);
+  assert.equal(screenshotScaleFor(""), 2);
+});
+
+test("manifest のメニューのコマンドは、倍率の対応表と同じ集合", () => {
+  const root = path.resolve(path.dirname(fileURLToPath(import.meta.url)), "..");
+  const manifest = JSON.parse(
+    readFileSync(path.join(root, "plugins/structure-dump/manifest.json"), "utf8")
+  ) as { menu?: { command: string }[] };
+  assert.deepEqual(
+    (manifest.menu ?? []).map((m) => m.command).sort(),
+    Object.keys(SCREENSHOT_SCALE_BY_COMMAND).sort()
+  );
+});
+
+test("画面フレームの由来のコンポーネントは、文字列の名前だけを拾い、どちらも無ければ undefined", () => {
+  assert.deepEqual(frameComponentOf({ componentName: "Property 1=Default", componentSetName: "Card" }), {
+    componentName: "Property 1=Default",
+    componentSetName: "Card",
+  });
+  assert.deepEqual(frameComponentOf({ componentName: "Button" }), { componentName: "Button" });
+  assert.deepEqual(frameComponentOf({ componentSetName: "Card" }), { componentSetName: "Card" });
+  assert.equal(frameComponentOf({}), undefined);
+  assert.equal(frameComponentOf({ componentName: 1, componentSetName: null }), undefined);
+});
+
+test("componentSetName だけのフレームは、index.json に componentName のキーを作らない", () => {
+  const p = page([node("COMPONENT", "5:1", "Variant", { w: 390, h: 844 })]);
+  const plan = planOf(p.children);
+  const component = frameComponentOf({ componentSetName: "Card" });
+  const index = buildIndex(
+    plan,
+    { fileName: "f", pluginVersion: "0", exportedAt: "t", scope: "s", screenshotScale: 2, warnings: [] },
+    new Set(),
+    new Map(),
+    new Map(component ? [["5:1", component]] : [])
+  );
+  const [entry] = index.frames as Record<string, unknown>[];
+  assert.equal(entry.type, "COMPONENT");
+  assert.equal(entry.componentSetName, "Card");
+  assert.equal("componentName" in entry, false);
+});
+
+test("枠の外への描画の判定: 描画範囲が枠を少しでも越えたときだけ true", () => {
+  const box = { x: 100, y: 200, width: 390, height: 844 };
+  assert.equal(overflowsBounds(box, { ...box }), false);
+  assert.equal(overflowsBounds(box, { x: 100, y: 200, width: 668, height: 844 }), true);
+  assert.equal(overflowsBounds(box, { x: 90, y: 200, width: 400, height: 844 }), true);
+  assert.equal(overflowsBounds(box, { x: 100, y: 190, width: 390, height: 854 }), true);
+  assert.equal(overflowsBounds(box, { x: 110, y: 210, width: 100, height: 40 }), false);
+  assert.equal(overflowsBounds(box, null), false);
+  assert.equal(overflowsBounds(null, box), false);
 });
