@@ -64,6 +64,7 @@ assets/<imageRef>.<拡張子>           image fill の元画像 (index.json の 
   使い勝手として妥当か
 - 進捗表示 (`progress` メッセージ) が、書き出し中の UI に実際に反映されること
 - メニューから実行したとき `figma.command` に manifest の `command` が入り、スクリーンショットの倍率が切り替わること
+- `exportAsync` に `useAbsoluteBounds: true` を付けると、枠の外にはみ出した描画が切られ、png が枠 (`width` × `height` × 倍率) の大きさになること
 
 計画 (どのノードをどのパスへ出すか) と JSON 化、ZIP 生成、取得結果の振り分けのロジック自体は
 `tests/structure-dump-*.test.mts` で検証済み (画面フレームの型の判定・ネストしたディレクトリ・

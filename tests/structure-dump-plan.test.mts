@@ -30,6 +30,8 @@ const {
   recordAsset,
   recordScreenshot,
   safeName,
+  frameComponentOf,
+  overflowsBounds,
   SCREENSHOT_SCALE_BY_COMMAND,
   screenshotScaleFor,
 } = planDist as unknown as typeof import("../plugins/structure-dump/src/plan.ts");
@@ -738,4 +740,43 @@ test("manifest のメニューのコマンドは、倍率の対応表と同じ�
     (manifest.menu ?? []).map((m) => m.command).sort(),
     Object.keys(SCREENSHOT_SCALE_BY_COMMAND).sort()
   );
+});
+
+test("画面フレームの由来のコンポーネントは、文字列の名前だけを拾い、どちらも無ければ undefined", () => {
+  assert.deepEqual(frameComponentOf({ componentName: "Property 1=Default", componentSetName: "Card" }), {
+    componentName: "Property 1=Default",
+    componentSetName: "Card",
+  });
+  assert.deepEqual(frameComponentOf({ componentName: "Button" }), { componentName: "Button" });
+  assert.deepEqual(frameComponentOf({ componentSetName: "Card" }), { componentSetName: "Card" });
+  assert.equal(frameComponentOf({}), undefined);
+  assert.equal(frameComponentOf({ componentName: 1, componentSetName: null }), undefined);
+});
+
+test("componentSetName だけのフレームは、index.json に componentName のキーを作らない", () => {
+  const p = page([node("COMPONENT", "5:1", "Variant", { w: 390, h: 844 })]);
+  const plan = planOf(p.children);
+  const component = frameComponentOf({ componentSetName: "Card" });
+  const index = buildIndex(
+    plan,
+    { fileName: "f", pluginVersion: "0", exportedAt: "t", scope: "s", screenshotScale: 2, warnings: [] },
+    new Set(),
+    new Map(),
+    new Map(component ? [["5:1", component]] : [])
+  );
+  const [entry] = index.frames as Record<string, unknown>[];
+  assert.equal(entry.type, "COMPONENT");
+  assert.equal(entry.componentSetName, "Card");
+  assert.equal("componentName" in entry, false);
+});
+
+test("枠の外への描画の判定: 描画範囲が枠を少しでも越えたときだけ true", () => {
+  const box = { x: 100, y: 200, width: 390, height: 844 };
+  assert.equal(overflowsBounds(box, { ...box }), false);
+  assert.equal(overflowsBounds(box, { x: 100, y: 200, width: 668, height: 844 }), true);
+  assert.equal(overflowsBounds(box, { x: 90, y: 200, width: 400, height: 844 }), true);
+  assert.equal(overflowsBounds(box, { x: 100, y: 190, width: 390, height: 854 }), true);
+  assert.equal(overflowsBounds(box, { x: 110, y: 210, width: 100, height: 40 }), false);
+  assert.equal(overflowsBounds(box, null), false);
+  assert.equal(overflowsBounds(null, box), false);
 });

@@ -88,12 +88,15 @@ GROUP の子の `x` / `y` は GROUP ではなく外側の container に対する
 
 - `meta.scope`: `selection` (選択を書き出した) か `page:<ページ名>` (未選択でページ直下を書き出した)。
 - `meta.screenshotScale`: スクリーンショットの倍率 (`2` か `1`)。
-  png のピクセル数は、`width` / `height` にこの倍率を掛けた値になる。
+  png は画面フレームの枠で切って書き出すので、png のピクセル数は `width` / `height` にこの倍率を掛けた値になり、png の左上は枠の左上に当たる。
   座標を png のピクセルに当てるときは、座標にこの倍率を掛ける。
+  枠の外にはみ出した描画 (横スクロールの続き・影など) は png に入らない。
+  はみ出しがあったフレームは `meta.warnings` に出て、はみ出した部分のノードは json にある。
 - `meta.warnings`: 次のものが 1 行ずつ入る。
   - 書き出し中に起きた失敗 (スクリーンショット失敗・空の PNG・画像の取得失敗・コンポーネント情報の読み取り失敗など)
   - 非表示のため除外したノード (`非表示のため除外: <name> (<id>)`)
   - ZIP 内パスが 200 文字を超えたもの (`パスが長い (N 文字): <path>`。展開先によってはパス長の上限に当たる)
+  - 枠の外に描画があり、png を枠で切った画面フレーム (`枠の外に描画があり、png は枠で切った: <name> (<id>)`)
 - `sections`: トップレベルのセクション。document 順に並ぶ。
 - `frames`: ZIP 直下に置いた画面フレーム (直接選ばれたノード・ページ直下のノード)。
 - `assets`: ノードの `fills[].imageRef` → ZIP 内の画像ファイルのパス。
@@ -119,7 +122,10 @@ GROUP の子の `x` / `y` は GROUP ではなく外側の container に対する
 ```
 
 - `type`: Figma のノード種別 (`FRAME`・`INSTANCE`・`COMPONENT`・`GROUP` など)。
-- `componentName` / `componentSetName`: `INSTANCE` の元のコンポーネントの名前と、それが属するコンポーネントセットの名前。
+- `componentName` / `componentSetName`: コンポーネントの名前とコンポーネントセットの名前。
+  `INSTANCE` では元のコンポーネントの名前が `componentName` に、それが属するセットの名前が `componentSetName` に入る。
+  セットの中の `COMPONENT` (バリアントの定義) を直接選んだときは、`componentSetName` だけが入る。
+  配置した画面か定義かは `type` で見分ける。
   バリアントの `componentName` は `Property 1=Default` のような形なので、画面を名前で拾うときは `componentSetName` を見る。
   画面フレームの json の `node` にある同名のキーと同じ値で、そちらに無いときはここにも無い。
 - `png` / `json`: ZIP 内のパス。

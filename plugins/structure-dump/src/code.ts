@@ -19,9 +19,11 @@ import {
   errorDetail,
   FetchResult,
   FrameComponent,
+  frameComponentOf,
   longPaths,
   MAX_ZIP_PATH_CHARS,
   newExportOutput,
+  overflowsBounds,
   planDump,
   recordAsset,
   recordScreenshot,
@@ -124,16 +126,19 @@ async function run(): Promise<void> {
     const frame = frames[i];
     const dumped = await serialize(frame.node);
     out.entries.push(jsonEntry(frame.json, buildFrameJson(frame, dumped)));
-    const componentName =
-      typeof dumped.componentName === "string" ? dumped.componentName : undefined;
-    const componentSetName =
-      typeof dumped.componentSetName === "string" ? dumped.componentSetName : undefined;
-    if (componentName !== undefined || componentSetName !== undefined) {
-      frameComponents.set(frame.id, { componentName, componentSetName });
+    const component = frameComponentOf(dumped);
+    if (component !== undefined) frameComponents.set(frame.id, component);
+    const node = frame.node;
+    const box = "absoluteBoundingBox" in node ? node.absoluteBoundingBox : null;
+    const render = "absoluteRenderBounds" in node ? node.absoluteRenderBounds : null;
+    if (overflowsBounds(box, render)) {
+      out.warnings.push(`枠の外に描画があり、png は枠で切った: ${frame.name} (${frame.id})`);
     }
+    // 枠 (width × height) の範囲で書き出し、png の左上を枠の左上に合わせる (座標で png を指せるようにする)
     const shot = await fetchBytes(() =>
-      frame.node.exportAsync({
+      node.exportAsync({
         format: "PNG",
+        useAbsoluteBounds: true,
         constraint: { type: "SCALE", value: screenshotScale },
       })
     );

@@ -302,6 +302,38 @@ export interface FrameComponent {
   componentSetName?: string;
 }
 
+/** 画面フレームの json の node と同じ値を index.json に載せるため、serialize の結果から取り出す */
+export function frameComponentOf(
+  dumped: Readonly<Record<string, unknown>>
+): FrameComponent | undefined {
+  const component: FrameComponent = {};
+  if (typeof dumped.componentName === "string") component.componentName = dumped.componentName;
+  if (typeof dumped.componentSetName === "string") {
+    component.componentSetName = dumped.componentSetName;
+  }
+  return Object.keys(component).length > 0 ? component : undefined;
+}
+
+export interface Rect {
+  x: number;
+  y: number;
+  width: number;
+  height: number;
+}
+
+const BOUNDS_EPSILON = 0.01;
+
+/** 描画範囲 (影・枠からはみ出した子を含む) が枠を越えるか。越えた部分は png に入らない */
+export function overflowsBounds(box: Rect | null, render: Rect | null): boolean {
+  if (box === null || render === null) return false;
+  return (
+    render.x < box.x - BOUNDS_EPSILON ||
+    render.y < box.y - BOUNDS_EPSILON ||
+    render.x + render.width > box.x + box.width + BOUNDS_EPSILON ||
+    render.y + render.height > box.y + box.height + BOUNDS_EPSILON
+  );
+}
+
 function frameEntry<T extends PlanNode>(
   frame: FramePlan<T>,
   writtenPngs: ReadonlySet<string>,
