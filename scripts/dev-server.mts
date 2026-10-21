@@ -6,7 +6,7 @@
  */
 import path from "node:path";
 import { parseArgs } from "node:util";
-import { createDevServer, DEV_PORT, listenOnHosts, portInUseMessage } from "./dev-server-lib.mts";
+import { createDevServer, DEV_PORTS, listenOnCandidatePorts, notStartedMessage } from "./dev-server-lib.mts";
 
 const { values } = parseArgs({
   options: { out: { type: "string", default: ".dev-dump" } },
@@ -19,14 +19,15 @@ const handler = createDevServer({
 });
 
 // localhost が IPv4 と IPv6 のどちらに解決されても届くよう両方で受ける。
-// LAN へは開かない (依頼を受けると Figma の中身を書き出すため)
-const outcome = await listenOnHosts(handler, DEV_PORT, ["127.0.0.1", "::1"]);
-outcome.errors.forEach((e) => console.error(`待ち受けられない: ${e}`));
-if (outcome.inUse !== undefined) {
-  // localhost に聞くと、もう片方のアドレスで別のものに届きうるので、使用中だったアドレスに聞く
-  const message = await portInUseMessage(`http://${outcome.inUse}:${DEV_PORT}`);
-  console.error(`ポート ${DEV_PORT} は使用中で起動できない。${message}`);
+// LAN へは開かない (依頼を受けると Figma の中身を書き出し、script を実行するため)
+const outcome = await listenOnCandidatePorts(handler, DEV_PORTS, ["127.0.0.1", "::1"]);
+if (outcome.kind !== "listening") {
+  console.error(notStartedMessage(outcome));
   process.exit(1);
 }
+outcome.errors.forEach((e) => console.error(`待ち受けられない: ${e}`));
 if (outcome.servers.length === 0) process.exit(1);
-console.log(`dev サーバー: http://localhost:${DEV_PORT} (結果は ${outDir}/latest)`);
+if (outcome.busy.length > 0) {
+  console.log(`ポート ${outcome.busy.join("・")} はほかのアプリが使っているので、次の候補で起動した`);
+}
+console.log(`dev サーバー: http://localhost:${outcome.port} (結果は ${outDir}/latest)`);

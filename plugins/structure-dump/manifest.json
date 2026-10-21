@@ -13,6 +13,12 @@
   ],
   "networkAccess": {
     "allowedDomains": ["none"],
-    "devAllowedDomains": ["http://localhost:47717/"]
+    "devAllowedDomains": [
+      "http://localhost:47717/",
+      "http://localhost:47718/",
+      "http://localhost:47719/",
+      "http://localhost:47720/",
+      "http://localhost:47721/"
+    ]
   }
 }

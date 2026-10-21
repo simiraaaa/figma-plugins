@@ -43,6 +43,7 @@ import {
   STYLES_JSON_NAME,
   VARIABLES_JSON_NAME,
 } from "./plan";
+import { runScript } from "./run";
 import zipReadme from "./zip-readme.md";
 import { buildZip, utf8Encode, ZipEntry } from "./zip";
 
@@ -451,14 +452,41 @@ async function devTarget(nodeIds: readonly string[] | undefined): Promise<DumpTa
   return { roots: nodes, source: "nodes", scope: "nodes" };
 }
 
+interface DevRunRequest {
+  seq: number;
+  code: string;
+  token: string;
+}
+
+type DevMessage =
+  | { type: "dev-request"; request: DevRequest }
+  | { type: "run-request"; request: DevRunRequest }
+  | { type: "dev-token"; token: string };
+
+/** script の実行の合言葉。ホットリロードやファイルをまたいで同じ値を使えるよう、clientStorage に残す */
+const RUN_TOKEN_KEY = "devRunToken";
+
 /**
  * UI が dev サーバーから依頼を long-poll で取り、ここへ 1 件ずつ渡す。
  * 結果は UI がサーバーへ POST する (ネットワークに出られるのは UI の iframe だけ)
  */
-function runDevLoop(): void {
+async function runDevLoop(): Promise<void> {
   figma.showUI(__html__, { width: 480, height: 600 });
-  figma.ui.onmessage = async (msg: { type?: string; request?: DevRequest }) => {
-    if (msg.type !== "dev-request" || msg.request === undefined) return;
+  const stored: unknown = await figma.clientStorage.getAsync(RUN_TOKEN_KEY);
+  let runToken = typeof stored === "string" ? stored : undefined;
+  figma.ui.onmessage = async (msg: DevMessage) => {
+    if (msg.type === "dev-token") {
+      runToken = msg.token;
+      await figma.clientStorage.setAsync(RUN_TOKEN_KEY, msg.token);
+      return;
+    }
+    if (msg.type === "run-request") {
+      const { seq, code, token } = msg.request;
+      const body = await runScript({ code, token, expectedToken: runToken, api: figma });
+      figma.ui.postMessage({ type: "run-result", seq, body });
+      return;
+    }
+    if (msg.type !== "dev-request") return;
     const request = msg.request;
     try {
       const outcome = await dump(
@@ -474,7 +502,8 @@ function runDevLoop(): void {
       figma.ui.postMessage({ type: "dev-error", seq: request.seq, message: failureText(err) });
     }
   };
-  figma.ui.postMessage({ type: "dev-start" });
+  // 合言葉がまだ無ければ、UI が作って dev-token で送り返す
+  figma.ui.postMessage({ type: "dev-start", token: runToken });
 }
 
 // ---------------------------------------------------------------------------
@@ -492,7 +521,9 @@ async function run(): Promise<void> {
 }
 
 if (figma.command === DEV_LOOP_COMMAND) {
-  runDevLoop();
+  runDevLoop().catch((err: unknown) => {
+    figma.ui.postMessage({ type: "error", message: `${failureText(err)}\n開発ループを始められませんでした` });
+  });
 } else {
   /**
    * 想定外の例外を UI へ届く診断へ畳む。裸の run() だと unhandled rejection になり
