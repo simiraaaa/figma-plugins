@@ -27,7 +27,9 @@ export const DEV_PORT = 47717;
 /** プラグインの UI が /next を待つ長さ。これを過ぎたら 204 を返し、UI は待ち直す */
 const POLL_HOLD_MS = 25_000;
 /** 最後にプラグインが来てからこれを過ぎ、待っている /next も書き出し中の依頼も無ければ、繋がっていないと見る */
-const PLUGIN_STALE_MS = POLL_HOLD_MS + 10_000;
+const DEFAULT_PLUGIN_STALE_MS = POLL_HOLD_MS + 10_000;
+/** /next で渡してからこれを過ぎても結果が来ない依頼は、書き出し中と見ない (途中でプラグインを閉じた) */
+const DEFAULT_HANDED_OUT_MS = 120_000;
 /**
  * localhost 以外の名前で来た送信 (DNS rebinding でブラウザのサイトが自分の名前を 127.0.0.1 に向けたもの) は断る。
  * URL の hostname の形で比べる
@@ -168,6 +170,8 @@ type Outcome = { ok: true; status: DevStatus } | { ok: false; status: DevStatus 
 export interface DevServerOptions {
   outDir: string;
   keepResults?: number;
+  pluginStaleMs?: number;
+  handedOutMs?: number;
   log?: (line: string) => void;
 }
 
@@ -234,30 +238,37 @@ export function createDevServer(options: DevServerOptions): http.RequestListener
   const pollers = new Set<() => void>();
   const outcomeWaiters = new Map<number, Set<(outcome: Outcome) => void>>();
   const statusWaiters = new Set<() => void>();
-  /** /next で渡して、まだ結果も失敗も来ていない依頼 */
-  const handedOut = new Set<number>();
+  const pluginStaleMs = options.pluginStaleMs ?? DEFAULT_PLUGIN_STALE_MS;
+  const handedOutMs = options.handedOutMs ?? DEFAULT_HANDED_OUT_MS;
+  /** /next で渡して、まだ結果も失敗も来ていない依頼 → 渡した時刻 */
+  const handedOut = new Map<number, number>();
   let lastPluginSeen = 0;
 
   mkdirSync(resultsDir, { recursive: true });
   // results/ は起動をまたいで残る。前回の続きの番号から振らないと、保持件数の掃除が新しい結果を消す
-  let status: DevStatus = { version: lastVersion() };
+  let status: DevStatus = previousStatus();
 
-  function lastVersion(): number {
+  function previousStatus(): DevStatus {
     const versions = readdirSync(resultsDir).map(Number).filter((n) => Number.isInteger(n));
+    let previous: DevStatus | undefined;
     try {
-      const previous = JSON.parse(readFileSync(path.join(outDir, "status.json"), "utf8")) as {
-        version?: unknown;
-      };
-      if (typeof previous.version === "number") versions.push(previous.version);
+      const parsed = JSON.parse(readFileSync(path.join(outDir, "status.json"), "utf8")) as unknown;
+      if (typeof parsed === "object" && parsed !== null && typeof (parsed as DevStatus).version === "number") {
+        previous = parsed as DevStatus;
+        versions.push(previous.version);
+      }
     } catch {
       // 初回の起動では status.json が無い
     }
-    return Math.max(0, ...versions);
+    return { ...previous, version: Math.max(0, ...versions) };
   }
 
   function pluginConnected(): boolean {
+    const now = Date.now();
     return (
-      pollers.size > 0 || handedOut.size > 0 || Date.now() - lastPluginSeen < PLUGIN_STALE_MS
+      pollers.size > 0 ||
+      now - lastPluginSeen < pluginStaleMs ||
+      Array.from(handedOut.values()).some((at) => now - at < handedOutMs)
     );
   }
 
@@ -432,7 +443,7 @@ export function createDevServer(options: DevServerOptions): http.RequestListener
       const sameServer = url.searchParams.get("server") === serverId;
       const after = afterParam !== null && sameServer ? Number(afterParam) : undefined;
       const reply = (request: DumpRequest): void => {
-        handedOut.add(request.seq);
+        handedOut.set(request.seq, Date.now());
         send(res, 200, { server: serverId, ...request });
       };
       const ready = nextRequestFor(after);

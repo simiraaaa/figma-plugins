@@ -7,7 +7,7 @@
  */
 import { test } from "node:test";
 import assert from "node:assert/strict";
-import { existsSync, mkdirSync, mkdtempSync, readFileSync, realpathSync } from "node:fs";
+import { existsSync, mkdirSync, mkdtempSync, readFileSync, realpathSync, writeFileSync } from "node:fs";
 import http from "node:http";
 import type { AddressInfo } from "node:net";
 import { tmpdir } from "node:os";
@@ -16,6 +16,7 @@ import { fileURLToPath } from "node:url";
 import {
   createDevServer,
   DEV_PORT,
+  type DevServerOptions,
   type DevStatus,
   type DumpRequest,
   entryPath,
@@ -48,9 +49,10 @@ function sampleZip(): Uint8Array {
 }
 
 async function startServer(
-  outDir = mkdtempSync(path.join(tmpdir(), "structure-dump-dev-"))
+  outDir = mkdtempSync(path.join(tmpdir(), "structure-dump-dev-")),
+  options: Partial<DevServerOptions> = {}
 ): Promise<{ base: string; port: number; outDir: string; close: () => void }> {
-  const server = http.createServer(createDevServer({ outDir }));
+  const server = http.createServer(createDevServer({ outDir, ...options }));
   await new Promise<void>((resolve) => server.listen(0, "127.0.0.1", resolve));
   const { port } = server.address() as AddressInfo;
   return {
@@ -221,6 +223,38 @@ test("起動し直しても版の番号は前回の続きから振り、新し�
     assert.equal(status.version, 51);
     assert.equal(existsSync(path.join(outDir, "results", "51", "index.json")), true);
     assert.equal(realpathSync(path.join(outDir, "latest")), realpathSync(status.dir as string));
+  } finally {
+    close();
+  }
+});
+
+test("起動し直した直後の status は、前回の最後の結果を返す", async () => {
+  const outDir = mkdtempSync(path.join(tmpdir(), "structure-dump-dev-"));
+  writeFileSync(
+    path.join(outDir, "status.json"),
+    JSON.stringify({ version: 7, seq: 3, dir: "/x/results/7", fileName: "Rabee UI", files: 4 })
+  );
+  const { base, close } = await startServer(outDir);
+  try {
+    const status = await json<DevStatus>(fetch(`${base}/status`));
+    assert.equal(status.version, 7);
+    assert.equal(status.fileName, "Rabee UI");
+    assert.equal(status.dir, "/x/results/7");
+  } finally {
+    close();
+  }
+});
+
+test("書き出しの途中でプラグインが閉じられたら、渡した依頼が残っていても繋がっていないと見る", async () => {
+  const { base, close } = await startServer(undefined, { pluginStaleMs: 50, handedOutMs: 50 });
+  try {
+    const polled = pluginNext(base);
+    const exported = fetch(`${base}/export?timeout=1`, { method: "POST", body: "" });
+    await json<Next>(polled);
+    assert.equal((await exported).status, 504);
+    await new Promise((resolve) => setTimeout(resolve, 100));
+    const res = await fetch(`${base}/export?timeout=5`, { method: "POST", body: "" });
+    assert.equal(res.status, 503);
   } finally {
     close();
   }
