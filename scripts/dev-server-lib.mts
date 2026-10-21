@@ -179,6 +179,8 @@ export interface PluginState {
 }
 
 export interface StatusReply extends DevStatus {
+  /** 結果の置き場所。ほかのセッションが起動した dev サーバーに相乗りしたとき、どこに届くかを知るため */
+  outDir: string;
   plugin: PluginState;
 }
 
@@ -250,6 +252,27 @@ function hostnameOf(host: string | undefined): string | undefined {
   } catch {
     return undefined;
   }
+}
+
+/** ポートが使用中で起動できなかったとき、使っているのが dev サーバーかを GET /status で確かめ、次にどうするかを返す */
+export async function portInUseMessage(base: string): Promise<string> {
+  try {
+    const res = await fetch(`${base}/status`, { signal: AbortSignal.timeout(2000) });
+    const body = (await res.json()) as Partial<StatusReply>;
+    if (typeof body.version === "number") {
+      const where = typeof body.outDir === "string" ? `結果の置き場所は ${body.outDir}。` : "";
+      return (
+        `dev サーバーはもう動いている。${where}新しく起動せず、動いているほうにそのまま依頼する。` +
+        "止めると、それを使っているほかのセッションの依頼も止まる"
+      );
+    }
+  } catch {
+    // JSON を返さない・答えないなら dev サーバーではない
+  }
+  return (
+    `ポート ${DEV_PORT} は dev サーバー以外が使っている。そのアプリを止めるか、ポートを変える ` +
+    "(scripts/dev-server-lib.mts の DEV_PORT・manifest の devAllowedDomains・ui.html の DEV_SERVER をそろえて変え、プラグインを起動し直す)"
+  );
 }
 
 /** 返すのは http.createServer に渡すハンドラ。listen は呼び出し側が行う */
@@ -328,7 +351,7 @@ export function createDevServer(options: DevServerOptions): http.RequestListener
   }
 
   function statusReply(): StatusReply {
-    return { ...status, plugin: pluginState() };
+    return { ...status, outDir, plugin: pluginState() };
   }
 
   function setProcessing(next: typeof processing): void {

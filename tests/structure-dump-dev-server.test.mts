@@ -22,6 +22,7 @@ import {
   entryPath,
   parseExportBody,
   type PluginState,
+  portInUseMessage,
   readStoredZip,
   type RequestReply,
   type StatusReply,
@@ -228,6 +229,34 @@ test("起動し直しても版の番号は前回の続きから振り、新し�
     assert.equal(realpathSync(path.join(outDir, "latest")), realpathSync(status.dir as string));
   } finally {
     close();
+  }
+});
+
+test("ポートが使用中のとき、使っているのが dev サーバーなら結果の置き場所を添えて、そのまま使うよう案内する", async () => {
+  const { base, outDir, close } = await startServer();
+  try {
+    assert.equal((await json<StatusReply>(fetch(`${base}/status`))).outDir, outDir);
+    const message = await portInUseMessage(base);
+    assert.match(message, /dev サーバーはもう動いている/);
+    assert.ok(message.includes(outDir), "結果の置き場所が無い");
+  } finally {
+    close();
+  }
+});
+
+test("ポートが使用中のとき、使っているのが dev サーバーでなければ、ポートの変え方を案内する", async () => {
+  const other = http.createServer((_req, res) => {
+    res.writeHead(200, { "Content-Type": "text/html" });
+    res.end("<html></html>");
+  });
+  await new Promise<void>((resolve) => other.listen(0, "127.0.0.1", resolve));
+  try {
+    const { port } = other.address() as AddressInfo;
+    const message = await portInUseMessage(`http://127.0.0.1:${port}`);
+    assert.match(message, /dev サーバー以外/);
+    assert.match(message, /devAllowedDomains/);
+  } finally {
+    other.close();
   }
 });
 
