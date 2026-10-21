@@ -74,21 +74,9 @@ function devTargets(request) {
   return request.nodeIds ? request.nodeIds.join(", ") : "開いているページの選択 (未選択ならページ直下)";
 }
 
-/**
- * 書き出し中は /next を待たないので、dev サーバーが「繋がっていない」と見て次の依頼を断らないよう、
- * 終わるまで POST /alive を送り続ける (止まれば、プラグインを閉じたと分かる)
- */
-const DEV_ALIVE_MS = 10000;
-
 function dumpInPlugin(request) {
-  const alive = setInterval(() => {
-    fetch(`${DEV_SERVER}/alive`, { method: "POST" }).catch(() => {});
-  }, DEV_ALIVE_MS);
   return new Promise((resolve) => {
-    devResolve = (msg) => {
-      clearInterval(alive);
-      resolve(msg);
-    };
+    devResolve = resolve;
     parent.postMessage({ pluginMessage: { type: "dev-request", request } }, "*");
   });
 }
