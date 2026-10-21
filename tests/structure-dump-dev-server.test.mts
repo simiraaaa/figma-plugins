@@ -288,11 +288,52 @@ test("時間切れの 504 には、プラグインが処理中の依頼と最後
     await json<Next>(polled);
     const res = await fetch(`${base}/export?timeout=0.2`, { method: "POST", body: "" });
     assert.equal(res.status, 504);
-    const body = await json<{ seq: number; plugin: PluginState }>(res);
+    const body = await json<{ seq: number; error: string; plugin: PluginState }>(res);
     assert.equal(body.seq, 2);
+    assert.match(body.error, /#1 の結果がまだ来ていない/);
     assert.equal(body.plugin.processing?.seq, 1);
     assert.deepEqual(body.plugin.processing?.nodeIds, ["1:2"]);
     assert.equal(typeof body.plugin.lastSeenAt, "string");
+  } finally {
+    close();
+  }
+});
+
+test("走り直したプラグインが飛ばした依頼の 504 では、処理中の seq が時間切れの依頼より大きい", async () => {
+  const { base, close } = await startServer();
+  try {
+    const polled = pluginNext(base);
+    const first = fetch(`${base}/export?timeout=5`, { method: "POST", body: "" });
+    first.catch(() => {});
+    await json<Next>(polled);
+    const skipped = fetch(`${base}/export?timeout=0.5`, { method: "POST", body: "" });
+    const latest = fetch(`${base}/export?timeout=5`, { method: "POST", body: "" });
+    latest.catch(() => {});
+    await new Promise((resolve) => setTimeout(resolve, 50));
+    // 走り直したプラグインはサーバーの id を知らないので、最後の依頼だけを受け取る
+    assert.equal((await json<Next>(pluginNext(base))).seq, 3);
+    const res = await skipped;
+    assert.equal(res.status, 504);
+    const body = await json<{ seq: number; plugin: PluginState }>(res);
+    assert.equal(body.seq, 2);
+    assert.equal(body.plugin.processing?.seq, 3);
+  } finally {
+    close();
+  }
+});
+
+test("status?after の 504 は、最後の結果が失敗でも時間切れの理由を返す", async () => {
+  const { base, close } = await startServer();
+  try {
+    const polled = pluginNext(base);
+    const exported = fetch(`${base}/export?timeout=5`, { method: "POST", body: "" });
+    await pluginPost(base, "error", await json<Next>(polled), "ノードが見つからない: 9:9");
+    assert.equal((await exported).status, 422);
+    const res = await fetch(`${base}/status?after=1&timeout=0.2`);
+    assert.equal(res.status, 504);
+    const body = await json<StatusReply>(res);
+    assert.match(body.error as string, /新しい結果が来ない/);
+    assert.equal(body.version, 1);
   } finally {
     close();
   }

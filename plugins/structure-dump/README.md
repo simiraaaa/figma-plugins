@@ -81,11 +81,16 @@ AI が Figma のデータを、クリックも Figma MCP の回数上限もな�
      Claude Code の Bash ツールは既定で 120 秒で切れるので、大きな書き出しでは Bash の timeout も延ばす。
    - 503 と 504 の本文には、プラグインの様子 (`plugin`) が入る。
      `plugin.processing` はプラグインへ渡してまだ結果が返っていない依頼 (`seq`・`nodeIds`・渡してからの秒数 `elapsedSeconds`) で、`plugin.lastSeenAt` は最後にプラグインから何か届いた時刻。
-     504 でも `plugin.processing` があれば、プラグインは書き出し中で、時間切れになった依頼もあとで書き出す (`plugin.processing.seq` がその依頼なら書き出しの最中、前の依頼なら順番待ち)。
-     送り直さずに、`GET /status` で今の `version` を取り、`GET /status?after=<version>` で次の結果を待つ。
-     届いた結果の `seq` が自分の依頼でなければ (前の依頼の結果なら)、その `version` でもう一度待つ。
-     `elapsedSeconds` が伸び続けるときは、Figma が前に出ているか、プラグインが開いているかを人か computer use で確かめる。
-     504 で `plugin.processing` が無ければ、プラグインはその依頼を受け取っていない。プラグインが開いているか確かめてから送り直す。
+     504 のときは、504 の `seq` (時間切れになった自分の依頼) と `plugin.processing` で次のように扱う。
+     - `plugin.processing` が無い: プラグインはその依頼を受け取っていない。
+       プラグインが開いているか確かめてから送り直す。
+     - `plugin.processing.seq` が自分の `seq` と同じか小さい: プラグインへ渡した依頼の結果がまだ来ていない (書き出し中か、書き出しの途中でプラグインを閉じた)。
+       同じなら書き出しの最中、小さければ順番待ちで、どちらもあとで書き出す。
+       送り直さずに `GET /status` を見る。
+       `seq` が自分の依頼ならそれが結果で、違えばその `version` で `GET /status?after=<version>` を待ち、届いた結果の `seq` を同じように確かめる。
+       `elapsedSeconds` が伸び続けるときは、Figma が前に出ているか、プラグインが開いているかを人か computer use で確かめる。
+     - `plugin.processing.seq` が自分の `seq` より大きい: プラグインが走り直して最後の依頼だけを書き出している (制約を参照)。
+       自分の依頼は書き出されないので送り直す。
    - `<置き場所>/status.json` と `GET /status` は、最後に受けた結果 (`version`・`seq`・`dir`・`fileName`・`warnings`・`error`) を返す。
      `GET /status` には `plugin` も入る。
      `GET /status?after=<version>` は、それより新しい結果が届くまで待つ (どの依頼の結果でも返る)。

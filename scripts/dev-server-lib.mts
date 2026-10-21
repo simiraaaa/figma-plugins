@@ -462,10 +462,11 @@ export function createDevServer(options: DevServerOptions): http.RequestListener
         seconds * 1000,
         () => {
           const plugin = pluginState();
+          // 書き出しの途中でプラグインを閉じても処理中は残るので、「書き出し中」とは断定しない
           const hint =
             plugin.processing === undefined
               ? "Figma で「開発: dev サーバーとつなぐ」を開いているか確かめる"
-              : `プラグインは #${plugin.processing.seq} を書き出し中`;
+              : `プラグインへ渡した #${plugin.processing.seq} の結果がまだ来ていない`;
           send(res, 504, {
             error: `${seconds} 秒待ってもプラグインから結果が来ない (${hint})`,
             seq: request.seq,
@@ -520,8 +521,9 @@ export function createDevServer(options: DevServerOptions): http.RequestListener
         send(res, 409, { error: "別の起動のサーバーの依頼の結果は受けない" });
         return;
       }
-      if (processing?.request.seq === seq) processing = undefined;
       const body = await readBody(req);
+      // 本文を受け取り終えるまでは処理中のままにする (受信中に時間切れになった依頼側に、処理中と見せる)
+      if (processing?.request.seq === seq) processing = undefined;
       if (route === "POST /error") {
         storeError(seq, body.toString("utf8"));
         send(res, 200, status);
@@ -561,7 +563,7 @@ export function createDevServer(options: DevServerOptions): http.RequestListener
           return () => statusWaiters.delete(waiter);
         },
         seconds * 1000,
-        () => send(res, 504, { error: `${seconds} 秒待っても新しい結果が来ない`, ...statusReply() })
+        () => send(res, 504, { ...statusReply(), error: `${seconds} 秒待っても新しい結果が来ない` })
       );
       return;
     }
