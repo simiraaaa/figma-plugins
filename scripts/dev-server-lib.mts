@@ -267,12 +267,61 @@ export async function portInUseMessage(base: string): Promise<string> {
       );
     }
   } catch {
-    // JSON を返さない・答えないなら dev サーバーではない
+    // JSON を返さない・2 秒以内に答えない
   }
   return (
-    `ポート ${DEV_PORT} は dev サーバー以外が使っている。そのアプリを止めるか、ポートを変える ` +
+    `ポート ${DEV_PORT} を使っている相手が dev サーバーとして答えない (別のアプリか、答えられなくなった dev サーバー)。` +
+    "そのアプリを止めるか、ポートを変える " +
     "(scripts/dev-server-lib.mts の DEV_PORT・manifest の devAllowedDomains・ui.html の DEV_SERVER をそろえて変え、プラグインを起動し直す)"
   );
+}
+
+export interface ListenOutcome {
+  /** 待ち受けているサーバー。使用中のアドレスがあったときは空 (待ち受けた分も閉じる) */
+  servers: http.Server[];
+  /** 使用中だったアドレス (URL に書く形。IPv6 は [] で囲む) */
+  inUse?: string;
+  /** 使用中以外の理由で待ち受けられなかったアドレスと理由 */
+  errors: string[];
+}
+
+/**
+ * hosts のそれぞれで port を待ち受ける。どれかが使用中なら、待ち受けた分も閉じる
+ * (片方だけで依頼を受け始めると、起動できなかったプロセスが依頼を受けてしまう)
+ */
+export function listenOnHosts(
+  handler: http.RequestListener,
+  port: number,
+  hosts: readonly string[]
+): Promise<ListenOutcome> {
+  return new Promise((resolve) => {
+    const listening: http.Server[] = [];
+    const errors: string[] = [];
+    let inUse: string | undefined;
+    let settled = 0;
+    const settle = (): void => {
+      settled += 1;
+      if (settled < hosts.length) return;
+      if (inUse === undefined) {
+        resolve({ servers: listening, errors });
+        return;
+      }
+      listening.forEach((server) => server.close());
+      resolve({ servers: [], inUse, errors });
+    };
+    for (const host of hosts) {
+      const server = http.createServer(handler);
+      server.once("error", (e: NodeJS.ErrnoException) => {
+        if (e.code === "EADDRINUSE") inUse ??= host.includes(":") ? `[${host}]` : host;
+        else errors.push(`${host}: ${e.message}`);
+        settle();
+      });
+      server.listen(port, host, () => {
+        listening.push(server);
+        settle();
+      });
+    }
+  });
 }
 
 /** 返すのは http.createServer に渡すハンドラ。listen は呼び出し側が行う */

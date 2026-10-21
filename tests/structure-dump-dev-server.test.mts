@@ -20,6 +20,7 @@ import {
   type DevStatus,
   type DumpRequest,
   entryPath,
+  listenOnHosts,
   parseExportBody,
   type PluginState,
   portInUseMessage,
@@ -244,7 +245,7 @@ test("ポートが使用中のとき、使っているのが dev サーバーな
   }
 });
 
-test("ポートが使用中のとき、使っているのが dev サーバーでなければ、ポートの変え方を案内する", async () => {
+test("ポートが使用中のとき、使っているのが dev サーバーとして答えなければ、ポートの変え方を案内する", async () => {
   const other = http.createServer((_req, res) => {
     res.writeHead(200, { "Content-Type": "text/html" });
     res.end("<html></html>");
@@ -253,10 +254,44 @@ test("ポートが使用中のとき、使っているのが dev サーバーで
   try {
     const { port } = other.address() as AddressInfo;
     const message = await portInUseMessage(`http://127.0.0.1:${port}`);
-    assert.match(message, /dev サーバー以外/);
+    assert.match(message, /dev サーバーとして答えない/);
     assert.match(message, /devAllowedDomains/);
   } finally {
     other.close();
+  }
+});
+
+test("片方のアドレスだけ使用中なら、待ち受けたもう片方も閉じて、使用中のアドレスを返す", async () => {
+  const other = http.createServer((_req, res) => res.end());
+  await new Promise<void>((resolve) => other.listen(0, "127.0.0.1", resolve));
+  const { port } = other.address() as AddressInfo;
+  try {
+    const outcome = await listenOnHosts((_req, res) => res.end(), port, ["127.0.0.1", "::1"]);
+    assert.equal(outcome.inUse, "127.0.0.1");
+    assert.deepEqual(outcome.servers, []);
+    // ::1 で待ち受けたままにしていないので、依頼は届かない
+    const reached = await fetch(`http://[::1]:${port}/status`, { signal: AbortSignal.timeout(1000) }).then(
+      () => true,
+      () => false
+    );
+    assert.equal(reached, false, "使用中で起動できないのに、もう片方で依頼を受けている");
+  } finally {
+    other.close();
+  }
+});
+
+test("どのアドレスも空いていれば、全部で待ち受ける", async () => {
+  const probe = http.createServer();
+  await new Promise<void>((resolve) => probe.listen(0, "127.0.0.1", resolve));
+  const { port } = probe.address() as AddressInfo;
+  await new Promise((resolve) => probe.close(resolve));
+  const outcome = await listenOnHosts((_req, res) => res.end("ok"), port, ["127.0.0.1", "::1"]);
+  try {
+    assert.equal(outcome.inUse, undefined);
+    assert.equal(outcome.servers.length, 2);
+    assert.equal(await (await fetch(`http://[::1]:${port}/`)).text(), "ok");
+  } finally {
+    outcome.servers.forEach((s) => s.close());
   }
 });
 
