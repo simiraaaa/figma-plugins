@@ -82,20 +82,39 @@ function dumpInPlugin(request) {
 }
 
 /** fetch の本文は Content-Type を付けない形 (Uint8Array・文字列) にし、CORS の preflight を起こさない */
+async function devPost(route, request, body) {
+  const res = await fetch(`${DEV_SERVER}/${route}?seq=${request.seq}&server=${request.server}`, {
+    method: "POST",
+    body,
+  });
+  if (!res.ok) {
+    const error = new Error(`HTTP ${res.status}: ${await res.text()}`);
+    error.httpStatus = res.status;
+    throw error;
+  }
+}
+
 async function devSend(request, outcome) {
   if (outcome.type === "dev-result") {
     const zip = outcome.payload.zip;
     const bytes = zip instanceof Uint8Array ? zip : new Uint8Array(zip);
-    const res = await fetch(`${DEV_SERVER}/result?seq=${request.seq}`, { method: "POST", body: bytes });
-    if (!res.ok) throw new Error(`HTTP ${res.status}: ${await res.text()}`);
+    try {
+      await devPost("result", request, bytes);
+    } catch (e) {
+      // 届かなかったことを依頼側に伝えないと、依頼側は時間切れまで待つ。
+      // HTTP のエラーで返ったときは、サーバーが受け取って理由を記録済み
+      if (e.httpStatus === undefined) {
+        await devPost("error", request, `結果の送信に失敗: ${failureDetail(e)}`);
+      }
+      throw e;
+    }
     const m = outcome.payload.meta;
     devLog(
       `#${request.seq} を送った: 画面フレーム ${m.frameCount} 枚・ZIP ${(m.zipBytes / 1024).toFixed(0)} KB・警告 ${m.warnings.length} 件`
     );
     return;
   }
-  const res = await fetch(`${DEV_SERVER}/error?seq=${request.seq}`, { method: "POST", body: outcome.message });
-  if (!res.ok) throw new Error(`HTTP ${res.status}: ${await res.text()}`);
+  await devPost("error", request, outcome.message);
   devLog(`#${request.seq} は書き出せなかった (dev サーバーへ伝えた): ${outcome.message}`);
 }
 
@@ -126,7 +145,7 @@ async function devLoop() {
     after = request.seq;
     const reason =
       Date.parse(request.requestedAt) < startedAt
-        ? "起動・build で走り直したので、最後の依頼をもう一度"
+        ? "起動 (build で走り直したときを含む) より前に積まれていた最後の依頼"
         : "新しい依頼";
     devLog(`#${request.seq} を書き出す (${reason}): ${devTargets(request)}`);
     const outcome = await dumpInPlugin(request);

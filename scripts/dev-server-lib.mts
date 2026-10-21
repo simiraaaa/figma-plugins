@@ -13,6 +13,7 @@ import { randomUUID } from "node:crypto";
 import {
   mkdirSync,
   readdirSync,
+  readFileSync,
   renameSync,
   rmSync,
   symlinkSync,
@@ -25,6 +26,15 @@ export const DEV_PORT = 47717;
 
 /** プラグインの UI が /next を待つ長さ。これを過ぎたら 204 を返し、UI は待ち直す */
 const POLL_HOLD_MS = 25_000;
+/** 最後にプラグインが来てからこれを過ぎ、待っている /next も書き出し中の依頼も無ければ、繋がっていないと見る */
+const PLUGIN_STALE_MS = POLL_HOLD_MS + 10_000;
+/**
+ * localhost 以外の名前で来た送信 (DNS rebinding でブラウザのサイトが自分の名前を 127.0.0.1 に向けたもの) は断る。
+ * URL の hostname の形で比べる
+ */
+const LOOPBACK_HOSTNAMES: ReadonlySet<string> = new Set(["localhost", "127.0.0.1", "[::1]"]);
+/** プラグインの UI (Origin: null) が使う口。残りは AI (curl。Origin を付けない) が使う口 */
+const PLUGIN_ROUTES: ReadonlySet<string> = new Set(["GET /next", "POST /result", "POST /error"]);
 const DEFAULT_WAIT_SECONDS = 300;
 const KEEP_REQUESTS = 100;
 const DEFAULT_KEEP_RESULTS = 20;
@@ -146,6 +156,8 @@ export interface DevStatus {
   receivedAt?: string;
   /** 展開したディレクトリ (outDir/latest はここを指す) */
   dir?: string;
+  /** 書き出した Figma のファイル名 (index.json の meta.fileName) */
+  fileName?: string;
   files?: number;
   warnings?: string[];
   error?: string;
@@ -178,12 +190,34 @@ function send(res: http.ServerResponse, code: number, body?: unknown): void {
   res.end(JSON.stringify(body, null, 2) + "\n");
 }
 
-function indexWarnings(files: ZipFile[]): string[] | undefined {
+function indexMeta(files: ZipFile[]): Pick<DevStatus, "fileName" | "warnings"> {
   const index = files.find((f) => f.name === "index.json");
-  if (index === undefined) return undefined;
-  const parsed = JSON.parse(new TextDecoder().decode(index.data)) as { meta?: { warnings?: unknown } };
-  const warnings = parsed.meta?.warnings;
-  return Array.isArray(warnings) ? warnings.map(String) : undefined;
+  if (index === undefined) return {};
+  const parsed = JSON.parse(new TextDecoder().decode(index.data)) as {
+    meta?: { fileName?: unknown; warnings?: unknown };
+  };
+  const meta = parsed.meta ?? {};
+  return {
+    fileName: typeof meta.fileName === "string" ? meta.fileName : undefined,
+    warnings: Array.isArray(meta.warnings) ? meta.warnings.map(String) : undefined,
+  };
+}
+
+/** 秒数のクエリ。無ければ既定、正の数でなければ undefined */
+function secondsParam(url: URL): number | undefined {
+  const raw = url.searchParams.get("timeout");
+  if (raw === null) return DEFAULT_WAIT_SECONDS;
+  const seconds = Number(raw);
+  return Number.isFinite(seconds) && seconds > 0 ? seconds : undefined;
+}
+
+function hostnameOf(host: string | undefined): string | undefined {
+  if (host === undefined) return undefined;
+  try {
+    return new URL(`http://${host}`).hostname;
+  } catch {
+    return undefined;
+  }
 }
 
 /** 返すのは http.createServer に渡すハンドラ。listen は呼び出し側が行う */
@@ -200,9 +234,32 @@ export function createDevServer(options: DevServerOptions): http.RequestListener
   const pollers = new Set<() => void>();
   const outcomeWaiters = new Map<number, Set<(outcome: Outcome) => void>>();
   const statusWaiters = new Set<() => void>();
-  let status: DevStatus = { version: 0 };
+  /** /next で渡して、まだ結果も失敗も来ていない依頼 */
+  const handedOut = new Set<number>();
+  let lastPluginSeen = 0;
 
   mkdirSync(resultsDir, { recursive: true });
+  // results/ は起動をまたいで残る。前回の続きの番号から振らないと、保持件数の掃除が新しい結果を消す
+  let status: DevStatus = { version: lastVersion() };
+
+  function lastVersion(): number {
+    const versions = readdirSync(resultsDir).map(Number).filter((n) => Number.isInteger(n));
+    try {
+      const previous = JSON.parse(readFileSync(path.join(outDir, "status.json"), "utf8")) as {
+        version?: unknown;
+      };
+      if (typeof previous.version === "number") versions.push(previous.version);
+    } catch {
+      // 初回の起動では status.json が無い
+    }
+    return Math.max(0, ...versions);
+  }
+
+  function pluginConnected(): boolean {
+    return (
+      pollers.size > 0 || handedOut.size > 0 || Date.now() - lastPluginSeen < PLUGIN_STALE_MS
+    );
+  }
 
   function nextRequestFor(after: number | undefined): DumpRequest | undefined {
     if (after === undefined) return requests[requests.length - 1];
@@ -253,8 +310,8 @@ export function createDevServer(options: DevServerOptions): http.RequestListener
         nodeIds: request?.nodeIds,
         receivedAt: new Date().toISOString(),
         dir,
+        ...indexMeta(files),
         files: files.length,
-        warnings: indexWarnings(files),
       },
       true
     );
@@ -304,22 +361,41 @@ export function createDevServer(options: DevServerOptions): http.RequestListener
   async function handle(req: http.IncomingMessage, res: http.ServerResponse): Promise<void> {
     // プラグインの UI は Content-Type を付けない単純なリクエストだけを送るので、preflight は来ない
     res.setHeader("Access-Control-Allow-Origin", "*");
-    // プラグインの iframe は Origin: null、curl は Origin 無しで来る。
-    // それ以外の Origin はブラウザで開いたサイトからの送信なので、何もせずに断る
+    const url = new URL(req.url ?? "/", "http://localhost");
+    const route = `${req.method} ${url.pathname}`;
+    const hostname = hostnameOf(req.headers.host);
+    if (hostname === undefined || !LOOPBACK_HOSTNAMES.has(hostname)) {
+      send(res, 403, { error: `localhost 以外の名前で来た送信は受けない: ${req.headers.host}` });
+      return;
+    }
+    // プラグインの iframe は Origin: null、curl は Origin 無しで来る。ブラウザで開いたサイトは
+    // 自分の Origin か (sandbox の iframe なら) null を付けるので、AI 側の口は Origin 付きを全部断る
     const origin = req.headers.origin;
-    if (origin !== undefined && origin !== "null") {
+    const fromPlugin = PLUGIN_ROUTES.has(route);
+    if (origin !== undefined && !(fromPlugin && origin === "null")) {
       send(res, 403, { error: `この Origin からは受けない: ${origin}` });
       return;
     }
-    const url = new URL(req.url ?? "/", "http://localhost");
-    const route = `${req.method} ${url.pathname}`;
+    if (fromPlugin) lastPluginSeen = Date.now();
 
     if (route === "POST /export") {
+      const seconds = secondsParam(url);
+      if (seconds === undefined) {
+        send(res, 400, { error: "timeout は正の秒数にする" });
+        return;
+      }
       let parsed: Pick<DumpRequest, "nodeIds" | "scale">;
       try {
         parsed = parseExportBody((await readBody(req)).toString("utf8"));
       } catch (e) {
         send(res, 400, { error: e instanceof Error ? e.message : String(e) });
+        return;
+      }
+      // 繋がっていないのに積むと、あとで開いたプラグインが誰も待っていない依頼を書き出す
+      if (!pluginConnected()) {
+        send(res, 503, {
+          error: "プラグインが繋がっていない (Figma で「開発: dev サーバーとつなぐ」を開いたままにする)",
+        });
         return;
       }
       const request: DumpRequest = { seq: nextSeq, ...parsed, requestedAt: new Date().toISOString() };
@@ -328,7 +404,6 @@ export function createDevServer(options: DevServerOptions): http.RequestListener
       if (requests.length > KEEP_REQUESTS) requests.shift();
       log(`#${request.seq} を受けた: ${request.nodeIds ? request.nodeIds.join(", ") : "プラグインで開いているページの選択"}`);
       pollers.forEach((wake) => wake());
-      const seconds = Number(url.searchParams.get("timeout") ?? DEFAULT_WAIT_SECONDS);
       let resolveOutcome: ((outcome: Outcome) => void) | undefined;
       waitFor(
         res,
@@ -356,8 +431,10 @@ export function createDevServer(options: DevServerOptions): http.RequestListener
       const afterParam = url.searchParams.get("after");
       const sameServer = url.searchParams.get("server") === serverId;
       const after = afterParam !== null && sameServer ? Number(afterParam) : undefined;
-      const reply = (request: DumpRequest): void =>
+      const reply = (request: DumpRequest): void => {
+        handedOut.add(request.seq);
         send(res, 200, { server: serverId, ...request });
+      };
       const ready = nextRequestFor(after);
       if (ready !== undefined) {
         reply(ready);
@@ -387,6 +464,12 @@ export function createDevServer(options: DevServerOptions): http.RequestListener
         send(res, 400, { error: "seq が無い" });
         return;
       }
+      // 起動し直す前のサーバーの依頼の結果は、同じ seq の新しい依頼のものと取り違えるので受けない
+      if (url.searchParams.get("server") !== serverId) {
+        send(res, 409, { error: "別の起動のサーバーの依頼の結果は受けない" });
+        return;
+      }
+      handedOut.delete(seq);
       const body = await readBody(req);
       if (route === "POST /error") {
         storeError(seq, body.toString("utf8"));
@@ -411,7 +494,11 @@ export function createDevServer(options: DevServerOptions): http.RequestListener
         send(res, 200, status);
         return;
       }
-      const seconds = Number(url.searchParams.get("timeout") ?? DEFAULT_WAIT_SECONDS);
+      const seconds = secondsParam(url);
+      if (seconds === undefined) {
+        send(res, 400, { error: "timeout は正の秒数にする" });
+        return;
+      }
       waitFor(
         res,
         (wake) => {
