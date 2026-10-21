@@ -375,6 +375,26 @@ test("status?seq: 走り直したプラグインが飛ばした依頼は、す�
   }
 });
 
+test("status?seq: 走り直したプラグインが同じ依頼を書き出し直すあいだは、skipped と答えずに待つ", async () => {
+  const { base, close } = await startServer();
+  try {
+    const polled = pluginNext(base);
+    const exported = fetch(`${base}/export?timeout=5`, { method: "POST", body: "" });
+    exported.catch(() => {});
+    await json<Next>(polled);
+    const waiting = fetch(`${base}/status?seq=1`);
+    assert.equal(await settleWithin(waiting, 100), "pending");
+    // 走り直したプラグインは最後の依頼 (書き出し中だった #1) をもう一度受け取る
+    const again = await json<Next>(pluginNext(base));
+    assert.equal(again.seq, 1);
+    assert.equal(await settleWithin(waiting, 100), "pending", "書き出し直しているのに決着した");
+    await pluginPost(base, "result", again, sampleZip());
+    assert.equal((await json<RequestReply>(waiting)).state, "done");
+  } finally {
+    close();
+  }
+});
+
 test("status?seq: この起動で受けていない依頼は 404、seq が数字でなければ 400", async () => {
   const { base, close } = await startServer();
   try {

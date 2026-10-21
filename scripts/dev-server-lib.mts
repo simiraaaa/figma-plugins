@@ -528,8 +528,6 @@ export function createDevServer(options: DevServerOptions): http.RequestListener
     }
 
     if (route === "GET /next") {
-      // 書き出し中のプラグインは /next を待たないので、待ちに来たなら手元の依頼はもう無い
-      setProcessing(undefined);
       const afterParam = url.searchParams.get("after");
       const sameServer = url.searchParams.get("server") === serverId;
       const after = afterParam !== null && sameServer ? Number(afterParam) : undefined;
@@ -538,11 +536,15 @@ export function createDevServer(options: DevServerOptions): http.RequestListener
         setProcessing({ request, handedAt: Date.now() });
         send(res, 200, { server: serverId, ...request });
       };
+      // 渡す依頼があれば、処理中をそれに差し替える。先に解くと、走り直して同じ依頼を受け取り直すあいだに
+      // GET /status?seq の待ちが起き、書き出し直す依頼を skipped と答える
       const ready = nextRequestFor(after);
       if (ready !== undefined) {
         reply(ready);
         return;
       }
+      // 書き出し中のプラグインは /next を待たないので、待ちに来たなら手元の依頼はもう無い
+      setProcessing(undefined);
       waitFor(
         res,
         (wake) => {

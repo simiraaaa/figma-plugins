@@ -91,6 +91,7 @@ AI が Figma のデータを、クリックも Figma MCP の回数上限もな�
      - `failed`: 書き出せなかった。`error` に理由が入る。
      - `skipped`: プラグインがこの依頼を飛ばしてあとの依頼に進んだので、もう書き出されない (走り直したプラグインは最後の依頼だけを書き出す。制約を参照)。送り直す。
      - `queued` (順番待ち) か `processing` (プラグインへ渡して結果がまだ): 待つ長さ (既定 300 秒、`?timeout=<秒>`) を過ぎて HTTP 504 で返った。もう一度待つ。
+       `queued` で `plugin.processing` が無く、`plugin.lastSeenAt` が 35 秒より前なら、プラグインが開いていない。人か computer use に「開発: dev サーバーとつなぐ」を開いてもらう。
        `processing` のまま `plugin.processing.elapsedSeconds` が伸び続けるときは、Figma が前に出ているか、プラグインが開いているかを人か computer use で確かめる (書き出しの途中でプラグインを閉じても `processing` のまま残る)。
      - HTTP 404: この起動の dev サーバーが受けていない依頼 (dev サーバーを起動し直す前の依頼など)。送り直す。
    - `<置き場所>/status.json` と `GET /status` は、最後に受けた結果 (`version`・`seq`・`dir`・`fileName`・`warnings`・`error`) を返す。
