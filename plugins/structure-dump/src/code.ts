@@ -259,7 +259,14 @@ async function dump(target: DumpTarget, screenshotScale: number): Promise<DumpOu
     modeName: async (collectionId, modeId) => {
       const collection = await resolver.collection(collectionId);
       const mode = collection?.modes.find((m) => m.modeId === modeId);
-      return collection && mode ? { collection: collection.name, mode: mode.name } : undefined;
+      if (collection === null || mode === undefined) {
+        resolver.warnOnce(
+          `mode:${collectionId}:${modeId}`,
+          `変数のモードを引けない: コレクション ${collectionId} のモード ${modeId}`
+        );
+        return undefined;
+      }
+      return { collection: collection.name, mode: mode.name };
     },
     componentName: async (id) => {
       const node = await resolver.node(id);
@@ -277,7 +284,12 @@ async function dump(target: DumpTarget, screenshotScale: number): Promise<DumpOu
         return undefined;
       }
       if (resolver.svgs.has(target.id)) return resolver.svgs.get(target.id);
-      const path = recordSvg(out, target, await fetchBytes(() => target.exportAsync({ format: "SVG" })));
+      // 元のコンポーネントを書き出すときは、warning にどのインスタンスの SVG かも残す
+      const label =
+        target === scene
+          ? target
+          : { id: target.id, name: `${target.name} (${scene.name} ${scene.id} の元のコンポーネント)` };
+      const path = recordSvg(out, label, await fetchBytes(() => target.exportAsync({ format: "SVG" })));
       resolver.svgs.set(target.id, path);
       return path;
     },

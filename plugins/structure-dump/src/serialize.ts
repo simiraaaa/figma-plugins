@@ -116,26 +116,65 @@ async function variableRef(
 }
 
 const PAINT_FIELDS: ReadonlySet<string> = new Set(["fills", "strokes"]);
+/** paint・effect 単位で束縛を読み、出力と同じ並びで出す項目 (node.boundVariables の配列は並びが揃っていない) */
+const ALIGNED_FIELDS: ReadonlySet<string> = new Set([...PAINT_FIELDS, "effects"]);
+
+async function aliasRef(
+  bound: unknown,
+  consumer: AnyNode,
+  ctx: SerializeContext
+): Promise<Record<string, unknown> | null> {
+  return isRecord(bound) && typeof bound.id === "string"
+    ? variableRef(bound.id, consumer, ctx)
+    : null;
+}
+
+/** paint 1 つの束縛。単色は color、グラデーションは止まり点ごとの { stops } */
+async function paintRef(
+  paint: Record<string, unknown>,
+  consumer: AnyNode,
+  ctx: SerializeContext
+): Promise<unknown> {
+  if (Array.isArray(paint.gradientStops)) {
+    const stops: unknown[] = [];
+    for (const stop of paint.gradientStops as Record<string, unknown>[]) {
+      stops.push(await aliasRef(isRecord(stop.boundVariables) ? stop.boundVariables.color : undefined, consumer, ctx));
+    }
+    return stops.some((ref) => ref !== null) ? { stops } : null;
+  }
+  return aliasRef(isRecord(paint.boundVariables) ? paint.boundVariables.color : undefined, consumer, ctx);
+}
+
+/** effect 1 つの束縛。束縛した項目 (color・radius・spread など) ごと */
+async function effectRef(
+  effect: Record<string, unknown>,
+  consumer: AnyNode,
+  ctx: SerializeContext
+): Promise<unknown> {
+  if (!isRecord(effect.boundVariables)) return null;
+  const refs: Record<string, unknown> = {};
+  for (const [field, bound] of Object.entries(effect.boundVariables)) {
+    const ref = await aliasRef(bound, consumer, ctx);
+    if (ref !== null) refs[field] = ref;
+  }
+  return Object.keys(refs).length > 0 ? refs : null;
+}
 
 /**
- * paint ごとの変数を、出力の fills / strokes と同じ並び (非表示の paint を飛ばす) で返す。束縛の無い paint は null。
- * node.boundVariables.fills は paint の並びと揃っていないので使わない
+ * paint・effect ごとの変数を、出力の fills / strokes / effects と同じ並び (非表示を飛ばす) で返す。
+ * 束縛の無い要素は null、どれにも束縛が無ければ undefined
  */
-async function paintVariables(
-  paints: unknown,
+async function alignedVariables(
+  field: string,
+  items: unknown,
   consumer: AnyNode,
   ctx: SerializeContext
 ): Promise<unknown[] | undefined> {
-  if (!Array.isArray(paints)) return undefined;
+  if (!Array.isArray(items)) return undefined;
   const refs: unknown[] = [];
-  for (const paint of paints as Record<string, unknown>[]) {
-    if (paint.visible === false) continue;
-    const bound = isRecord(paint.boundVariables) ? paint.boundVariables.color : undefined;
-    refs.push(
-      isRecord(bound) && typeof bound.id === "string"
-        ? await variableRef(bound.id, consumer, ctx)
-        : null
-    );
+  for (const item of items as Record<string, unknown>[]) {
+    if (item.visible === false) continue;
+    refs.push(field === "effects" ? await effectRef(item, consumer, ctx) : await paintRef(item, consumer, ctx));
   }
   return refs.some((r) => r !== null) ? refs : undefined;
 }
@@ -147,15 +186,16 @@ async function serializeBoundVariables(
 ): Promise<unknown> {
   const bv = owner.boundVariables as Record<string, unknown> | undefined;
   const out: Record<string, unknown> = {};
-  if (consumer !== undefined && owner === consumer) {
-    for (const field of PAINT_FIELDS) {
-      const refs = await paintVariables(owner[field], consumer, ctx);
+  // ノードと文字の範囲 (consumer があるもの) は paint・effect ごとの束縛を読む。スタイルは node 側の配列のまま
+  if (consumer !== undefined) {
+    for (const field of ALIGNED_FIELDS) {
+      const refs = await alignedVariables(field, owner[field], consumer, ctx);
       if (refs !== undefined) out[field] = refs;
     }
   }
   if (!isRecord(bv)) return Object.keys(out).length > 0 ? out : undefined;
   for (const [field, value] of Object.entries(bv)) {
-    if (PAINT_FIELDS.has(field) && Array.isArray(owner[field])) continue;
+    if (consumer !== undefined && ALIGNED_FIELDS.has(field) && Array.isArray(owner[field])) continue;
     if (field === "componentProperties" && isRecord(value)) {
       // プロパティのキー → VariableAlias の辞書
       const props: Record<string, unknown> = {};
@@ -385,9 +425,7 @@ async function serializeSegment(
     textStyle: seg.textStyleId ? await styleNameOf(seg.textStyleId, ctx) : undefined,
     fillStyle: seg.fillStyleId ? await styleNameOf(seg.fillStyleId, ctx) : undefined,
     hyperlink: serializeHyperlink(seg.hyperlink),
-    variables: seg.boundVariables
-      ? await serializeBoundVariables(seg as unknown as Record<string, unknown>, node, ctx)
-      : undefined,
+    variables: await serializeBoundVariables(seg as unknown as Record<string, unknown>, node, ctx),
   });
 }
 
@@ -643,6 +681,8 @@ interface VectorStatus {
   only: boolean;
   /** 線を描く図形を含む */
   lineArt: boolean;
+  /** それ自身が図形 (枠ではない) */
+  shape: boolean;
 }
 
 function hasImageFill(node: AnyNode): boolean {
@@ -654,19 +694,20 @@ function hasVisible(value: unknown): boolean {
 }
 
 function vectorStatus(node: AnyNode, children: readonly VectorStatus[]): VectorStatus {
-  if (hasImageFill(node)) return { only: false, lineArt: false };
-  if (SHAPE_TYPES.has(node.type)) return { only: true, lineArt: LINE_ART_TYPES.has(node.type) };
+  if (hasImageFill(node)) return { only: false, lineArt: false, shape: false };
+  if (SHAPE_TYPES.has(node.type)) {
+    return { only: true, lineArt: LINE_ART_TYPES.has(node.type), shape: true };
+  }
   if (!VECTOR_CONTAINER_TYPES.has(node.type) || children.length === 0) {
-    return { only: false, lineArt: false };
+    return { only: false, lineArt: false, shape: false };
   }
-  // 塗り・枠線・影を持つ枠はアイコンボタンなどの箱で、中のアイコンを SVG にする
+  const lineArt = children.some((c) => c.lineArt);
+  // 塗り・枠線・影を持つ枠は、中にアイコン (枠) を置いたアイコンボタンなどの箱なので中のアイコンを SVG にする。
+  // 中身が図形だけなら、枠と合わせて 1 つの絵 (バッジなど) なので枠ごと SVG にする
   if (hasVisible(node.fills) || hasVisible(node.strokes) || hasVisible(node.effects)) {
-    return { only: false, lineArt: children.some((c) => c.lineArt) };
+    return { only: children.every((c) => c.shape), lineArt, shape: false };
   }
-  return {
-    only: children.every((c) => c.only),
-    lineArt: children.some((c) => c.lineArt),
-  };
+  return { only: children.every((c) => c.only), lineArt, shape: false };
 }
 
 function isSvgTarget(status: VectorStatus): boolean {

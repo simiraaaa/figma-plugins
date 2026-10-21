@@ -107,7 +107,7 @@ GROUP の子の `x` / `y` は GROUP ではなく外側の container に対する
   - ZIP 内パスが 200 文字を超えたもの (`パスが長い (N 文字): <path>`。展開先によってはパス長の上限に当たる)
   - 枠の外に描画があり、png を枠で切った画面フレーム (`枠の外に描画があり、png は枠で切った: <name> (<id>)`)
   - SVG の書き出しに失敗したノード (`SVG の書き出しに失敗: <name> (<id>): <理由>`・`SVG の元のコンポーネントを取れない: <name> (<id>)`・`非表示のため SVG を書き出せない: <name> (<id>)`)
-  - 引けなかった変数・スタイル・コンポーネント (`変数を引けない: <id>`・`スタイルを引けない: <id>`・`コンポーネントを引けない: <id>`)。同じ id は 1 行だけ
+  - 引けなかった変数・スタイル・コンポーネント・モード (`変数を引けない: <id>`・`スタイルを引けない: <id>`・`コンポーネントを引けない: <id>`・`変数のモードを引けない: …`)。同じ id は 1 行だけ
   - 値を解決できなかった変数 (`変数の値を解決できない: <変数名>: <理由>`)・コレクションを引けず variables.json に入らなかった変数
   - 変数やスタイルの一覧を取れなかったとき (`<一覧の名前>の取得に失敗: <理由>`)
 - `sections`: トップレベルのセクション。document 順に並ぶ。
@@ -220,15 +220,16 @@ GROUP の子の `x` / `y` は GROUP ではなく外側の container に対する
 - `description`: コンポーネント (`COMPONENT` / `COMPONENT_SET`) の説明。
 - `variables`: ノードに束縛された Figma Variables。束縛した項目 → `{ name, value }`。
   `value` はそのノードで効いているモードでの値 (色は `#rrggbb`、半透明は `#rrggbbaa`)。
-  どのモードかは、書き出したノード (画面フレームの json の `node`・`_section.json` の `nodes[]`) の `resolvedVariableModes` にある。
-  `fills` / `strokes` は、出力の `fills` / `strokes` と同じ並びの配列で、束縛の無い paint は `null`。
+  どのモードかは、書き出したノード (画面フレームの json の `node`・`_section.json` の `nodes[]`) の `resolvedVariableModes` を起点に、そのノードまでの途中の `variableModes` で上書きしたもの (近い祖先ほど優先)。
+  `fills` / `strokes` / `effects` は、出力の `fills` / `strokes` / `effects` と同じ並びの配列で、束縛の無い要素は `null`。
+  グラデーションの paint は `{ stops: [...] }` (止まり点ごと)、effect は束縛した項目 (`color`・`radius` など) ごと。
   `componentProperties` は、コンポーネントのプロパティの表示名 → `{ name, value }`。
   テキストの書式 (`fontSize`・`fontFamily` など) は文字の範囲ごとの配列で、どの文字の範囲かは `textSegments[].variables` にある。
   角丸は四隅ごと (`topLeftRadius` など) に入る。値を解決できなかった変数は `name` だけ。
   ほかのモードの値は `variables.json` を `name` で引く。
 - `variableModes`: ノードに明示した Variables のモード。コレクション名 → モード名。
 - `resolvedVariableModes`: 書き出したノードで効いているモード。コレクション名 → モード名。
-  書き出しの範囲の外の祖先が明示したモードも含む。付くのは書き出したノードだけ (子孫のモードは、途中の `variableModes` で上書きする)。
+  書き出しの範囲の外の祖先が明示したモードも含む。付くのは書き出したノードだけ。
 - `styles`: 名前付きスタイルの名前。`fill`・`stroke`・`text`・`effect`・`grid` → スタイル名。
   中身は `styles.json` を名前で引く。テキストの一部ずつ違うスタイルは `"mixed"` で、中身は `textSegments[]` にある。
 - テキストは `characters` と書式 (`fontFamily`・`fontStyle`・`fontSize`・`fontWeight`・`lineHeight`・`letterSpacing` など)。
@@ -236,14 +237,14 @@ GROUP の子の `x` / `y` は GROUP ではなく外側の container に対する
   `textTruncation: "ENDING"` と `maxLines`: 行数を超えたら末尾を省略する。
   `hyperlink: { type, value }`: リンク (`URL` なら URL、`NODE` ならノードの id)。
 - 書式が部分ごとに違うテキストは `textSegments[]` に展開される。
-  各要素は `text` と、その部分の書式・`fills`・`textStyle` / `fillStyle` (スタイル名)・`hyperlink`・`variables` (その部分に束縛した変数)。
+  各要素は `text` と、その部分の書式・`fills`・`textStyle` / `fillStyle` (スタイル名)・`hyperlink`・`variables` (その部分に束縛した変数。塗りの色は `fills` に paint の並びで入る)。
   文字の範囲ごとに違う変数を束縛したテキストも、書式の値が同じでも展開される。
 - `fills[].imageRef`: image fill の元画像。`index.json` の `assets[imageRef]` が ZIP 内のファイルのパス。
   キーが無ければ画像の取得に失敗している (理由は `meta.warnings`)。
 - `svg`: ベクターだけでできたノード (アイコンなど) の SVG ファイルの ZIP 内パス。
   付くのは、子孫が図形だけ (テキストも画像も無い) で線を描く図形を含む部分木の、いちばん上のノードだけ。
   その子孫には付かない。長方形と楕円だけの枠には付かない。
-  塗り・枠線・影を持つ枠 (アイコンボタンなど) には付かず、中のアイコンに付く。
+  塗り・枠線・影を持つ枠は、中にアイコン (INSTANCE や枠) を置いたもの (アイコンボタンなど) なら中のアイコンに付き、中身が図形だけ (バッジなど) なら枠に付く。
   非表示のノード (自身か祖先が `visible: false`) は Figma が書き出せないので、INSTANCE は元のコンポーネントの SVG を指す (ファイル名は元のコンポーネントの id)。
   インスタンスで上書きした色や大きさはこの SVG に入らないので、json の `width` / `height` と子の `strokes` / `fills` を使う。
   INSTANCE 以外の非表示の図形には付かず、`meta.warnings` に残る。

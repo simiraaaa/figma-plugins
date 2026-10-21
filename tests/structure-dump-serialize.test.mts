@@ -842,3 +842,87 @@ test("variableClosure: alias の参照先を辿って全部集め、引けなか
   assert.deepEqual(closure.variables.map((v) => v.id), ["A", "C", "B"]);
   assert.deepEqual(closure.missing, ["X"]);
 });
+
+// ---------------------------------------------------------------------------
+// レビュー 2 巡目への対応
+// ---------------------------------------------------------------------------
+
+const alias = (id: string) => ({ type: "VARIABLE_ALIAS", id });
+
+test("文字の範囲ごとの塗りに束縛した変数も、textSegments[].variables.fills に出す", async () => {
+  const { ctx } = makeCtx();
+  const out = await serializeNode(
+    {
+      id: "30:1", name: "rich", type: "TEXT", characters: "赤黒",
+      fontSize: 14, fontName: { family: "Inter", style: "Medium" }, fontWeight: 500,
+      fills: MIXED,
+      getStyledTextSegments: () => [
+        { characters: "赤", fills: [{ ...solid(1, 0.5, 0), boundVariables: { color: alias("VariableID:1:2") } }] },
+        { characters: "黒", fills: [solid(0, 0, 0)] },
+      ],
+    },
+    ctx
+  );
+  assert.deepEqual(
+    (out.textSegments as Record<string, unknown>[]).map((seg) => seg.variables),
+    [{ fills: [{ name: "color/primary", value: "#ff8000" }] }, undefined]
+  );
+});
+
+test("グラデーションの止まり点に束縛した色の変数を、paint ごとの stops に出す", async () => {
+  const { ctx } = makeCtx();
+  const out = await serializeNode(
+    {
+      id: "31:1", name: "Hero", type: "FRAME",
+      fills: [
+        {
+          type: "GRADIENT_LINEAR",
+          gradientStops: [
+            { position: 0, color: { r: 1, g: 0.5, b: 0, a: 1 }, boundVariables: { color: alias("VariableID:1:2") } },
+            { position: 1, color: { r: 0, g: 0, b: 0, a: 1 } },
+          ],
+        },
+      ],
+    },
+    ctx
+  );
+  assert.deepEqual(out.variables, {
+    fills: [{ stops: [{ name: "color/primary", value: "#ff8000" }, null] }],
+  });
+});
+
+test("effects の変数は出力の effects と同じ並び (非表示を飛ばす) で、項目ごとに出す", async () => {
+  const { ctx } = makeCtx();
+  const shadow = { type: "DROP_SHADOW", color: { r: 0, g: 0, b: 0, a: 0.25 }, offset: { x: 0, y: 2 }, radius: 4 };
+  const out = await serializeNode(
+    {
+      id: "32:1", name: "Card", type: "FRAME",
+      effects: [
+        { ...shadow, visible: false, boundVariables: { radius: alias("VariableID:1:3") } },
+        { ...shadow, visible: true, boundVariables: { color: alias("VariableID:1:2") } },
+        { ...shadow, visible: true },
+      ],
+      boundVariables: { effects: [alias("VariableID:1:3"), alias("VariableID:1:2")] },
+    },
+    ctx
+  );
+  assert.equal((out.effects as unknown[]).length, 2);
+  assert.deepEqual(out.variables, {
+    effects: [{ color: { name: "color/primary", value: "#ff8000" } }, null],
+  });
+});
+
+test("塗りのある枠の中身が図形だけなら、枠ごと 1 枚の SVG にする (アイコンを置いた枠は中のアイコン)", async () => {
+  const { ctx, svgs } = makeCtx();
+  await serializeNode(
+    {
+      id: "33:1", name: "Page", type: "FRAME",
+      children: [
+        { id: "33:2", name: "Badge", type: "FRAME", fills: [solid(1, 0, 0)], children: [vector("33:3"), vector("33:4")] },
+        { id: "33:5", name: "label", type: "TEXT", characters: "x" },
+      ],
+    },
+    ctx
+  );
+  assert.deepEqual(svgs, ["33:2"]);
+});
