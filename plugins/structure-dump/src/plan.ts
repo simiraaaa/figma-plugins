@@ -519,8 +519,6 @@ export interface ExportOutput {
   writtenPngs: Set<string>;
   /** imageRef → ZIP 内パス */
   writtenAssets: Map<string, string>;
-  /** SVG で書き出したノードの id → ZIP 内パス */
-  writtenSvgs: Map<string, string>;
 }
 
 export function newExportOutput(warnings: string[] = []): ExportOutput {
@@ -529,7 +527,6 @@ export function newExportOutput(warnings: string[] = []): ExportOutput {
     warnings,
     writtenPngs: new Set(),
     writtenAssets: new Map(),
-    writtenSvgs: new Map(),
   };
 }
 
@@ -605,6 +602,5 @@ export function recordSvg(
   }
   const path = `${SVG_DIR}/${safeId(node.id)}.svg`;
   out.entries.push({ name: path, data: result.bytes });
-  out.writtenSvgs.set(node.id, path);
   return path;
 }

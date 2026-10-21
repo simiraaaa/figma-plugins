@@ -27,7 +27,7 @@ type Dumped = DumpNode & {
   extractionError: string;
 };
 
-const { serializeNode, formatVariableValue, buildVariablesJson, serializeStyle } =
+const { serializeNode, formatVariableValue, buildVariablesJson, serializeStyle, variableClosure } =
   serializeDist as unknown as Omit<
     typeof import("../plugins/structure-dump/src/serialize.ts"),
     "serializeNode"
@@ -117,7 +117,7 @@ test("auto layout・padding・色 hex 化・variables を残す", async () => {
       layoutSizingVertical: "HUG",
       width: 320.004, height: 200,
       cornerRadius: 12,
-      fills: [solid(1, 0.5, 0)],
+      fills: [{ ...solid(1, 0.5, 0), boundVariables: { color: { type: "VARIABLE_ALIAS", id: "VariableID:1:2" } } }],
       boundVariables: { fills: [{ id: "VariableID:1:2" }] },
     },
     ctx
@@ -365,6 +365,7 @@ test("variables は名前とそのノードで効いている値を持ち、解�
         fills: [{ id: "VariableID:1:2" }],
         paddingLeft: { id: "VariableID:9:9" },
       },
+      fills: [{ ...solid(1, 0.5, 0), boundVariables: { color: { type: "VARIABLE_ALIAS", id: "VariableID:1:2" } } }],
     },
     ctx
   );
@@ -706,4 +707,138 @@ test("styles.json の 1 件: テキストスタイルは書式と束縛した変
     id: "S:fill", name: "function/primary", type: "PAINT", description: "主要",
     paints: [{ type: "SOLID", color: "#0000ff" }],
   });
+});
+
+// ---------------------------------------------------------------------------
+// レビュー 1 巡目への対応
+// ---------------------------------------------------------------------------
+
+test("fills / strokes の変数は出力の paint と同じ並びで、非表示の paint を飛ばし、束縛の無い paint は null", async () => {
+  const { ctx } = makeCtx();
+  const bound = (id: string) => ({ color: { type: "VARIABLE_ALIAS", id } });
+  const out = await serializeNode(
+    {
+      id: "20:1", name: "Box", type: "FRAME",
+      fills: [
+        { ...solid(1, 0, 0), visible: false, boundVariables: bound("VariableID:1:3") },
+        { ...solid(1, 0.5, 0), boundVariables: bound("VariableID:1:2") },
+        solid(0, 0, 0),
+      ],
+      strokes: [solid(0, 0, 0)],
+      // node 側の配列は paint の並びと揃っていない (非表示の paint の束縛も入っている)
+      boundVariables: { fills: [{ id: "VariableID:1:3" }, { id: "VariableID:1:2" }] },
+    },
+    ctx
+  );
+  assert.equal((out.fills as unknown[]).length, 2);
+  assert.deepEqual(out.variables, {
+    fills: [{ name: "color/primary", value: "#ff8000" }, null],
+  });
+});
+
+test("コンポーネントのプロパティに束縛した変数を、プロパティの表示名ごとに出す", async () => {
+  const { ctx } = makeCtx();
+  const out = await serializeNode(
+    {
+      id: "21:1", name: "Button", type: "INSTANCE",
+      boundVariables: { componentProperties: { "Label#1:2": { type: "VARIABLE_ALIAS", id: "VariableID:1:3" } } },
+    },
+    ctx
+  );
+  assert.deepEqual(out.variables, { componentProperties: { Label: { name: "spacing/4", value: 16 } } });
+});
+
+test("文字の範囲ごとに違う変数を束縛したテキストは、textSegments に範囲ごとの variables を出す", async () => {
+  const { ctx } = makeCtx();
+  const out = await serializeNode(
+    {
+      id: "22:1", name: "rich", type: "TEXT", characters: "大小",
+      fontSize: 14, fontName: { family: "Inter", style: "Medium" }, fontWeight: 500,
+      boundVariables: { fontSize: [{ id: "VariableID:1:3" }, { id: "VariableID:9:9" }] },
+      getStyledTextSegments: (fields: string[]) => {
+        assert.ok(fields.includes("boundVariables"));
+        return [
+          { characters: "大", boundVariables: { fontSize: { type: "VARIABLE_ALIAS", id: "VariableID:1:3" } } },
+          { characters: "小" },
+        ];
+      },
+    },
+    ctx
+  );
+  assert.deepEqual(out.textSegments, [
+    { text: "大", variables: { fontSize: { name: "spacing/4", value: 16 } } },
+    { text: "小" },
+  ]);
+});
+
+test("書き出したノードで効いているモードを、コレクション名 → モード名で出す (ルートだけ)", async () => {
+  const { ctx } = makeCtx();
+  const out = await serializeNode(
+    {
+      id: "23:1", name: "Screen", type: "FRAME",
+      resolvedVariableModes: { "VariableCollectionId:1": "2:1" },
+      children: [
+        { id: "23:2", name: "child", type: "FRAME", resolvedVariableModes: { "VariableCollectionId:1": "2:1" } },
+      ],
+    },
+    ctx
+  );
+  assert.deepEqual(out.resolvedVariableModes, { Theme: "Dark" });
+  assert.equal(out.children[0].resolvedVariableModes, undefined);
+});
+
+test("塗りや枠線を持つ箱 (アイコンボタン) は SVG にせず、中のアイコンを SVG にする", async () => {
+  const { ctx, svgs } = makeCtx();
+  await serializeNode(
+    {
+      id: "24:1", name: "IconButton", type: "FRAME", fills: [solid(0, 0, 1)],
+      children: [{ id: "24:2", name: "Icon", type: "INSTANCE", children: [vector("24:3")] }],
+    },
+    ctx
+  );
+  assert.deepEqual(svgs, ["24:2"]);
+});
+
+test("非表示の祖先の中のアイコンは、非表示として書き出しを頼む。INSTANCE 以外の非表示の図形は頼まずに警告する", async () => {
+  const { ctx, warnings } = makeCtx();
+  const requested: { id: string; hidden: boolean }[] = [];
+  const recording: SerializeContext = {
+    ...ctx,
+    exportSvg: async (node, hidden) => {
+      requested.push({ id: (node as { id: string }).id, hidden });
+      return `assets/svg/${(node as { id: string }).id}.svg`;
+    },
+  };
+  const out = await serializeNode(
+    {
+      id: "25:1", name: "Card", type: "FRAME", layoutMode: "HORIZONTAL",
+      children: [
+        { id: "25:2", name: "label", type: "TEXT", characters: "x" },
+        {
+          id: "25:3", name: "Slot", type: "FRAME", visible: false,
+          componentPropertyReferences: { visible: "Show slot#1:0" },
+          children: [
+            { id: "25:4", name: "Icon", type: "INSTANCE", children: [vector("25:5")] },
+            { ...vector("25:6"), name: "Line" },
+          ],
+        },
+      ],
+    },
+    recording
+  );
+  assert.deepEqual(requested, [{ id: "25:4", hidden: true }]);
+  assert.equal(out.children[1].children[0].svg, "assets/svg/25:4.svg");
+  assert.equal(warnings.length, 1);
+  assert.match(warnings[0], /非表示のため SVG を書き出せない: Line \(25:6\)/);
+});
+
+test("variableClosure: alias の参照先を辿って全部集め、引けなかった id を返す", async () => {
+  const table: Record<string, { id: string; valuesByMode: Record<string, unknown> }> = {
+    A: { id: "A", valuesByMode: { m: { type: "VARIABLE_ALIAS", id: "B" } } },
+    B: { id: "B", valuesByMode: { m: { type: "VARIABLE_ALIAS", id: "C" }, n: { type: "VARIABLE_ALIAS", id: "X" } } },
+    C: { id: "C", valuesByMode: { m: 1 } },
+  };
+  const closure = await variableClosure(["A", "C"], async (id) => table[id] ?? null);
+  assert.deepEqual(closure.variables.map((v) => v.id), ["A", "C", "B"]);
+  assert.deepEqual(closure.missing, ["X"]);
 });

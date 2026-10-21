@@ -14,6 +14,7 @@ import {
   SerializeContext,
   serializeNode,
   serializeStyle,
+  variableClosure,
 } from "./serialize";
 import {
   allFrames,
@@ -82,57 +83,77 @@ class Resolver {
   /** 書き出し中に出会った変数とスタイル。ライブラリ (remote) のものを一覧へ足すのに使う */
   readonly seenVariables = new Set<string>();
   readonly seenStyles = new Set<string>();
-  /** 値を解決できなかった変数。同じ変数を束縛したノードごとに warning を並べない */
-  readonly unresolvedValues = new Set<string>();
+  /** SVG で書き出したノードの id → ZIP 内パス。失敗も undefined で覚え、書き出し直さない */
+  readonly svgs = new Map<string, string | undefined>();
+  private readonly warned = new Set<string>();
+
+  constructor(private readonly warn: (message: string) => void) {}
+
+  /** 同じ変数やスタイルを使うノードの数だけ、同じ warning を並べない */
+  warnOnce(key: string, message: string): void {
+    if (this.warned.has(key)) return;
+    this.warned.add(key);
+    this.warn(message);
+  }
+
+  /** 一覧の取得に失敗しても書き出しは止めず、warning に残して空として続ける */
+  async listOrWarn<T>(label: string, get: () => Promise<T[]>): Promise<T[]> {
+    try {
+      return await get();
+    } catch (e) {
+      this.warnOnce(`list:${label}`, `${label}の取得に失敗: ${errorDetail(e)}`);
+      return [];
+    }
+  }
 }
 
 function jsonEntry(name: string, value: unknown): ZipEntry {
   return { name, data: utf8Encode(JSON.stringify(value, null, 2)) };
 }
 
-/** ファイルのコレクションと、ノードが使っていたライブラリの変数をコレクションごとにまとめる */
+/**
+ * ファイルの変数と、ノードやスタイルが使っていた変数を、alias の参照先まで辿ってコレクションごとにまとめる。
+ * スタイルの束縛も辿るので、styles.json を組んだあとに呼ぶ
+ */
 async function variablesJson(resolver: Resolver): Promise<unknown> {
-  // Variables を使っていないファイルなどで失敗しても、ライブラリの分だけで続ける
-  const local = (await orNull(() => figma.variables.getLocalVariablesAsync())) ?? [];
-  const collections: VariableCollection[] =
-    (await orNull(() => figma.variables.getLocalVariableCollectionsAsync())) ?? [];
-  const variables: Variable[] = [...local];
-  const localIds = new Set(local.map((v) => v.id));
+  const local = await resolver.listOrWarn("ファイルの変数の一覧", () =>
+    figma.variables.getLocalVariablesAsync()
+  );
+  const collections = await resolver.listOrWarn("ファイルの変数のコレクションの一覧", () =>
+    figma.variables.getLocalVariableCollectionsAsync()
+  );
+  const localById = new Map(local.map((v) => [v.id, v]));
+  const closure = await variableClosure(
+    [...localById.keys(), ...resolver.seenVariables],
+    async (id) => localById.get(id) ?? resolver.variable(id)
+  );
+  for (const id of closure.missing) resolver.warnOnce(`variable:${id}`, `変数を引けない: ${id}`);
   const collectionIds = new Set(collections.map((c) => c.id));
-  for (const id of resolver.seenVariables) {
-    if (localIds.has(id)) continue;
-    const variable = await resolver.variable(id);
-    if (variable === null) continue;
-    variables.push(variable);
-    if (!collectionIds.has(variable.variableCollectionId)) {
-      const collection = await resolver.collection(variable.variableCollectionId);
-      if (collection !== null) {
-        collections.push(collection);
-        collectionIds.add(collection.id);
-      }
+  for (const variable of closure.variables) {
+    const collectionId = variable.variableCollectionId;
+    if (collectionIds.has(collectionId)) continue;
+    const collection = await resolver.collection(collectionId);
+    if (collection === null) {
+      resolver.warnOnce(
+        `collection:${collectionId}`,
+        `変数のコレクションを引けない (この変数は variables.json に入らない): ${variable.name} (${collectionId})`
+      );
+      continue;
     }
+    collections.push(collection);
+    collectionIds.add(collectionId);
   }
-  const names = new Map(variables.map((v) => [v.id, v.name]));
-  for (const v of variables) {
-    for (const value of Object.values(v.valuesByMode)) {
-      const isAlias =
-        typeof value === "object" && value !== null && "type" in value && value.type === "VARIABLE_ALIAS";
-      if (isAlias && !names.has(value.id)) {
-        const target = await resolver.variable(value.id);
-        if (target !== null) names.set(target.id, target.name);
-      }
-    }
-  }
-  return buildVariablesJson(collections, variables, (id) => names.get(id));
+  const names = new Map(closure.variables.map((v) => [v.id, v.name]));
+  return buildVariablesJson(collections, closure.variables, (id) => names.get(id));
 }
 
 /** ファイルのスタイルと、ノードが使っていたライブラリのスタイル */
 async function stylesJson(resolver: Resolver, ctx: SerializeContext): Promise<unknown> {
   const local: BaseStyle[] = [
-    ...(await figma.getLocalPaintStylesAsync()),
-    ...(await figma.getLocalTextStylesAsync()),
-    ...(await figma.getLocalEffectStylesAsync()),
-    ...(await figma.getLocalGridStylesAsync()),
+    ...(await resolver.listOrWarn("ファイルの色のスタイルの一覧", () => figma.getLocalPaintStylesAsync())),
+    ...(await resolver.listOrWarn("ファイルのテキストスタイルの一覧", () => figma.getLocalTextStylesAsync())),
+    ...(await resolver.listOrWarn("ファイルのエフェクトスタイルの一覧", () => figma.getLocalEffectStylesAsync())),
+    ...(await resolver.listOrWarn("ファイルのグリッドスタイルの一覧", () => figma.getLocalGridStylesAsync())),
   ];
   const localIds = new Set(local.map((s) => s.id));
   const styles = [...local];
@@ -142,19 +163,14 @@ async function stylesJson(resolver: Resolver, ctx: SerializeContext): Promise<un
     if (style !== null) styles.push(style);
   }
   const out: unknown[] = [];
-  for (const style of styles) out.push(await serializeStyle(style, ctx));
+  for (const style of styles) {
+    try {
+      out.push(await serializeStyle(style, ctx));
+    } catch (e) {
+      ctx.warn(`スタイルの読み取りに失敗: ${style.name} (${style.id}): ${errorDetail(e)}`);
+    }
+  }
   return { styles: out };
-}
-
-/**
- * SVG で書き出すノード。非表示のノードは exportAsync が「表示されているレイヤーが無い」で失敗するので、
- * 非表示の INSTANCE は元のコンポーネントを書き出す (インスタンスで上書きした色などは入らない)。
- * それ以外の非表示のノードは書き出さない
- */
-async function svgSource(node: SceneNode): Promise<SceneNode | null> {
-  if (node.visible) return node;
-  if (node.type !== "INSTANCE") return null;
-  return orNull(() => node.getMainComponentAsync());
 }
 
 type ProgressPhase = "frames" | "sections" | "assets";
@@ -216,40 +232,54 @@ async function dump(target: DumpTarget, screenshotScale: number): Promise<DumpOu
     out.warnings.push(`パスが長い (${long.length} 文字): ${long.path}`);
   }
   const imageHashes = new Set<string>();
-  const resolver = new Resolver();
+  const resolver = new Resolver((message) => out.warnings.push(message));
   const ctx: SerializeContext = {
     mixed: figma.mixed,
     resolveVariable: async (id, consumer) => {
       resolver.seenVariables.add(id);
       const variable = await resolver.variable(id);
-      if (variable === null) return { name: `<unresolved:${id}>` };
+      if (variable === null) {
+        resolver.warnOnce(`variable:${id}`, `変数を引けない: ${id}`);
+        return { name: `<unresolved:${id}>` };
+      }
       if (consumer === undefined) return { name: variable.name };
       try {
         return { name: variable.name, resolved: variable.resolveForConsumer(consumer as SceneNode) };
       } catch (e) {
-        if (!resolver.unresolvedValues.has(id)) {
-          resolver.unresolvedValues.add(id);
-          out.warnings.push(`変数の値を解決できない: ${variable.name}: ${errorDetail(e)}`);
-        }
+        resolver.warnOnce(`value:${id}`, `変数の値を解決できない: ${variable.name}: ${errorDetail(e)}`);
         return { name: variable.name };
       }
     },
     styleName: async (id) => {
       resolver.seenStyles.add(id);
-      return (await resolver.style(id))?.name;
+      const style = await resolver.style(id);
+      if (style === null) resolver.warnOnce(`style:${id}`, `スタイルを引けない: ${id}`);
+      return style?.name;
     },
     modeName: async (collectionId, modeId) => {
       const collection = await resolver.collection(collectionId);
       const mode = collection?.modes.find((m) => m.modeId === modeId);
       return collection && mode ? { collection: collection.name, mode: mode.name } : undefined;
     },
-    componentName: async (id) => (await resolver.node(id))?.name,
-    exportSvg: async (node) => {
-      const target = await svgSource(node as SceneNode);
-      if (target === null) return undefined;
-      const written = out.writtenSvgs.get(target.id);
-      if (written !== undefined) return written;
-      return recordSvg(out, target, await fetchBytes(() => target.exportAsync({ format: "SVG" })));
+    componentName: async (id) => {
+      const node = await resolver.node(id);
+      if (node === null) resolver.warnOnce(`component:${id}`, `コンポーネントを引けない: ${id}`);
+      return node?.name;
+    },
+    exportSvg: async (node, hidden) => {
+      const scene = node as SceneNode;
+      // 非表示のノードは exportAsync が「表示されているレイヤーが無い」で失敗するので、
+      // 非表示の INSTANCE は元のコンポーネントを書き出す (インスタンスで上書きした色や大きさは入らない)
+      const target =
+        hidden && scene.type === "INSTANCE" ? await orNull(() => scene.getMainComponentAsync()) : scene;
+      if (target === null) {
+        ctx.warn(`SVG の元のコンポーネントを取れない: ${scene.name} (${scene.id})`);
+        return undefined;
+      }
+      if (resolver.svgs.has(target.id)) return resolver.svgs.get(target.id);
+      const path = recordSvg(out, target, await fetchBytes(() => target.exportAsync({ format: "SVG" })));
+      resolver.svgs.set(target.id, path);
+      return path;
     },
     registerImage: (hash) => {
       imageHashes.add(hash);
@@ -306,9 +336,10 @@ async function dump(target: DumpTarget, screenshotScale: number): Promise<DumpOu
     postProgress("sections", i + 1, sectionsWithJson.length);
   }
 
-  // styles.json の paint の image fill も assets に載せるため、画像を取る前に組む
-  const variables = jsonEntry(VARIABLES_JSON_NAME, await variablesJson(resolver));
+  // styles.json の paint の image fill も assets に載せるため、画像を取る前に組む。
+  // variables.json はスタイルが束縛した変数も入れるので、styles.json のあとに組む
   const styles = jsonEntry(STYLES_JSON_NAME, await stylesJson(resolver, ctx));
+  const variables = jsonEntry(VARIABLES_JSON_NAME, await variablesJson(resolver));
 
   // image fill の元画像。index.json の assets で imageRef → ZIP 内パスを引けるようにする
   const hashes = Array.from(imageHashes);

@@ -735,7 +735,6 @@ test("recordSvg: 成功は assets/svg/<id>.svg に置いてパスを返し、失
   assert.equal(recordSvg(out, { id: "3:4", name: "broken" }, { ok: false, error: "export failed" }), undefined);
   assert.equal(recordSvg(out, { id: "5:6", name: "empty" }, { ok: true, bytes: new Uint8Array(0) }), undefined);
   assert.deepEqual(out.entries.map((e) => e.name), ["assets/svg/1-2.svg"]);
-  assert.deepEqual(Object.fromEntries(out.writtenSvgs), { "1:2": "assets/svg/1-2.svg" });
   assert.deepEqual(out.warnings, [
     "SVG の書き出しに失敗: broken (3:4): export failed",
     "SVG の書き出しに失敗: empty (5:6): 空のデータ",

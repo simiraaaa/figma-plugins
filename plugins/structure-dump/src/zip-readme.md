@@ -106,8 +106,10 @@ GROUP の子の `x` / `y` は GROUP ではなく外側の container に対する
   - 非表示のため除外したノード (`非表示のため除外: <name> (<id>)`)
   - ZIP 内パスが 200 文字を超えたもの (`パスが長い (N 文字): <path>`。展開先によってはパス長の上限に当たる)
   - 枠の外に描画があり、png を枠で切った画面フレーム (`枠の外に描画があり、png は枠で切った: <name> (<id>)`)
-  - SVG の書き出しに失敗したノード (`SVG の書き出しに失敗: <name> (<id>): <理由>`)
-  - 変数の値を解決できなかったもの (`変数の値を解決できない: <変数名>: <理由>`)
+  - SVG の書き出しに失敗したノード (`SVG の書き出しに失敗: <name> (<id>): <理由>`・`SVG の元のコンポーネントを取れない: <name> (<id>)`・`非表示のため SVG を書き出せない: <name> (<id>)`)
+  - 引けなかった変数・スタイル・コンポーネント (`変数を引けない: <id>`・`スタイルを引けない: <id>`・`コンポーネントを引けない: <id>`)。同じ id は 1 行だけ
+  - 値を解決できなかった変数 (`変数の値を解決できない: <変数名>: <理由>`)・コレクションを引けず variables.json に入らなかった変数
+  - 変数やスタイルの一覧を取れなかったとき (`<一覧の名前>の取得に失敗: <理由>`)
 - `sections`: トップレベルのセクション。document 順に並ぶ。
 - `frames`: ZIP 直下に置いた画面フレーム (直接選ばれたノード・ページ直下のノード)。
 - `assets`: ノードの `fills[].imageRef` → ZIP 内の画像ファイルのパス。
@@ -214,14 +216,19 @@ GROUP の子の `x` / `y` は GROUP ではなく外側の container に対する
   付くのは `COMPONENT_SET`、セットに属さない `COMPONENT`、直接書き出したバリアント (`COMPONENT`。セットの定義を写す) の 3 つ。
   セットの中のバリアントには付かない (セット側を見る)。
   直接書き出したバリアントでも `default` はセットの既定値で、そのバリアント自身の値は `props` にある。
+  コンポーネントを置いた側のファイルで書き出した INSTANCE には付かない (定義はコンポーネントのあるファイルで書き出す)。
 - `description`: コンポーネント (`COMPONENT` / `COMPONENT_SET`) の説明。
 - `variables`: ノードに束縛された Figma Variables。束縛した項目 → `{ name, value }`。
   `value` はそのノードで効いているモードでの値 (色は `#rrggbb`、半透明は `#rrggbbaa`)。
-  効いているモードは、ノードか祖先の `variableModes` で明示したモード。どこにも無ければコレクションの `defaultMode`。
-  `fills` / `strokes` は paint ごとの配列、テキストの書式 (`fontSize`・`fontFamily` など) は文字の範囲ごとの配列。
+  どのモードかは、書き出したノード (画面フレームの json の `node`・`_section.json` の `nodes[]`) の `resolvedVariableModes` にある。
+  `fills` / `strokes` は、出力の `fills` / `strokes` と同じ並びの配列で、束縛の無い paint は `null`。
+  `componentProperties` は、コンポーネントのプロパティの表示名 → `{ name, value }`。
+  テキストの書式 (`fontSize`・`fontFamily` など) は文字の範囲ごとの配列で、どの文字の範囲かは `textSegments[].variables` にある。
   角丸は四隅ごと (`topLeftRadius` など) に入る。値を解決できなかった変数は `name` だけ。
   ほかのモードの値は `variables.json` を `name` で引く。
 - `variableModes`: ノードに明示した Variables のモード。コレクション名 → モード名。
+- `resolvedVariableModes`: 書き出したノードで効いているモード。コレクション名 → モード名。
+  書き出しの範囲の外の祖先が明示したモードも含む。付くのは書き出したノードだけ (子孫のモードは、途中の `variableModes` で上書きする)。
 - `styles`: 名前付きスタイルの名前。`fill`・`stroke`・`text`・`effect`・`grid` → スタイル名。
   中身は `styles.json` を名前で引く。テキストの一部ずつ違うスタイルは `"mixed"` で、中身は `textSegments[]` にある。
 - テキストは `characters` と書式 (`fontFamily`・`fontStyle`・`fontSize`・`fontWeight`・`lineHeight`・`letterSpacing` など)。
@@ -229,15 +236,17 @@ GROUP の子の `x` / `y` は GROUP ではなく外側の container に対する
   `textTruncation: "ENDING"` と `maxLines`: 行数を超えたら末尾を省略する。
   `hyperlink: { type, value }`: リンク (`URL` なら URL、`NODE` ならノードの id)。
 - 書式が部分ごとに違うテキストは `textSegments[]` に展開される。
-  各要素は `text` と、その部分の書式・`fills`・`textStyle` / `fillStyle` (スタイル名)・`hyperlink`。
+  各要素は `text` と、その部分の書式・`fills`・`textStyle` / `fillStyle` (スタイル名)・`hyperlink`・`variables` (その部分に束縛した変数)。
+  文字の範囲ごとに違う変数を束縛したテキストも、書式の値が同じでも展開される。
 - `fills[].imageRef`: image fill の元画像。`index.json` の `assets[imageRef]` が ZIP 内のファイルのパス。
   キーが無ければ画像の取得に失敗している (理由は `meta.warnings`)。
 - `svg`: ベクターだけでできたノード (アイコンなど) の SVG ファイルの ZIP 内パス。
   付くのは、子孫が図形だけ (テキストも画像も無い) で線を描く図形を含む部分木の、いちばん上のノードだけ。
   その子孫には付かない。長方形と楕円だけの枠には付かない。
-  非表示の INSTANCE (`visible: false`) は Figma が書き出せないので、元のコンポーネントの SVG を指す (ファイル名は元のコンポーネントの id)。
+  塗り・枠線・影を持つ枠 (アイコンボタンなど) には付かず、中のアイコンに付く。
+  非表示のノード (自身か祖先が `visible: false`) は Figma が書き出せないので、INSTANCE は元のコンポーネントの SVG を指す (ファイル名は元のコンポーネントの id)。
   インスタンスで上書きした色や大きさはこの SVG に入らないので、json の `width` / `height` と子の `strokes` / `fills` を使う。
-  INSTANCE 以外の非表示のノードには付かない。
+  INSTANCE 以外の非表示の図形には付かず、`meta.warnings` に残る。
   書き出しに失敗したノードにはキーが無い (理由は `meta.warnings`)。
 - `annotations[]`: Dev Mode の注記。`label` (本文) と `properties` (注記に添えたプロパティの種類)。
 - `extractionError`: そのノードの情報を一部読めなかった理由。構造の出力は続いている。
@@ -253,13 +262,14 @@ GROUP の子の `x` / `y` は GROUP ではなく外側の container に対する
 }
 ```
 
-- ファイルのコレクションの全変数と、ノードが使っていたライブラリ (`remote: true`) の変数が入る。
+- ファイルのコレクションの全変数と、ノードやスタイルが使っていたライブラリ (`remote: true`) の変数が入る。
+  `alias` の参照先も辿って入れるので、名前で引けば値まで辿れる。引けなかった変数は `meta.warnings` に残る。
   ファイルのコレクションには `remote` のキーが無い。
-  ライブラリのコレクションには、使われていた変数だけが入る。
+  ライブラリのコレクションには、使われていた変数とその参照先だけが入る。
 - `type`: `COLOR`・`FLOAT`・`STRING`・`BOOLEAN`。
 - `values`: モード名 → 値。色は `#rrggbb` (半透明は `#rrggbbaa`)。
   別の変数を参照する値は `{ "alias": "<変数名>" }`。参照先の名前で引き直す。
-  参照先は別のコレクションのことがあり、そのコレクションのモードが 1 つならその値、複数なら同じ名前のモードの値を読む。
+  参照先は別のコレクションのことがあり、そのコレクションのモードが 1 つならその値、複数ならノードの `resolvedVariableModes` にあるそのコレクションのモード (無ければ `defaultMode`) の値を読む。
 - `scopes` / `codeSyntax`: Figma で設定した適用範囲とコードでの名前。設定が無ければキーが無い。
 
 ## styles.json

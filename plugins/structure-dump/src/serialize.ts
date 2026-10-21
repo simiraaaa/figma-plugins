@@ -31,8 +31,11 @@ export interface SerializeContext {
   ): Promise<{ collection: string; mode: string } | undefined>;
   /** コンポーネントの id → 名前 (INSTANCE_SWAP の既定値)。見つからなければ undefined */
   componentName(id: string): Promise<string | undefined>;
-  /** ノードを SVG で書き出し、ZIP 内のパスを返す。失敗したら warn して undefined */
-  exportSvg(node: unknown): Promise<string | undefined>;
+  /**
+   * ノードを SVG で書き出し、ZIP 内のパスを返す。失敗したら warn して undefined。
+   * hidden はノード自身か祖先が非表示であること (Figma は非表示のノードを書き出せない)
+   */
+  exportSvg(node: unknown, hidden: boolean): Promise<string | undefined>;
   /** image fill の imageRef を収集する (bytes の取得と書き出しは呼び出し側) */
   registerImage(hash: string): void;
   /** 中止せずに続行した失敗を、利用者に見える warning として残す */
@@ -112,20 +115,59 @@ async function variableRef(
   });
 }
 
+const PAINT_FIELDS: ReadonlySet<string> = new Set(["fills", "strokes"]);
+
+/**
+ * paint ごとの変数を、出力の fills / strokes と同じ並び (非表示の paint を飛ばす) で返す。束縛の無い paint は null。
+ * node.boundVariables.fills は paint の並びと揃っていないので使わない
+ */
+async function paintVariables(
+  paints: unknown,
+  consumer: AnyNode,
+  ctx: SerializeContext
+): Promise<unknown[] | undefined> {
+  if (!Array.isArray(paints)) return undefined;
+  const refs: unknown[] = [];
+  for (const paint of paints as Record<string, unknown>[]) {
+    if (paint.visible === false) continue;
+    const bound = isRecord(paint.boundVariables) ? paint.boundVariables.color : undefined;
+    refs.push(
+      isRecord(bound) && typeof bound.id === "string"
+        ? await variableRef(bound.id, consumer, ctx)
+        : null
+    );
+  }
+  return refs.some((r) => r !== null) ? refs : undefined;
+}
+
 async function serializeBoundVariables(
   owner: Record<string, unknown>,
   consumer: AnyNode | undefined,
   ctx: SerializeContext
 ): Promise<unknown> {
-  const bv = owner.boundVariables as
-    | Record<string, { id: string } | { id: string }[]>
-    | undefined;
-  if (!bv) return undefined;
+  const bv = owner.boundVariables as Record<string, unknown> | undefined;
   const out: Record<string, unknown> = {};
+  if (consumer !== undefined && owner === consumer) {
+    for (const field of PAINT_FIELDS) {
+      const refs = await paintVariables(owner[field], consumer, ctx);
+      if (refs !== undefined) out[field] = refs;
+    }
+  }
+  if (!isRecord(bv)) return Object.keys(out).length > 0 ? out : undefined;
   for (const [field, value] of Object.entries(bv)) {
-    if (Array.isArray(value)) {
+    if (PAINT_FIELDS.has(field) && Array.isArray(owner[field])) continue;
+    if (field === "componentProperties" && isRecord(value)) {
+      // プロパティのキー → VariableAlias の辞書
+      const props: Record<string, unknown> = {};
+      for (const [key, alias] of Object.entries(value)) {
+        if (isRecord(alias) && typeof alias.id === "string") {
+          props[propKeyName(key)] = await variableRef(alias.id, consumer, ctx);
+        }
+      }
+      if (Object.keys(props).length > 0) out[field] = props;
+    } else if (Array.isArray(value)) {
       const refs: unknown[] = [];
-      for (const alias of value) refs.push(await variableRef(alias.id, consumer, ctx));
+      for (const alias of value as { id: string }[]) refs.push(await variableRef(alias.id, consumer, ctx));
       out[field] = refs;
     } else if (isRecord(value) && typeof value.id === "string") {
       out[field] = await variableRef(value.id, consumer, ctx);
@@ -136,10 +178,9 @@ async function serializeBoundVariables(
 
 /** ノードに明示したモード (explicitVariableModes) を collection 名 → mode 名で出す */
 async function serializeVariableModes(
-  node: AnyNode,
+  modes: unknown,
   ctx: SerializeContext
 ): Promise<unknown> {
-  const modes = node.explicitVariableModes;
   if (!isRecord(modes)) return undefined;
   const out: Record<string, string> = {};
   for (const [collectionId, modeId] of Object.entries(modes)) {
@@ -289,6 +330,7 @@ interface StyledSegment {
   textStyleId?: string;
   fillStyleId?: string;
   hyperlink?: unknown;
+  boundVariables?: Record<string, unknown>;
 }
 
 /** 部分ごとに値が違いうる書式。どれかが mixed なら textSegments に展開する */
@@ -305,7 +347,30 @@ const SEGMENT_FIELDS = [
   "hyperlink",
 ] as const;
 
-async function serializeSegment(seg: StyledSegment, ctx: SerializeContext): Promise<unknown> {
+/** 文字の範囲ごとに束縛できる項目 (node.boundVariables では範囲の数だけの配列になる) */
+const TEXT_BINDING_FIELDS: readonly string[] = [
+  "fontFamily",
+  "fontSize",
+  "fontStyle",
+  "fontWeight",
+  "letterSpacing",
+  "lineHeight",
+  "paragraphSpacing",
+  "paragraphIndent",
+];
+
+/** 範囲ごとに違う変数を束縛しているか (書式の値は同じでも、変数が違えば segment に展開する) */
+function textBindingsVary(node: AnyNode): boolean {
+  const bv = node.boundVariables;
+  if (!isRecord(bv)) return false;
+  return TEXT_BINDING_FIELDS.some((field) => Array.isArray(bv[field]) && (bv[field] as unknown[]).length > 1);
+}
+
+async function serializeSegment(
+  seg: StyledSegment,
+  node: AnyNode,
+  ctx: SerializeContext
+): Promise<unknown> {
   return prune({
     text: seg.characters,
     fontSize: seg.fontSize,
@@ -320,6 +385,9 @@ async function serializeSegment(seg: StyledSegment, ctx: SerializeContext): Prom
     textStyle: seg.textStyleId ? await styleNameOf(seg.textStyleId, ctx) : undefined,
     fillStyle: seg.fillStyleId ? await styleNameOf(seg.fillStyleId, ctx) : undefined,
     hyperlink: serializeHyperlink(seg.hyperlink),
+    variables: seg.boundVariables
+      ? await serializeBoundVariables(seg as unknown as Record<string, unknown>, node, ctx)
+      : undefined,
   });
 }
 
@@ -342,14 +410,15 @@ async function serializeText(
     if (typeof node.fontWeight === "number") out.fontWeight = node.fontWeight;
   }
   if (
-    SEGMENT_FIELDS.some((field) => node[field] === ctx.mixed) &&
+    (SEGMENT_FIELDS.some((field) => node[field] === ctx.mixed) || textBindingsVary(node)) &&
     typeof node.getStyledTextSegments === "function"
   ) {
     const segments = (await (node.getStyledTextSegments as Function).call(node, [
       ...SEGMENT_FIELDS,
+      "boundVariables",
     ])) as StyledSegment[];
     const serialized: unknown[] = [];
-    for (const seg of segments) serialized.push(await serializeSegment(seg, ctx));
+    for (const seg of segments) serialized.push(await serializeSegment(seg, node, ctx));
     out.textSegments = serialized;
   }
 
@@ -580,11 +649,19 @@ function hasImageFill(node: AnyNode): boolean {
   return Array.isArray(node.fills) && node.fills.some((p: Record<string, unknown>) => p.type === "IMAGE");
 }
 
+function hasVisible(value: unknown): boolean {
+  return Array.isArray(value) && value.some((v: Record<string, unknown>) => v.visible !== false);
+}
+
 function vectorStatus(node: AnyNode, children: readonly VectorStatus[]): VectorStatus {
   if (hasImageFill(node)) return { only: false, lineArt: false };
   if (SHAPE_TYPES.has(node.type)) return { only: true, lineArt: LINE_ART_TYPES.has(node.type) };
   if (!VECTOR_CONTAINER_TYPES.has(node.type) || children.length === 0) {
     return { only: false, lineArt: false };
+  }
+  // 塗り・枠線・影を持つ枠はアイコンボタンなどの箱で、中のアイコンを SVG にする
+  if (hasVisible(node.fills) || hasVisible(node.strokes) || hasVisible(node.effects)) {
+    return { only: false, lineArt: children.some((c) => c.lineArt) };
   }
   return {
     only: children.every((c) => c.only),
@@ -750,16 +827,21 @@ interface Serialized {
   node: AnyNode;
   out: DumpNode;
   vector: VectorStatus;
+  /** ノード自身か祖先が非表示 */
+  hidden: boolean;
+  children: Serialized[];
 }
 
 async function serializeTree(
   node: AnyNode,
   ctx: SerializeContext,
   parentLayout: ParentLayout | undefined,
-  isRoot: boolean
+  isRoot: boolean,
+  parentHidden: boolean
 ): Promise<Serialized> {
   const out: DumpNode = { id: node.id, name: node.name, type: node.type };
   if (node.visible === false) out.visible = false;
+  const hidden = parentHidden || node.visible === false;
 
   await serializeComponentInfo(node, out, ctx);
   await serializePropertyDefinitions(node, isRoot, out, ctx);
@@ -777,8 +859,13 @@ async function serializeTree(
   if (styles !== undefined) out.styles = styles;
   const variables = await serializeBoundVariables(node, node, ctx);
   if (variables !== undefined) out.variables = variables;
-  const variableModes = await serializeVariableModes(node, ctx);
+  const variableModes = await serializeVariableModes(node.explicitVariableModes, ctx);
   if (variableModes !== undefined) out.variableModes = variableModes;
+  if (isRoot) {
+    // 書き出しの範囲の外の祖先が明示したモードも含めて、values がどのモードの値かを読めるようにする
+    const resolved = await serializeVariableModes(node.resolvedVariableModes, ctx);
+    if (resolved !== undefined) out.resolvedVariableModes = resolved;
+  }
   const annotations = serializeAnnotations(node);
   if (annotations !== undefined) out.annotations = annotations;
 
@@ -789,7 +876,7 @@ async function serializeTree(
     const childLayout: ParentLayout = hasAutoLayout ? "AUTO" : "NONE";
     for (const child of node.children as AnyNode[]) {
       if (child.visible === false && !toggledByProperty(child)) continue;
-      const serialized = await serializeTree(child, ctx, childLayout, false);
+      const serialized = await serializeTree(child, ctx, childLayout, false, hidden);
       children.push(serialized);
       // 非表示の子は描画されないので、親を SVG にするかの判定には入れない
       if (child.visible !== false) shownStatuses.push(serialized.vector);
@@ -797,19 +884,27 @@ async function serializeTree(
     if (children.length > 0) out.children = children.map((c) => c.out);
   }
 
-  const vector = vectorStatus(node, shownStatuses);
-  // SVG は、ベクターだけの部分木のいちばん上のノードにだけ付ける
-  if (!isSvgTarget(vector)) {
-    for (const child of children) {
-      if (isSvgTarget(child.vector)) await attachSvg(child.out, child.node, ctx);
-    }
-  }
-  return { node, out, vector };
+  return { node, out, vector: vectorStatus(node, shownStatuses), hidden, children };
 }
 
-async function attachSvg(out: DumpNode, node: AnyNode, ctx: SerializeContext): Promise<void> {
-  const path = await ctx.exportSvg(node);
-  if (path !== undefined) out.svg = path;
+/**
+ * SVG は、ベクターだけの部分木のいちばん上のノードにだけ付ける。
+ * 非表示のノードは Figma が書き出せないので、INSTANCE だけ書き出しを頼み (元のコンポーネントを書き出す)、
+ * それ以外は中の INSTANCE を探す。書き出す手段の無い非表示の図形は警告に残す
+ */
+async function attachSvgs(tree: Serialized, ctx: SerializeContext): Promise<void> {
+  if (isSvgTarget(tree.vector)) {
+    if (!tree.hidden || tree.node.type === "INSTANCE") {
+      const path = await ctx.exportSvg(tree.node, tree.hidden);
+      if (path !== undefined) tree.out.svg = path;
+      return;
+    }
+    if (tree.children.length === 0) {
+      ctx.warn(`非表示のため SVG を書き出せない: ${tree.node.name} (${tree.node.id})`);
+      return;
+    }
+  }
+  for (const child of tree.children) await attachSvgs(child, ctx);
 }
 
 export async function serializeNode(
@@ -817,9 +912,8 @@ export async function serializeNode(
   ctx: SerializeContext,
   parentLayout?: ParentLayout
 ): Promise<DumpNode> {
-  const node = input as AnyNode;
-  const root = await serializeTree(node, ctx, parentLayout, true);
-  if (isSvgTarget(root.vector)) await attachSvg(root.out, node, ctx);
+  const root = await serializeTree(input as AnyNode, ctx, parentLayout, true, false);
+  await attachSvgs(root, ctx);
   return root.out;
 }
 
@@ -956,4 +1050,38 @@ export async function serializeStyle(
   const variables = await serializeBoundVariables(style, undefined, ctx);
   if (variables !== undefined) out.variables = variables;
   return out;
+}
+
+interface ClosableVariable {
+  id: string;
+  valuesByMode: Readonly<Record<string, unknown>>;
+}
+
+/**
+ * seeds の変数と、その値が alias で参照する変数を辿って集める (variables.json から名前で値を引き切れるように)。
+ * 引けなかった id は missing に返す
+ */
+export async function variableClosure<V extends ClosableVariable>(
+  seeds: Iterable<string>,
+  get: (id: string) => Promise<V | null>
+): Promise<{ variables: V[]; missing: string[] }> {
+  const queue = Array.from(seeds);
+  const seen = new Set<string>();
+  const variables: V[] = [];
+  const missing: string[] = [];
+  while (queue.length > 0) {
+    const id = queue.shift() as string;
+    if (seen.has(id)) continue;
+    seen.add(id);
+    const variable = await get(id);
+    if (variable === null) {
+      missing.push(id);
+      continue;
+    }
+    variables.push(variable);
+    for (const value of Object.values(variable.valuesByMode)) {
+      if (isAlias(value) && !seen.has(value.id)) queue.push(value.id);
+    }
+  }
+  return { variables, missing };
 }
