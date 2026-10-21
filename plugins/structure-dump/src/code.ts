@@ -15,6 +15,8 @@ import {
   buildFrameJson,
   buildIndex,
   buildSectionJson,
+  DEFAULT_SCREENSHOT_SCALE,
+  DEV_LOOP_COMMAND,
   emptyMessage,
   errorDetail,
   FetchResult,
@@ -27,6 +29,7 @@ import {
   planDump,
   recordAsset,
   recordScreenshot,
+  RootSource,
   safeName,
   screenshotScaleFor,
 } from "./plan";
@@ -70,24 +73,42 @@ async function fetchBytes(get: () => Promise<Uint8Array>): Promise<FetchResult> 
 }
 
 // ---------------------------------------------------------------------------
-// main
+// 書き出し
 // ---------------------------------------------------------------------------
 
-async function run(): Promise<void> {
-  figma.showUI(__html__, { width: 480, height: 600 });
+interface DumpTarget {
+  roots: readonly SceneNode[];
+  source: RootSource;
+  /** index.json の meta.scope */
+  scope: string;
+}
 
+interface DumpPayload {
+  zipName: string;
+  zip: Uint8Array;
+  indexText: string;
+  meta: Record<string, unknown>;
+}
+
+type DumpOutcome = { type: "result"; payload: DumpPayload } | { type: "empty"; message: string };
+
+function currentPageTarget(): DumpTarget {
+  const selection = figma.currentPage.selection;
+  return selection.length > 0
+    ? { roots: selection, source: "selection", scope: "selection" }
+    : {
+        roots: figma.currentPage.children,
+        source: "page",
+        scope: `page:${figma.currentPage.name}`,
+      };
+}
+
+async function dump(target: DumpTarget, screenshotScale: number): Promise<DumpOutcome> {
   await loadVariables();
 
-  const selection = figma.currentPage.selection;
-  const plan = planDump(
-    selection.length > 0 ? selection : figma.currentPage.children,
-    sortInDocumentOrder
-  );
-  const empty = emptyMessage(plan, selection.length > 0);
-  if (empty !== null) {
-    figma.ui.postMessage({ type: "error", message: empty });
-    return;
-  }
+  const plan = planDump(target.roots, sortInDocumentOrder);
+  const empty = emptyMessage(plan, target.source);
+  if (empty !== null) return { type: "empty", message: empty };
   const frames = allFrames(plan);
   const sections = allSections(plan);
 
@@ -118,7 +139,6 @@ async function run(): Promise<void> {
     }
   };
 
-  const screenshotScale = screenshotScaleFor(figma.command);
   const frameComponents = new Map<string, FrameComponent>();
 
   // 画面フレームは構造 JSON と PNG を拡張子違いの同じパスに置き、index.json から引けるようにする
@@ -172,8 +192,7 @@ async function run(): Promise<void> {
     postProgress("assets", i + 1, hashes.length);
   }
 
-  const scope =
-    selection.length > 0 ? "selection" : `page:${figma.currentPage.name}`;
+  const scope = target.scope;
   const index = buildIndex(
     plan,
     {
@@ -195,7 +214,7 @@ async function run(): Promise<void> {
     ...out.entries,
   ]);
 
-  figma.ui.postMessage({
+  return {
     type: "result",
     payload: {
       zipName: `${safeName(figma.root.name)}-dump.zip`,
@@ -213,17 +232,92 @@ async function run(): Promise<void> {
         warnings: out.warnings,
       },
     },
-  });
+  };
+}
+
+function failureText(err: unknown): string {
+  return err instanceof Error ? `${err.name}: ${err.message}` : String(err);
+}
+
+// ---------------------------------------------------------------------------
+// 開発ループ (メニューの dev-loop で起動したときだけ)
+// ---------------------------------------------------------------------------
+
+interface DevRequest {
+  seq: number;
+  nodeIds?: string[];
+  scale?: number;
+}
+
+/** 依頼の id を書き出し対象にする。PAGE の id を 1 つだけ渡したら、そのページ直下を書き出す */
+async function devTarget(nodeIds: readonly string[] | undefined): Promise<DumpTarget> {
+  if (nodeIds === undefined) return currentPageTarget();
+  const nodes: SceneNode[] = [];
+  for (const id of nodeIds) {
+    const node = await figma.getNodeByIdAsync(id);
+    if (node === null) throw new Error(`ノードが見つからない: ${id}`);
+    if (node.type === "PAGE") {
+      if (nodeIds.length !== 1) throw new Error(`ページの id は単独で指定する: ${id}`);
+      await node.loadAsync();
+      return { roots: node.children, source: "page", scope: `page:${node.name}` };
+    }
+    if (node.type === "DOCUMENT") throw new Error(`ドキュメントは指定できない: ${id}`);
+    nodes.push(node);
+  }
+  return { roots: nodes, source: "nodes", scope: "nodes" };
 }
 
 /**
- * 想定外の例外を UI へ届く診断へ畳む。裸の run() だと unhandled rejection になり
- * UI が「実行中」のまま無言で止まる
+ * UI が dev サーバーから依頼を long-poll で取り、ここへ 1 件ずつ渡す。
+ * 結果は UI がサーバーへ POST する (ネットワークに出られるのは UI の iframe だけ)
  */
-run().catch((err: unknown) => {
-  const detail = err instanceof Error ? `${err.name}: ${err.message}` : String(err);
-  figma.ui.postMessage({
-    type: "error",
-    message: `${detail}\n書き出しを中止しました`,
+function runDevLoop(): void {
+  figma.showUI(__html__, { width: 480, height: 600 });
+  figma.ui.onmessage = async (msg: { type?: string; request?: DevRequest }) => {
+    if (msg.type !== "dev-request" || msg.request === undefined) return;
+    const request = msg.request;
+    try {
+      const outcome = await dump(
+        await devTarget(request.nodeIds),
+        request.scale ?? DEFAULT_SCREENSHOT_SCALE
+      );
+      if (outcome.type === "empty") {
+        figma.ui.postMessage({ type: "dev-error", seq: request.seq, message: outcome.message });
+      } else {
+        figma.ui.postMessage({ type: "dev-result", seq: request.seq, payload: outcome.payload });
+      }
+    } catch (err) {
+      figma.ui.postMessage({ type: "dev-error", seq: request.seq, message: failureText(err) });
+    }
+  };
+  figma.ui.postMessage({ type: "dev-start" });
+}
+
+// ---------------------------------------------------------------------------
+// main
+// ---------------------------------------------------------------------------
+
+async function run(): Promise<void> {
+  figma.showUI(__html__, { width: 480, height: 600 });
+  const outcome = await dump(currentPageTarget(), screenshotScaleFor(figma.command));
+  if (outcome.type === "empty") {
+    figma.ui.postMessage({ type: "error", message: outcome.message });
+  } else {
+    figma.ui.postMessage(outcome);
+  }
+}
+
+if (figma.command === DEV_LOOP_COMMAND) {
+  runDevLoop();
+} else {
+  /**
+   * 想定外の例外を UI へ届く診断へ畳む。裸の run() だと unhandled rejection になり
+   * UI が「実行中」のまま無言で止まる
+   */
+  run().catch((err: unknown) => {
+    figma.ui.postMessage({
+      type: "error",
+      message: `${failureText(err)}\n書き出しを中止しました`,
+    });
   });
-});
+}

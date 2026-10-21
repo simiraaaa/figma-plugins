@@ -33,6 +33,7 @@ const {
   frameComponentOf,
   overflowsBounds,
   SCREENSHOT_SCALE_BY_COMMAND,
+  DEV_LOOP_COMMAND,
   screenshotScaleFor,
 } = planDist as unknown as typeof import("../plugins/structure-dump/src/plan.ts");
 
@@ -625,21 +626,22 @@ test("非表示のセクションの中の表示中の子は、ネストして�
   assert.deepEqual(ids(plan.hiddenRoots), ["d:4"]);
 });
 
-test("emptyMessage: 出すものがあれば null、無ければ非表示の有無と選択の有無で出し分ける", () => {
+test("emptyMessage: 出すものがあれば null、無ければ非表示の有無とノードの取り方で出し分ける", () => {
   const shown = frame("e:1", "Shown", { w: 390, h: 844 });
   const hidden = frame("e:2", "Hidden", { w: 390, h: 844, hidden: true });
   page([shown, hidden]);
 
-  assert.equal(emptyMessage(planOf([shown, hidden]), true), null);
-  assert.equal(emptyMessage(planOf([hidden]), true), "選択したノードはすべて非表示です");
-  assert.equal(emptyMessage(planOf([hidden]), false), "ページ直下のノードはすべて非表示です");
+  assert.equal(emptyMessage(planOf([shown, hidden]), "selection"), null);
+  assert.equal(emptyMessage(planOf([hidden]), "selection"), "選択したノードはすべて非表示です");
+  assert.equal(emptyMessage(planOf([hidden]), "page"), "ページ直下のノードはすべて非表示です");
+  assert.equal(emptyMessage(planOf([hidden]), "nodes"), "指定したノードはすべて非表示です");
   assert.equal(
-    emptyMessage(planOf([]), false),
+    emptyMessage(planOf([]), "page"),
     "対象がありません (何かを選択するか、空でないページで実行してください)"
   );
   const emptySection = section("e:3", "Empty", { w: 100, h: 100 });
   page([emptySection]);
-  assert.equal(emptyMessage(planOf([emptySection]), true), null);
+  assert.equal(emptyMessage(planOf([emptySection]), "selection"), null);
 });
 
 test("longPaths: 上限を超えるセクション・画面フレーム・_section.json のパスを文字数付きで返す", () => {
@@ -731,14 +733,14 @@ test("スクリーンショットの倍率はメニューのコマンドで決�
   assert.equal(screenshotScaleFor(""), 2);
 });
 
-test("manifest のメニューのコマンドは、倍率の対応表と同じ集合", () => {
+test("manifest のメニューのコマンドは、倍率の対応表と開発ループのコマンドを合わせた集合", () => {
   const root = path.resolve(path.dirname(fileURLToPath(import.meta.url)), "..");
   const manifest = JSON.parse(
     readFileSync(path.join(root, "plugins/structure-dump/manifest.json"), "utf8")
   ) as { menu?: { command: string }[] };
   assert.deepEqual(
     (manifest.menu ?? []).map((m) => m.command).sort(),
-    Object.keys(SCREENSHOT_SCALE_BY_COMMAND).sort()
+    [...Object.keys(SCREENSHOT_SCALE_BY_COMMAND), DEV_LOOP_COMMAND].sort()
   );
 });
 

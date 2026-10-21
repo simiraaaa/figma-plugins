@@ -8,9 +8,11 @@
   "documentAccess": "dynamic-page",
   "menu": [
     { "name": "書き出し (スクリーンショット 2x)", "command": "export-2x" },
-    { "name": "書き出し (スクリーンショット 1x)", "command": "export-1x" }
+    { "name": "書き出し (スクリーンショット 1x)", "command": "export-1x" },
+    { "name": "開発: dev サーバーとつなぐ", "command": "dev-loop" }
   ],
   "networkAccess": {
-    "allowedDomains": ["none"]
+    "allowedDomains": ["none"],
+    "devAllowedDomains": ["http://localhost:47717/"]
   }
 }

@@ -44,6 +44,59 @@ assets/<imageRef>.<拡張子>           image fill の元画像 (index.json の 
   正本は [`src/zip-readme.md`](src/zip-readme.md) で、ビルド時に code.js へ埋め込まれる
   (esbuild の `--loader:.md=text`)
 
+## 開発ループ (AI が自分で読み取る)
+
+AI が Figma のデータを、クリックも Figma MCP の回数上限もなしに読み取るための仕組み。
+プラグインを開いておくと、手元の dev サーバーへ来た依頼を書き出し、ZIP を展開した結果を AI が読む。
+使えるのはリポジトリの manifest を取り込んだ開発プラグインだけ (配布する zip の manifest からは外してある)。
+
+1. dev サーバーを起動する (リポルートで。止めるまで動き続ける)
+
+   ```sh
+   npm run dev:server                        # 結果は .dev-dump/ に置く
+   npm run dev:server -- --out <ディレクトリ>  # 置き場所を変える
+   ```
+
+2. Figma でプラグインのメニューから「開発: dev サーバーとつなぐ」を実行し、開いたままにする (最初の 1 回だけ人か computer use の操作が要る)
+3. 書き出しを依頼する。結果が届くまで待ってから、展開先 (`dir`) を含む JSON が返る
+
+   ```sh
+   curl -s -X POST localhost:47717/export -d '{"nodeIds":["9194:16583"]}'
+   curl -s -X POST localhost:47717/export -d '{"nodeIds":["0:1"],"scale":1}'  # ページの id ならページ直下
+   curl -s -X POST localhost:47717/export                                     # Figma で開いているページの選択
+   ```
+
+   - 結果は `<置き場所>/results/<version>/` に展開し、`<置き場所>/latest` がいちばん新しく成功した結果を指す。
+     中身は「ZIP の中身」と同じで、まず `README.md` を読む。
+     `version` は dev サーバーを起動し直しても前回の続きから振る。結果は新しいほうから 20 個残す。
+   - 書き出せなかったとき (ノードが見つからない・すべて非表示など) は HTTP 422 で `error` に理由が入る。
+   - プラグインが繋がっていなければ、依頼を積まずにすぐ HTTP 503 を返す。
+     繋がっているのに 300 秒以内に結果が来なければ HTTP 504 (`?timeout=<秒>` で変えられる)。
+     Claude Code の Bash ツールは既定で 120 秒で切れるので、大きな書き出しでは Bash の timeout も延ばす。
+   - `<置き場所>/status.json` と `GET /status` は、最後に受けた結果 (`version`・`seq`・`dir`・`fileName`・`warnings`・`error`) を返す。
+4. プラグインのコードを直したら build する。ホットリロードでプラグインが走り直し、最後の依頼をもう一度書き出して送る
+
+   ```sh
+   npm run build:dump
+   curl -s 'localhost:47717/status?after=<直前の version>'  # 走り直した結果が届くまで待つ
+   ```
+
+   Figma のメニュー「プラグインをホットリロード」が効いている必要がある。
+
+プラグインの画面には、いつ・なぜ (新しい依頼か、起動より前に積まれていた依頼か) 書き出したかの記録が出る。
+
+制約:
+
+- 「開発: dev サーバーとつなぐ」は 1 つだけ開く。
+  複数のファイルで開くと、どれも同じ依頼を書き出し、先に返したほうの結果が依頼側に返る (どのファイルの結果かは `fileName` で分かる)。
+- ポートは 47717 で固定 (manifest の `devAllowedDomains` と同じ値)。dev サーバーは同時に 1 つしか動かせない。
+- ホットリロードが走るのは、Figma が取り込んだ manifest のあるディレクトリで build したときだけ。
+  別の worktree で build しても、取り込んだほうのプラグインは走り直さない。
+- 走り直したプラグインが書き出すのは、最後の依頼 1 件だけ。それより前に積まれて応答していない依頼は時間切れになる。
+- dev サーバーは使うときだけ起動する。
+  localhost でだけ待ち受け、localhost 以外の名前で来た送信と、AI 側の口 (`/export`・`/status`) への Origin 付きの送信 (ブラウザで開いたサイトからの送信) は断る。
+  ただしプラグインの口は Figma のプラグインと同じ `Origin: null` を受けるので、ブラウザで開いたサイトの sandbox の iframe から結果を差し替えられる余地が残る。
+
 ## AI への渡し方のヒント
 
 - 画面 1 枚ぶんの json + png をセットで渡すのが最も精度が出る
