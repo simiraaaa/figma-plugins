@@ -245,8 +245,27 @@ test("起動し直した直後の status は、前回の最後の結果を返す
   }
 });
 
-test("書き出しの途中でプラグインが閉じられたら、渡した依頼が残っていても繋がっていないと見る", async () => {
-  const { base, close } = await startServer(undefined, { pluginStaleMs: 50, handedOutMs: 50 });
+test("書き出し中のプラグインが「生きている」を送り続けていれば、長い書き出しの最中の依頼も受ける", async () => {
+  const { base, close } = await startServer(undefined, { pluginStaleMs: 100 });
+  try {
+    const polled = pluginNext(base);
+    const first = fetch(`${base}/export?timeout=2`, { method: "POST", body: "" });
+    first.catch(() => {});
+    await json<Next>(polled);
+    // 書き出し中は /next を待たないので、/alive だけが繋がっている印になる
+    for (let i = 0; i < 4; i += 1) {
+      await new Promise((resolve) => setTimeout(resolve, 60));
+      assert.equal((await fetch(`${base}/alive`, { method: "POST", headers: PLUGIN })).status, 204);
+    }
+    const second = await fetch(`${base}/export?timeout=1`, { method: "POST", body: "" });
+    assert.equal(second.status, 504, "生きているのに 503 で断った");
+  } finally {
+    close();
+  }
+});
+
+test("書き出しの途中でプラグインが閉じられたら (/alive が止まったら)、繋がっていないと見る", async () => {
+  const { base, close } = await startServer(undefined, { pluginStaleMs: 50 });
   try {
     const polled = pluginNext(base);
     const exported = fetch(`${base}/export?timeout=1`, { method: "POST", body: "" });

@@ -26,17 +26,23 @@ export const DEV_PORT = 47717;
 
 /** プラグインの UI が /next を待つ長さ。これを過ぎたら 204 を返し、UI は待ち直す */
 const POLL_HOLD_MS = 25_000;
-/** 最後にプラグインが来てからこれを過ぎ、待っている /next も書き出し中の依頼も無ければ、繋がっていないと見る */
+/**
+ * 待っている /next が無く、最後にプラグインが来てからこれを過ぎたら、繋がっていないと見る。
+ * 書き出し中のプラグインは /next を待たない代わりに、UI が POST /alive を 10 秒ごとに送る
+ */
 const DEFAULT_PLUGIN_STALE_MS = POLL_HOLD_MS + 10_000;
-/** /next で渡してからこれを過ぎても結果が来ない依頼は、書き出し中と見ない (途中でプラグインを閉じた) */
-const DEFAULT_HANDED_OUT_MS = 120_000;
 /**
  * localhost 以外の名前で来た送信 (DNS rebinding でブラウザのサイトが自分の名前を 127.0.0.1 に向けたもの) は断る。
  * URL の hostname の形で比べる
  */
 const LOOPBACK_HOSTNAMES: ReadonlySet<string> = new Set(["localhost", "127.0.0.1", "[::1]"]);
 /** プラグインの UI (Origin: null) が使う口。残りは AI (curl。Origin を付けない) が使う口 */
-const PLUGIN_ROUTES: ReadonlySet<string> = new Set(["GET /next", "POST /result", "POST /error"]);
+const PLUGIN_ROUTES: ReadonlySet<string> = new Set([
+  "GET /next",
+  "POST /result",
+  "POST /error",
+  "POST /alive",
+]);
 const DEFAULT_WAIT_SECONDS = 300;
 const KEEP_REQUESTS = 100;
 const DEFAULT_KEEP_RESULTS = 20;
@@ -171,7 +177,6 @@ export interface DevServerOptions {
   outDir: string;
   keepResults?: number;
   pluginStaleMs?: number;
-  handedOutMs?: number;
   log?: (line: string) => void;
 }
 
@@ -239,9 +244,6 @@ export function createDevServer(options: DevServerOptions): http.RequestListener
   const outcomeWaiters = new Map<number, Set<(outcome: Outcome) => void>>();
   const statusWaiters = new Set<() => void>();
   const pluginStaleMs = options.pluginStaleMs ?? DEFAULT_PLUGIN_STALE_MS;
-  const handedOutMs = options.handedOutMs ?? DEFAULT_HANDED_OUT_MS;
-  /** /next で渡して、まだ結果も失敗も来ていない依頼 → 渡した時刻 */
-  const handedOut = new Map<number, number>();
   let lastPluginSeen = 0;
 
   mkdirSync(resultsDir, { recursive: true });
@@ -264,12 +266,7 @@ export function createDevServer(options: DevServerOptions): http.RequestListener
   }
 
   function pluginConnected(): boolean {
-    const now = Date.now();
-    return (
-      pollers.size > 0 ||
-      now - lastPluginSeen < pluginStaleMs ||
-      Array.from(handedOut.values()).some((at) => now - at < handedOutMs)
-    );
+    return pollers.size > 0 || Date.now() - lastPluginSeen < pluginStaleMs;
   }
 
   function nextRequestFor(after: number | undefined): DumpRequest | undefined {
@@ -442,10 +439,7 @@ export function createDevServer(options: DevServerOptions): http.RequestListener
       const afterParam = url.searchParams.get("after");
       const sameServer = url.searchParams.get("server") === serverId;
       const after = afterParam !== null && sameServer ? Number(afterParam) : undefined;
-      const reply = (request: DumpRequest): void => {
-        handedOut.set(request.seq, Date.now());
-        send(res, 200, { server: serverId, ...request });
-      };
+      const reply = (request: DumpRequest): void => send(res, 200, { server: serverId, ...request });
       const ready = nextRequestFor(after);
       if (ready !== undefined) {
         reply(ready);
@@ -480,7 +474,6 @@ export function createDevServer(options: DevServerOptions): http.RequestListener
         send(res, 409, { error: "別の起動のサーバーの依頼の結果は受けない" });
         return;
       }
-      handedOut.delete(seq);
       const body = await readBody(req);
       if (route === "POST /error") {
         storeError(seq, body.toString("utf8"));
@@ -495,6 +488,11 @@ export function createDevServer(options: DevServerOptions): http.RequestListener
         return;
       }
       send(res, 200, status);
+      return;
+    }
+
+    if (route === "POST /alive") {
+      send(res, 204);
       return;
     }
 
