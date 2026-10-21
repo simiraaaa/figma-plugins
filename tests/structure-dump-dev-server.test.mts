@@ -23,6 +23,7 @@ import {
   parseExportBody,
   type PluginState,
   readStoredZip,
+  type RequestReply,
   type StatusReply,
 } from "../scripts/dev-server-lib.mts";
 import { releaseManifest } from "../scripts/release-lib.mts";
@@ -299,24 +300,140 @@ test("時間切れの 504 には、プラグインが処理中の依頼と最後
   }
 });
 
-test("走り直したプラグインが飛ばした依頼の 504 では、処理中の seq が時間切れの依頼より大きい", async () => {
+test("status?seq は、その依頼の結果が出るまで待ち、done と展開先を返す", async () => {
+  const { base, close } = await startServer();
+  try {
+    const polled = pluginNext(base);
+    const exported = fetch(`${base}/export?timeout=0.2`, { method: "POST", body: '{"nodeIds":["1:2"]}' });
+    const taken = await json<Next>(polled);
+    assert.equal((await exported).status, 504);
+    const waiting = fetch(`${base}/status?seq=1`);
+    assert.equal(await settleWithin(waiting, 200), "pending");
+    await pluginPost(base, "result", taken, sampleZip());
+    const res = await waiting;
+    assert.equal(res.status, 200);
+    const body = await json<RequestReply>(res);
+    assert.equal(body.state, "done");
+    assert.equal(body.seq, 1);
+    assert.deepEqual(body.nodeIds, ["1:2"]);
+    assert.equal(body.version, 1);
+    assert.equal(existsSync(path.join(body.dir as string, "index.json")), true);
+  } finally {
+    close();
+  }
+});
+
+test("status?seq: 失敗は failed と理由、待つ長さを過ぎたら 504 といまの state を返す", async () => {
+  const { base, close } = await startServer();
+  try {
+    const polled = pluginNext(base);
+    const first = fetch(`${base}/export?timeout=5`, { method: "POST", body: "" });
+    first.catch(() => {});
+    const taken = await json<Next>(polled);
+    const second = fetch(`${base}/export?timeout=5`, { method: "POST", body: "" });
+    second.catch(() => {});
+    await new Promise((resolve) => setTimeout(resolve, 50));
+
+    const processing = await fetch(`${base}/status?seq=1&timeout=0.2`);
+    assert.equal(processing.status, 504);
+    assert.equal((await json<RequestReply>(processing)).state, "processing");
+    const queued = await fetch(`${base}/status?seq=2&timeout=0.2`);
+    assert.equal(queued.status, 504);
+    assert.equal((await json<RequestReply>(queued)).state, "queued");
+
+    await pluginPost(base, "error", taken, "ノードが見つからない: 9:9");
+    const failed = await json<RequestReply>(fetch(`${base}/status?seq=1`));
+    assert.equal(failed.state, "failed");
+    assert.equal(failed.error, "ノードが見つからない: 9:9");
+  } finally {
+    close();
+  }
+});
+
+test("status?seq: 走り直したプラグインが飛ばした依頼は、すぐ skipped を返す", async () => {
   const { base, close } = await startServer();
   try {
     const polled = pluginNext(base);
     const first = fetch(`${base}/export?timeout=5`, { method: "POST", body: "" });
     first.catch(() => {});
     await json<Next>(polled);
-    const skipped = fetch(`${base}/export?timeout=0.5`, { method: "POST", body: "" });
+    const skipped = fetch(`${base}/export?timeout=5`, { method: "POST", body: "" });
+    skipped.catch(() => {});
     const latest = fetch(`${base}/export?timeout=5`, { method: "POST", body: "" });
     latest.catch(() => {});
     await new Promise((resolve) => setTimeout(resolve, 50));
+    const waiting = fetch(`${base}/status?seq=2`);
+    assert.equal(await settleWithin(waiting, 100), "pending");
     // 走り直したプラグインはサーバーの id を知らないので、最後の依頼だけを受け取る
     assert.equal((await json<Next>(pluginNext(base))).seq, 3);
-    const res = await skipped;
+    const res = await settleWithin(waiting, 200);
+    assert.notEqual(res, "pending", "飛ばされたのに待ち続けた");
+    assert.equal((await json<RequestReply>(res as Response)).state, "skipped");
+    assert.equal((await json<RequestReply>(fetch(`${base}/status?seq=1`))).state, "skipped");
+  } finally {
+    close();
+  }
+});
+
+test("status?seq: この起動で受けていない依頼は 404、seq が数字でなければ 400", async () => {
+  const { base, close } = await startServer();
+  try {
+    assert.equal((await fetch(`${base}/status?seq=1`)).status, 404);
+    assert.equal((await fetch(`${base}/status?seq=abc`)).status, 400);
+  } finally {
+    close();
+  }
+});
+
+test("起動し直しても依頼の seq は前回の続きから振り、前回の依頼と取り違えない", async () => {
+  const outDir = mkdtempSync(path.join(tmpdir(), "structure-dump-dev-"));
+  const first = await startServer(outDir);
+  try {
+    const polled = pluginNext(first.base);
+    const exported = fetch(`${first.base}/export?timeout=5`, { method: "POST", body: "" });
+    await pluginPost(first.base, "result", await json<Next>(polled), sampleZip());
+    await exported;
+    // 結果を返さずに残った依頼
+    const pending = fetch(`${first.base}/export?timeout=5`, { method: "POST", body: "" });
+    pending.catch(() => {});
+    await new Promise((resolve) => setTimeout(resolve, 50));
+  } finally {
+    first.close();
+  }
+  const second = await startServer(outDir);
+  try {
+    // 前回の起動の結果は GET /status に残るが、前回の依頼の seq は引けない
+    assert.equal((await json<StatusReply>(fetch(`${second.base}/status`))).seq, 1);
+    assert.equal((await fetch(`${second.base}/status?seq=1`)).status, 404);
+    const polled = pluginNext(second.base);
+    const exported = fetch(`${second.base}/export?timeout=5`, { method: "POST", body: "" });
+    exported.catch(() => {});
+    assert.equal((await json<Next>(polled)).seq, 3);
+  } finally {
+    second.close();
+  }
+});
+
+test("結果の本文を受け取っている途中で時間切れになった依頼の 504 には、処理中が載る", async () => {
+  const { base, port, close } = await startServer();
+  try {
+    const polled = pluginNext(base);
+    const exported = fetch(`${base}/export?timeout=0.3`, { method: "POST", body: "" });
+    const taken = await json<Next>(polled);
+    const zip = sampleZip();
+    const upload = http.request({
+      host: "127.0.0.1",
+      port,
+      method: "POST",
+      path: `/result?seq=${taken.seq}&server=${taken.server}`,
+      headers: { Origin: "null", "Content-Length": zip.length },
+    });
+    upload.on("error", () => {});
+    upload.write(zip.subarray(0, 10));
+    const res = await exported;
     assert.equal(res.status, 504);
-    const body = await json<{ seq: number; plugin: PluginState }>(res);
-    assert.equal(body.seq, 2);
-    assert.equal(body.plugin.processing?.seq, 3);
+    assert.equal((await json<{ plugin: PluginState }>(res)).plugin.processing?.seq, 1);
+    upload.end(zip.subarray(10));
   } finally {
     close();
   }

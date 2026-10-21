@@ -71,7 +71,7 @@ AI が Figma のデータを、クリックも Figma MCP の回数上限もな�
 
    - 結果は `<置き場所>/results/<version>/` に展開し、`<置き場所>/latest` がいちばん新しく成功した結果を指す。
      中身は「ZIP の中身」と同じで、まず `README.md` を読む。
-     `version` は dev サーバーを起動し直しても前回の続きから振る。結果は新しいほうから 20 個残す。
+     `version` と依頼の番号 `seq` は、dev サーバーを起動し直しても前回の続きから振る。結果は新しいほうから 20 個残す。
    - 書き出せなかったとき (ノードが見つからない・すべて非表示など) は HTTP 422 で `error` に理由が入る。
    - プラグインが前の依頼を書き出しているあいだに来た依頼は、断らずに待たせ、前の依頼が終わってから順に書き出す。
      書き出し中のプラグインからは何も届かない (重いページでは Figma ごと固まる) が、渡した依頼の結果がまだ返っていなければ書き出し中と見る。
@@ -81,16 +81,18 @@ AI が Figma のデータを、クリックも Figma MCP の回数上限もな�
      Claude Code の Bash ツールは既定で 120 秒で切れるので、大きな書き出しでは Bash の timeout も延ばす。
    - 503 と 504 の本文には、プラグインの様子 (`plugin`) が入る。
      `plugin.processing` はプラグインへ渡してまだ結果が返っていない依頼 (`seq`・`nodeIds`・渡してからの秒数 `elapsedSeconds`) で、`plugin.lastSeenAt` は最後にプラグインから何か届いた時刻。
-     504 のときは、504 の `seq` (時間切れになった自分の依頼) と `plugin.processing` で次のように扱う。
-     - `plugin.processing` が無い: プラグインはその依頼を受け取っていない。
-       プラグインが開いているか確かめてから送り直す。
-     - `plugin.processing.seq` が自分の `seq` と同じか小さい: プラグインへ渡した依頼の結果がまだ来ていない (書き出し中か、書き出しの途中でプラグインを閉じた)。
-       同じなら書き出しの最中、小さければ順番待ちで、どちらもあとで書き出す。
-       送り直さずに `GET /status` を見る。
-       `seq` が自分の依頼ならそれが結果で、違えばその `version` で `GET /status?after=<version>` を待ち、届いた結果の `seq` を同じように確かめる。
-       `elapsedSeconds` が伸び続けるときは、Figma が前に出ているか、プラグインが開いているかを人か computer use で確かめる。
-     - `plugin.processing.seq` が自分の `seq` より大きい: プラグインが走り直して最後の依頼だけを書き出している (制約を参照)。
-       自分の依頼は書き出されないので送り直す。
+   - 504 になっても依頼は消えない。送り直さずに、504 の `seq` で `GET /status?seq=<seq>` を呼んで待つ。
+     その依頼が決着するまで待ち、`state` で今の様子を返す。
+     Bash の timeout も延ばす (Claude Code の Bash ツールは最大 600 秒なので、`timeout` はそれより短くする)。
+     ```sh
+     curl -s 'localhost:47717/status?seq=12&timeout=540'
+     ```
+     - `done`: 書き出せた。`dir` などは書き出しの応答と同じ。
+     - `failed`: 書き出せなかった。`error` に理由が入る。
+     - `skipped`: プラグインがこの依頼を飛ばしてあとの依頼に進んだので、もう書き出されない (走り直したプラグインは最後の依頼だけを書き出す。制約を参照)。送り直す。
+     - `queued` (順番待ち) か `processing` (プラグインへ渡して結果がまだ): 待つ長さ (既定 300 秒、`?timeout=<秒>`) を過ぎて HTTP 504 で返った。もう一度待つ。
+       `processing` のまま `plugin.processing.elapsedSeconds` が伸び続けるときは、Figma が前に出ているか、プラグインが開いているかを人か computer use で確かめる (書き出しの途中でプラグインを閉じても `processing` のまま残る)。
+     - HTTP 404: この起動の dev サーバーが受けていない依頼 (dev サーバーを起動し直す前の依頼など)。送り直す。
    - `<置き場所>/status.json` と `GET /status` は、最後に受けた結果 (`version`・`seq`・`dir`・`fileName`・`warnings`・`error`) を返す。
      `GET /status` には `plugin` も入る。
      `GET /status?after=<version>` は、それより新しい結果が届くまで待つ (どの依頼の結果でも返る)。

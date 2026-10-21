@@ -182,6 +182,18 @@ export interface StatusReply extends DevStatus {
   plugin: PluginState;
 }
 
+/**
+ * GET /status?seq=<seq> が返す 1 件の依頼の様子。done と failed はその依頼の結果 (DevStatus) を持つ。
+ * skipped は、プラグインがあとの依頼を受け取ったので、もう書き出されない依頼
+ */
+export type RequestState = "queued" | "processing" | "done" | "failed" | "skipped";
+
+export interface RequestReply extends Partial<DevStatus> {
+  seq: number;
+  state: RequestState;
+  plugin: PluginState;
+}
+
 type Outcome = { ok: true; status: DevStatus } | { ok: false; status: DevStatus };
 
 export interface DevServerOptions {
@@ -246,22 +258,39 @@ export function createDevServer(options: DevServerOptions): http.RequestListener
   const keepResults = options.keepResults ?? DEFAULT_KEEP_RESULTS;
   const outDir = path.resolve(options.outDir);
   const resultsDir = path.join(outDir, "results");
-  /** サーバーを起動し直すと seq が 1 に戻るので、プラグインはこれが変わったら待ち位置を捨てる */
+  /** 起動し直す前に渡した依頼はこの起動には無いので、プラグインはこれが変わったら待ち位置を捨てる */
   const serverId = randomUUID().slice(0, 8);
+  const lastSeqFile = path.join(outDir, "last-seq");
 
-  let nextSeq = 1;
   const requests: DumpRequest[] = [];
+  /** done と failed の依頼の結果。requests から落ちた依頼の分は消す */
+  const outcomes = new Map<number, DevStatus>();
   const pollers = new Set<() => void>();
   const outcomeWaiters = new Map<number, Set<(outcome: Outcome) => void>>();
   const statusWaiters = new Set<() => void>();
+  /** 依頼の state が変わるたびに呼ぶ (GET /status?seq の待ち) */
+  const requestWaiters = new Set<() => void>();
   const pluginStaleMs = options.pluginStaleMs ?? DEFAULT_PLUGIN_STALE_MS;
   let lastPluginSeen = 0;
   /** プラグインは 1 件ずつ書き出し、終わってから /next を待ちに来るので、処理中の依頼は 1 つだけ持つ */
   let processing: { request: DumpRequest; handedAt: number } | undefined;
+  /** プラグインは seq の小さい順に受け取るので、これ以下で結果の無い依頼は書き出されない */
+  let lastHandedSeq = 0;
 
   mkdirSync(resultsDir, { recursive: true });
   // results/ は起動をまたいで残る。前回の続きの番号から振らないと、保持件数の掃除が新しい結果を消す
   let status: DevStatus = previousStatus();
+  // seq も前回の続きから振る。振り直すと、依頼側が前回の起動で受け取った seq が別の依頼を指す
+  let nextSeq = Math.max(previousLastSeq(), status.seq ?? 0) + 1;
+
+  function previousLastSeq(): number {
+    try {
+      const seq = Number(readFileSync(lastSeqFile, "utf8").trim());
+      return Number.isInteger(seq) && seq > 0 ? seq : 0;
+    } catch {
+      return 0;
+    }
+  }
 
   function previousStatus(): DevStatus {
     const versions = readdirSync(resultsDir).map(Number).filter((n) => Number.isInteger(n));
@@ -302,6 +331,24 @@ export function createDevServer(options: DevServerOptions): http.RequestListener
     return { ...status, plugin: pluginState() };
   }
 
+  function setProcessing(next: typeof processing): void {
+    processing = next;
+    requestWaiters.forEach((wake) => wake());
+  }
+
+  function requestReply(seq: number): RequestReply | undefined {
+    const request = requestOf(seq);
+    if (request === undefined) return undefined;
+    const outcome = outcomes.get(seq);
+    const plugin = pluginState();
+    if (outcome !== undefined) {
+      return { ...outcome, seq, state: outcome.error === undefined ? "done" : "failed", plugin };
+    }
+    const state: RequestState =
+      processing?.request.seq === seq ? "processing" : seq <= lastHandedSeq ? "skipped" : "queued";
+    return { seq, nodeIds: request.nodeIds, state, plugin };
+  }
+
   function nextRequestFor(after: number | undefined): DumpRequest | undefined {
     if (after === undefined) return requests[requests.length - 1];
     return requests.find((r) => r.seq > after);
@@ -310,12 +357,14 @@ export function createDevServer(options: DevServerOptions): http.RequestListener
   function publish(next: DevStatus, outcome: Outcome["ok"]): void {
     status = next;
     writeFileSync(path.join(outDir, "status.json"), JSON.stringify(status, null, 2) + "\n");
+    if (next.seq !== undefined) outcomes.set(next.seq, next);
     const waiters = next.seq === undefined ? undefined : outcomeWaiters.get(next.seq);
     if (waiters !== undefined) {
       outcomeWaiters.delete(next.seq as number);
       waiters.forEach((resolve) => resolve({ ok: outcome, status } as Outcome));
     }
     statusWaiters.forEach((wake) => wake());
+    requestWaiters.forEach((wake) => wake());
   }
 
   function requestOf(seq: number): DumpRequest | undefined {
@@ -442,8 +491,9 @@ export function createDevServer(options: DevServerOptions): http.RequestListener
       }
       const request: DumpRequest = { seq: nextSeq, ...parsed, requestedAt: new Date().toISOString() };
       nextSeq += 1;
+      writeFileSync(lastSeqFile, `${request.seq}\n`);
       requests.push(request);
-      if (requests.length > KEEP_REQUESTS) requests.shift();
+      if (requests.length > KEEP_REQUESTS) outcomes.delete((requests.shift() as DumpRequest).seq);
       log(`#${request.seq} を受けた: ${request.nodeIds ? request.nodeIds.join(", ") : "プラグインで開いているページの選択"}`);
       pollers.forEach((wake) => wake());
       let resolveOutcome: ((outcome: Outcome) => void) | undefined;
@@ -479,12 +529,13 @@ export function createDevServer(options: DevServerOptions): http.RequestListener
 
     if (route === "GET /next") {
       // 書き出し中のプラグインは /next を待たないので、待ちに来たなら手元の依頼はもう無い
-      processing = undefined;
+      setProcessing(undefined);
       const afterParam = url.searchParams.get("after");
       const sameServer = url.searchParams.get("server") === serverId;
       const after = afterParam !== null && sameServer ? Number(afterParam) : undefined;
       const reply = (request: DumpRequest): void => {
-        processing = { request, handedAt: Date.now() };
+        lastHandedSeq = Math.max(lastHandedSeq, request.seq);
+        setProcessing({ request, handedAt: Date.now() });
         send(res, 200, { server: serverId, ...request });
       };
       const ready = nextRequestFor(after);
@@ -522,7 +573,8 @@ export function createDevServer(options: DevServerOptions): http.RequestListener
         return;
       }
       const body = await readBody(req);
-      // 本文を受け取り終えるまでは処理中のままにする (受信中に時間切れになった依頼側に、処理中と見せる)
+      // 本文を受け取り終えるまでは処理中のままにする (受信中に時間切れになった依頼側に、処理中と見せる)。
+      // ここでは待ちを起こさない。結果を保存する前に起こすと、結果の無い依頼として skipped と答える (保存の publish が起こす)
       if (processing?.request.seq === seq) processing = undefined;
       if (route === "POST /error") {
         storeError(seq, body.toString("utf8"));
@@ -537,6 +589,41 @@ export function createDevServer(options: DevServerOptions): http.RequestListener
         return;
       }
       send(res, 200, status);
+      return;
+    }
+
+    if (route === "GET /status" && url.searchParams.has("seq")) {
+      const seq = Number(url.searchParams.get("seq"));
+      const seconds = secondsParam(url);
+      if (!Number.isInteger(seq) || seq < 1 || seconds === undefined) {
+        send(res, 400, { error: "seq は正の整数、timeout は正の秒数にする" });
+        return;
+      }
+      const settled = (reply: RequestReply): boolean => reply.state !== "queued" && reply.state !== "processing";
+      const now = requestReply(seq);
+      if (now === undefined) {
+        send(res, 404, { error: `この起動の dev サーバーは #${seq} を受けていない (起動し直す前の依頼か、古い依頼)` });
+        return;
+      }
+      if (settled(now)) {
+        send(res, 200, now);
+        return;
+      }
+      waitFor(
+        res,
+        (wake) => {
+          const waiter = (): void => {
+            const reply = requestReply(seq);
+            if (reply === undefined || !settled(reply)) return;
+            wake();
+            send(res, 200, reply);
+          };
+          requestWaiters.add(waiter);
+          return () => requestWaiters.delete(waiter);
+        },
+        seconds * 1000,
+        () => send(res, 504, { ...requestReply(seq), error: `${seconds} 秒待っても #${seq} の結果が来ない` })
+      );
       return;
     }
 
