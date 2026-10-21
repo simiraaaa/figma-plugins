@@ -1,4 +1,4 @@
-# Structure Dump の書き出し (schema: dump-v2)
+# Structure Dump の書き出し (schema: dump-v3)
 
 Figma プラグイン Structure Dump が書き出した ZIP の読み方。
 AI (Claude Code 等) が最初に読む前提で書いている。
@@ -10,6 +10,9 @@ AI (Claude Code 等) が最初に読む前提で書いている。
 3. 画面の間の注記・矢印が要るときは、そのセクションの `_section.json` を読む。
    ただし `GROUP` にまとめた矢印や、部品の `INSTANCE` は、`_section.json` ではなく画面フレームとして `index.json` に載る (下の「何が画面フレームになるか」)。
 4. 画像の中身が要るときは、ノードの `fills[].imageRef` を `index.json` の `assets` で引き、`assets/` のファイルのパスを得る。
+   アイコンなどのベクターは、ノードの `svg` が `assets/svg/` の SVG ファイルを指す。
+5. デザイントークンが要るときは、`variables.json` (Variables の全モードの値) と `styles.json` (名前付きスタイルの中身) を読む。
+   ノードの `variables` と `styles` には名前が入っているので、それで引く。
 
 ZIP 全体を一度に読み込む必要はない。
 画面 1 枚ぶんの json と png を組で扱うのが最も精度が出る。
@@ -23,7 +26,10 @@ index.json                           セクション → 画面フレームの�
 <セクション>/<フレーム名>.<id>.json   その画面フレーム以下の構造
 <セクション>/_section.json           画面フレームでもセクションでもない子 (テキスト・矢印など) の構造
 <フレーム名>.<id>.png / .json         直接選ばれたノード・ページ直下のノード (ZIP 直下)
+variables.json                       ファイル全体の Variables (コレクション・モード・全モードの値)
+styles.json                          名前付きスタイル (ファイルのスタイルと、使われていたライブラリのスタイル)
 assets/<imageRef>.<拡張子>           image fill の元画像 (index.json の assets から引く)
+assets/svg/<id>.svg                  ベクターだけのノードの SVG (ノードの svg から引く)
 ```
 
 - セクションのディレクトリ名は `<セクション名>.<id>`。
@@ -52,7 +58,8 @@ assets/<imageRef>.<拡張子>           image fill の元画像 (index.json の 
 画面でないものは読む側で除く (`index.json` の画面フレームの `type`・`componentSetName`・`width` / `height`・名前で見分ける)。
 
 `_section.json` に入る子が無いセクションには `_section.json` が無い。
-非表示のノードはどこにも出ない。
+非表示のノードは出ない。
+ただし、コンポーネントのプロパティで出し入れする子は、非表示でも `visible: false` を付けて構造に残る (下の「ノードの読み方」)。
 直接選ばれたノード (未選択時はページ直下のノード) が非表示で除かれたときは、`meta.warnings` に残る。
 
 セクションの中のノードを、そのセクションを選ばずに直接選んだ場合も、ZIP 直下に置かれる。
@@ -79,7 +86,7 @@ GROUP の子の `x` / `y` は GROUP ではなく外側の container に対する
 
 ```
 {
-  "meta": { "fileName", "pluginVersion", "schemaVersion": "dump-v2", "exportedAt", "scope", "screenshotScale", "warnings": [] },
+  "meta": { "fileName", "pluginVersion", "schemaVersion": "dump-v3", "exportedAt", "scope", "screenshotScale", "warnings": [] },
   "sections": [ <セクション> ],
   "frames": [ <画面フレーム> ],
   "assets": { "<imageRef>": "assets/<imageRef>.<拡張子>" }
@@ -98,6 +105,8 @@ GROUP の子の `x` / `y` は GROUP ではなく外側の container に対する
   - 非表示のため除外したノード (`非表示のため除外: <name> (<id>)`)
   - ZIP 内パスが 200 文字を超えたもの (`パスが長い (N 文字): <path>`。展開先によってはパス長の上限に当たる)
   - 枠の外に描画があり、png を枠で切った画面フレーム (`枠の外に描画があり、png は枠で切った: <name> (<id>)`)
+  - SVG の書き出しに失敗したノード (`SVG の書き出しに失敗: <name> (<id>): <理由>`)
+  - 変数の値を解決できなかったもの (`変数の値を解決できない: <変数名>: <理由>`)
 - `sections`: トップレベルのセクション。document 順に並ぶ。
 - `frames`: ZIP 直下に置いた画面フレーム (直接選ばれたノード・ページ直下のノード)。
 - `assets`: ノードの `fills[].imageRef` → ZIP 内の画像ファイルのパス。
@@ -137,7 +146,7 @@ GROUP の子の `x` / `y` は GROUP ではなく外側の container に対する
 
 ```
 {
-  "schemaVersion": "dump-v2",
+  "schemaVersion": "dump-v3",
   "section": { "id", "name", "dir" } | null,
   "absoluteX", "absoluteY",
   "node": <ノード>
@@ -153,7 +162,7 @@ GROUP の子の `x` / `y` は GROUP ではなく外側の container に対する
 
 ```
 {
-  "schemaVersion": "dump-v2",
+  "schemaVersion": "dump-v3",
   "section": { "id", "name", "dir", "x", "y", "absoluteX", "absoluteY", "width", "height" },
   "nodes": [ <ノード>, ... ]
 }
@@ -169,8 +178,13 @@ GROUP の子の `x` / `y` は GROUP ではなく外側の container に対する
 
 - デフォルト値と非表示ノードは出力されない。キーが無ければデフォルト値だと読む。
 - `id` / `name` / `type` は必ずある。`type` は Figma のノード種別 (`FRAME`・`TEXT`・`INSTANCE` など)。
-- `width` / `height`: サイズ。
+- `visible: false`: コンポーネントのプロパティで出し入れする子が、いま非表示であること。
+  どのプロパティで出し入れするかは `propertyRefs.visible` にある。
+  プロパティと結び付いていない非表示の子は出ない。
+- `width` / `height`: サイズ。`minWidth` / `maxWidth` / `minHeight` / `maxHeight`: auto layout の最小・最大の大きさ。
 - `layoutMode` / `padding: [上,右,下,左]` / `itemSpacing` / `layoutSizingHorizontal` / `layoutSizingVertical`: auto layout。
+  折り返すときは `layoutWrap: "WRAP"` と `counterAxisSpacing` / `counterAxisAlignContent`。
+  `strokesIncludedInLayout: true` は、枠線の太さをレイアウトの大きさに含める。
 - `x` / `y` が付くかどうかは、`children[]` で直近の親 (GROUP を含む) が auto layout かで決まる。
   付くのは次のどれか。
   それ以外は auto layout が座標を決めるので出ない。
@@ -180,14 +194,78 @@ GROUP の子の `x` / `y` は GROUP ではなく外側の container に対する
 - `x` / `y` の値の基準は、付き方とは別に決まる。
   どの場合も「座標」の節でいう親 (GROUP と BOOLEAN_OPERATION を飛ばした外側の container) に対する相対座標。
   GROUP の子の `x` / `y` に GROUP の `x` / `y` を足さない。
+- `constraints: { horizontal, vertical }`: `x` / `y` が付くノードの、親の大きさが変わったときの追従 (`MIN`・`MAX`・`CENTER`・`STRETCH`・`SCALE`)。
+  既定の `MIN` / `MIN` (左上に固定) のときは出ない。
 - 色は `#rrggbb` に正規化済み。透明度は `opacity` / `alpha`。
+- `strokes` / `strokeWeight` / `strokeAlign`: 枠線。辺ごとに太さが違うときは `strokeWeight` の代わりに `strokeWeights: [上,右,下,左]`。
+- `clipsContent: true`: はみ出した子を枠で切る。`overflowDirection`: スクロールする向き (`HORIZONTAL`・`VERTICAL`・`BOTH`)。
+- `blendMode` (通常以外の合成)・`isMask: true` (マスク)・`booleanOperation` (BOOLEAN_OPERATION の種類)。
 - `componentName` / `componentSetName` / `props`: インスタンスの由来と variant。
   props のキーは Figma 内部キーの `#` 以降を取り除いた表示名 (`Label#12:34` → `Label`)。
-- `variables`: ノードに束縛された Figma Variables の名前 (デザイントークン)。
-- 書式が混在するテキストは `textSegments[]` に展開される。
+  INSTANCE_SWAP の props の値は、差し替え先のコンポーネントの id。
+- `propertyRefs`: そのノードがコンポーネントのどのプロパティと結び付いているか。キーは結び付いた中身で、値はプロパティの表示名。
+  - `visible`: このプロパティ (BOOLEAN) で表示を出し入れする。
+  - `characters`: このプロパティ (TEXT) の値がテキストの中身になる。
+  - `mainComponent`: このプロパティ (INSTANCE_SWAP) でインスタンスの中身を差し替える。
+- `propertyDefinitions`: コンポーネントのプロパティの定義。表示名 → `{ type, default, options, preferredValues, description }`。
+  `type` は `BOOLEAN`・`TEXT`・`INSTANCE_SWAP`・`VARIANT`。`options` は VARIANT の選択肢。
+  INSTANCE_SWAP の `default` は `{ id, name }` (既定のコンポーネント)。
+  付くのは `COMPONENT_SET`、セットに属さない `COMPONENT`、直接書き出したバリアント (`COMPONENT`。セットの定義を写す) の 3 つ。
+  セットの中のバリアントには付かない (セット側を見る)。
+- `description`: コンポーネント (`COMPONENT` / `COMPONENT_SET`) の説明。
+- `variables`: ノードに束縛された Figma Variables。束縛した項目 → `{ name, value }`。
+  `value` はそのノードで効いているモードでの値 (色は `#rrggbb`、半透明は `#rrggbbaa`)。
+  `fills` などは paint ごとの配列。値を解決できなかった変数は `name` だけ。
+  全モードの値は `variables.json` を `name` で引く。
+- `variableModes`: ノードに明示した Variables のモード。コレクション名 → モード名。
+- `styles`: 名前付きスタイルの名前。`fill`・`stroke`・`text`・`effect`・`grid` → スタイル名。
+  中身は `styles.json` を名前で引く。テキストの一部ずつ違うスタイルは `"mixed"` で、中身は `textSegments[]` にある。
+- テキストは `characters` と書式 (`fontFamily`・`fontStyle`・`fontSize`・`fontWeight`・`lineHeight`・`letterSpacing` など)。
+  `paragraphSpacing` / `paragraphIndent`: 段落の間と字下げ。
+  `textTruncation: "ENDING"` と `maxLines`: 行数を超えたら末尾を省略する。
+  `hyperlink: { type, value }`: リンク (`URL` なら URL、`NODE` ならノードの id)。
+- 書式が部分ごとに違うテキストは `textSegments[]` に展開される。
+  各要素は `text` と、その部分の書式・`fills`・`textStyle` / `fillStyle` (スタイル名)・`hyperlink`。
 - `fills[].imageRef`: image fill の元画像。`index.json` の `assets[imageRef]` が ZIP 内のファイルのパス。
   キーが無ければ画像の取得に失敗している (理由は `meta.warnings`)。
+- `svg`: ベクターだけでできたノード (アイコンなど) の SVG ファイルの ZIP 内パス。
+  付くのは、子孫が図形だけ (テキストも画像も無い) で線を描く図形を含む部分木の、いちばん上のノードだけ。
+  その子孫には付かない。長方形と楕円だけの枠には付かない。
+  書き出しに失敗したノードにはキーが無い (理由は `meta.warnings`)。
+- `annotations[]`: Dev Mode の注記。`label` (本文) と `properties` (注記に添えたプロパティの種類)。
 - `extractionError`: そのノードの情報を一部読めなかった理由。構造の出力は続いている。
+
+## variables.json
+
+```
+{
+  "collections": [
+    { "id", "name", "remote", "modes": ["Light", "Dark"], "defaultMode": "Light",
+      "variables": [ { "id", "name", "type", "values": { "<モード名>": <値> }, "description", "scopes", "codeSyntax" } ] }
+  ]
+}
+```
+
+- ファイルのコレクションの全変数と、ノードが使っていたライブラリ (`remote: true`) の変数が入る。
+  ライブラリのコレクションには、使われていた変数だけが入る。
+- `type`: `COLOR`・`FLOAT`・`STRING`・`BOOLEAN`。
+- `values`: モード名 → 値。色は `#rrggbb` (半透明は `#rrggbbaa`)。
+  別の変数を参照する値は `{ "alias": "<変数名>" }`。
+- `scopes` / `codeSyntax`: Figma で設定した適用範囲とコードでの名前。設定が無ければキーが無い。
+
+## styles.json
+
+```
+{ "styles": [ { "id", "name", "type", "remote", "description", ... } ] }
+```
+
+- ファイルの名前付きスタイルと、ノードが使っていたライブラリのスタイル (`remote: true`)。
+- `type` ごとの中身は、ノードと同じ書き方。
+  - `PAINT`: `paints` (ノードの `fills` と同じ形)。
+  - `TEXT`: `fontFamily`・`fontStyle`・`fontSize`・`lineHeight`・`letterSpacing` など。
+  - `EFFECT`: `effects`。
+  - `GRID`: `layoutGrids`。
+- `variables`: スタイルに束縛された変数の名前 (`{ name }`)。スタイルはノードではないので値は無い。値は `variables.json` を名前で引く。
 
 ## 実装に使うときのヒント
 

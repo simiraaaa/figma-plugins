@@ -8,7 +8,13 @@
  */
 
 import { sortInDocumentOrder } from "../../../shared/nodeOrder";
-import { DumpNode, SerializeContext, serializeNode } from "./serialize";
+import {
+  buildVariablesJson,
+  DumpNode,
+  SerializeContext,
+  serializeNode,
+  serializeStyle,
+} from "./serialize";
 import {
   allFrames,
   allSections,
@@ -29,33 +35,115 @@ import {
   planDump,
   recordAsset,
   recordScreenshot,
+  recordSvg,
   RootSource,
   safeName,
   screenshotScaleFor,
+  STYLES_JSON_NAME,
+  VARIABLES_JSON_NAME,
 } from "./plan";
 import zipReadme from "./zip-readme.md";
 import { buildZip, utf8Encode, ZipEntry } from "./zip";
 
-const PLUGIN_VERSION = "0.3.0";
+const PLUGIN_VERSION = "0.4.0";
 
 // ---------------------------------------------------------------------------
-// Variables 一括ロード (ノード毎の非同期解決を避ける)
+// Variables・スタイル・コンポーネント名の解決 (書き出し 1 回ぶんの cache を持つ)
 // ---------------------------------------------------------------------------
 
-let variableNameById = new Map<string, string>();
+/** 同じ id を何度も引くので、Promise ごと覚えて 1 回だけ取りに行く */
+function memoize<T>(get: (id: string) => Promise<T>): (id: string) => Promise<T> {
+  const cache = new Map<string, Promise<T>>();
+  return (id) => {
+    let hit = cache.get(id);
+    if (hit === undefined) {
+      hit = get(id);
+      cache.set(id, hit);
+    }
+    return hit;
+  };
+}
 
-async function loadVariables(): Promise<void> {
+async function orNull<T>(get: () => Promise<T | null>): Promise<T | null> {
   try {
-    const vars = await figma.variables.getLocalVariablesAsync();
-    variableNameById = new Map(vars.map((v) => [v.id, v.name]));
-  } catch (e) {
-    // Variables 未使用ファイル等では空のままでよい
-    variableNameById = new Map();
+    return await get();
+  } catch {
+    return null;
   }
+}
+
+class Resolver {
+  readonly variable = memoize((id) => orNull(() => figma.variables.getVariableByIdAsync(id)));
+  readonly collection = memoize((id) =>
+    orNull(() => figma.variables.getVariableCollectionByIdAsync(id))
+  );
+  readonly style = memoize((id) => orNull(() => figma.getStyleByIdAsync(id)));
+  readonly node = memoize((id) => orNull(() => figma.getNodeByIdAsync(id)));
+  /** 書き出し中に出会った変数とスタイル。ライブラリ (remote) のものを一覧へ足すのに使う */
+  readonly seenVariables = new Set<string>();
+  readonly seenStyles = new Set<string>();
+  /** 値を解決できなかった変数。同じ変数を束縛したノードごとに warning を並べない */
+  readonly unresolvedValues = new Set<string>();
 }
 
 function jsonEntry(name: string, value: unknown): ZipEntry {
   return { name, data: utf8Encode(JSON.stringify(value, null, 2)) };
+}
+
+/** ファイルのコレクションと、ノードが使っていたライブラリの変数をコレクションごとにまとめる */
+async function variablesJson(resolver: Resolver): Promise<unknown> {
+  // Variables を使っていないファイルなどで失敗しても、ライブラリの分だけで続ける
+  const local = (await orNull(() => figma.variables.getLocalVariablesAsync())) ?? [];
+  const collections: VariableCollection[] =
+    (await orNull(() => figma.variables.getLocalVariableCollectionsAsync())) ?? [];
+  const variables: Variable[] = [...local];
+  const localIds = new Set(local.map((v) => v.id));
+  const collectionIds = new Set(collections.map((c) => c.id));
+  for (const id of resolver.seenVariables) {
+    if (localIds.has(id)) continue;
+    const variable = await resolver.variable(id);
+    if (variable === null) continue;
+    variables.push(variable);
+    if (!collectionIds.has(variable.variableCollectionId)) {
+      const collection = await resolver.collection(variable.variableCollectionId);
+      if (collection !== null) {
+        collections.push(collection);
+        collectionIds.add(collection.id);
+      }
+    }
+  }
+  const names = new Map(variables.map((v) => [v.id, v.name]));
+  for (const v of variables) {
+    for (const value of Object.values(v.valuesByMode)) {
+      const isAlias =
+        typeof value === "object" && value !== null && "type" in value && value.type === "VARIABLE_ALIAS";
+      if (isAlias && !names.has(value.id)) {
+        const target = await resolver.variable(value.id);
+        if (target !== null) names.set(target.id, target.name);
+      }
+    }
+  }
+  return buildVariablesJson(collections, variables, (id) => names.get(id));
+}
+
+/** ファイルのスタイルと、ノードが使っていたライブラリのスタイル */
+async function stylesJson(resolver: Resolver, ctx: SerializeContext): Promise<unknown> {
+  const local: BaseStyle[] = [
+    ...(await figma.getLocalPaintStylesAsync()),
+    ...(await figma.getLocalTextStylesAsync()),
+    ...(await figma.getLocalEffectStylesAsync()),
+    ...(await figma.getLocalGridStylesAsync()),
+  ];
+  const localIds = new Set(local.map((s) => s.id));
+  const styles = [...local];
+  for (const id of resolver.seenStyles) {
+    if (localIds.has(id)) continue;
+    const style = await resolver.style(id);
+    if (style !== null) styles.push(style);
+  }
+  const out: unknown[] = [];
+  for (const style of styles) out.push(await serializeStyle(style, ctx));
+  return { styles: out };
 }
 
 type ProgressPhase = "frames" | "sections" | "assets";
@@ -104,8 +192,6 @@ function currentPageTarget(): DumpTarget {
 }
 
 async function dump(target: DumpTarget, screenshotScale: number): Promise<DumpOutcome> {
-  await loadVariables();
-
   const plan = planDump(target.roots, sortInDocumentOrder);
   const empty = emptyMessage(plan, target.source);
   if (empty !== null) return { type: "empty", message: empty };
@@ -119,9 +205,40 @@ async function dump(target: DumpTarget, screenshotScale: number): Promise<DumpOu
     out.warnings.push(`パスが長い (${long.length} 文字): ${long.path}`);
   }
   const imageHashes = new Set<string>();
+  const resolver = new Resolver();
   const ctx: SerializeContext = {
     mixed: figma.mixed,
-    resolveVariableName: (id) => variableNameById.get(id) ?? `<unresolved:${id}>`,
+    resolveVariable: async (id, consumer) => {
+      resolver.seenVariables.add(id);
+      const variable = await resolver.variable(id);
+      if (variable === null) return { name: `<unresolved:${id}>` };
+      if (consumer === undefined) return { name: variable.name };
+      try {
+        return { name: variable.name, resolved: variable.resolveForConsumer(consumer as SceneNode) };
+      } catch (e) {
+        if (!resolver.unresolvedValues.has(id)) {
+          resolver.unresolvedValues.add(id);
+          out.warnings.push(`変数の値を解決できない: ${variable.name}: ${errorDetail(e)}`);
+        }
+        return { name: variable.name };
+      }
+    },
+    styleName: async (id) => {
+      resolver.seenStyles.add(id);
+      return (await resolver.style(id))?.name;
+    },
+    modeName: async (collectionId, modeId) => {
+      const collection = await resolver.collection(collectionId);
+      const mode = collection?.modes.find((m) => m.modeId === modeId);
+      return collection && mode ? { collection: collection.name, mode: mode.name } : undefined;
+    },
+    componentName: async (id) => (await resolver.node(id))?.name,
+    exportSvg: async (node) => {
+      const scene = node as SceneNode;
+      const written = out.writtenSvgs.get(scene.id);
+      if (written !== undefined) return written;
+      return recordSvg(out, scene, await fetchBytes(() => scene.exportAsync({ format: "SVG" })));
+    },
     registerImage: (hash) => {
       imageHashes.add(hash);
     },
@@ -177,6 +294,10 @@ async function dump(target: DumpTarget, screenshotScale: number): Promise<DumpOu
     postProgress("sections", i + 1, sectionsWithJson.length);
   }
 
+  // styles.json の paint の image fill も assets に載せるため、画像を取る前に組む
+  const variables = jsonEntry(VARIABLES_JSON_NAME, await variablesJson(resolver));
+  const styles = jsonEntry(STYLES_JSON_NAME, await stylesJson(resolver, ctx));
+
   // image fill の元画像。index.json の assets で imageRef → ZIP 内パスを引けるようにする
   const hashes = Array.from(imageHashes);
   for (let i = 0; i < hashes.length; i += 1) {
@@ -211,6 +332,8 @@ async function dump(target: DumpTarget, screenshotScale: number): Promise<DumpOu
   const zip = buildZip([
     { name: "README.md", data: utf8Encode(zipReadme) },
     { name: "index.json", data: utf8Encode(indexText) },
+    variables,
+    styles,
     ...out.entries,
   ]);
 
