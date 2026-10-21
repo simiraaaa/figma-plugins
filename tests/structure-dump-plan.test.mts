@@ -1,5 +1,5 @@
 /**
- * structure-dump 書き出し計画 (dump-v2) の検査
+ * structure-dump 書き出し計画 (dump-v3) の検査
  *
  * 実行: npm test
  * Figma API 非依存の純関数なので、素のオブジェクトでページを組んで
@@ -28,6 +28,7 @@ const {
   newExportOutput,
   planDump,
   recordAsset,
+  recordSvg,
   recordScreenshot,
   safeName,
   frameComponentOf,
@@ -436,7 +437,7 @@ test("index.json・画面フレーム json・_section.json の形", () => {
   ]);
 
   assert.deepEqual(buildIndex(plan, meta, written, assets, components), {
-    meta: { ...meta, schemaVersion: "dump-v2" },
+    meta: { ...meta, schemaVersion: "dump-v3" },
     sections: [
       {
         id: "1:1",
@@ -530,7 +531,7 @@ test("index.json・画面フレーム json・_section.json の形", () => {
   const home: FramePlan<TestNode> = plan.sections[0].frames[0];
   const dumped = { id: "2:1", name: "Home", type: "FRAME" };
   assert.deepEqual(buildFrameJson(home, dumped), {
-    schemaVersion: "dump-v2",
+    schemaVersion: "dump-v3",
     section: { id: "1:1", name: "Flow", dir: "Flow.1-1" },
     absoluteX: 60,
     absoluteY: 80,
@@ -542,7 +543,7 @@ test("index.json・画面フレーム json・_section.json の形", () => {
   assert.deepEqual(ids(flow.others), ["2:3"]);
   const memo = { id: "2:3", name: "memo", type: "FRAME" };
   assert.deepEqual(buildSectionJson(flow, [memo]), {
-    schemaVersion: "dump-v2",
+    schemaVersion: "dump-v3",
     section: {
       id: "1:1",
       name: "Flow",
@@ -725,6 +726,19 @@ test("recordAsset: 成功は assets 対応表に入り、失敗と画像なし�
     new Map()
   );
   assert.deepEqual(index.assets, { aa11: "assets/aa11.png" });
+});
+
+test("recordSvg: 成功は assets/svg/<id>.svg に置いてパスを返し、失敗と空は warning に残して undefined", () => {
+  const out = newExportOutput();
+  const svg = new TextEncoder().encode("<svg/>");
+  assert.equal(recordSvg(out, { id: "1:2", name: "icon" }, { ok: true, bytes: svg }), "assets/svg/1-2.svg");
+  assert.equal(recordSvg(out, { id: "3:4", name: "broken" }, { ok: false, error: "export failed" }), undefined);
+  assert.equal(recordSvg(out, { id: "5:6", name: "empty" }, { ok: true, bytes: new Uint8Array(0) }), undefined);
+  assert.deepEqual(out.entries.map((e) => e.name), ["assets/svg/1-2.svg"]);
+  assert.deepEqual(out.warnings, [
+    "SVG の書き出しに失敗: broken (3:4): export failed",
+    "SVG の書き出しに失敗: empty (5:6): 空のデータ",
+  ]);
 });
 
 test("スクリーンショットの倍率はメニューのコマンドで決まり、既定は 2x", () => {

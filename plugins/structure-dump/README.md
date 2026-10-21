@@ -28,7 +28,7 @@ Figma への取り込みは[リポルート README の共通手順](../../README
    既存の `README.md` と衝突する
 4. AI には展開したフォルダを渡し、まずその中の `README.md` を読ませる
 
-## ZIP の中身 (schema: dump-v2)
+## ZIP の中身 (schema: dump-v3)
 
 ```
 README.md                            読み方 (index.json と各 json のルール)
@@ -37,7 +37,10 @@ index.json                           セクション → 画面フレームの�
 <セクション>/<フレーム名>.<id>.json   その画面フレーム以下の構造
 <セクション>/_section.json           画面フレームでもセクションでもない子の構造
 <フレーム名>.<id>.png / .json         直接選んだノード・ページ直下のノード (ZIP 直下)
+variables.json                       ファイル全体の Variables (コレクション・モード・全モードの値)
+styles.json                          名前付きスタイルの中身
 assets/<imageRef>.<拡張子>           image fill の元画像 (index.json の assets から引く)
+assets/svg/<id>.svg                  ベクターだけのノード (アイコンなど) の SVG
 ```
 
 - 何が画面フレームになるか、JSON の各キー、ノードの読み方は ZIP 内の `README.md` に書いてある。
@@ -118,6 +121,9 @@ AI が Figma のデータを、クリックも Figma MCP の回数上限もな�
 - 進捗表示 (`progress` メッセージ) が、書き出し中の UI に実際に反映されること
 - メニューから実行したとき `figma.command` に manifest の `command` が入り、スクリーンショットの倍率が切り替わること
 - `exportAsync` に `useAbsoluteBounds: true` を付けると、枠の外にはみ出した描画が切られ、png が枠 (`width` × `height` × 倍率) の大きさになること
+- ライブラリ (remote) の変数とスタイルを variables.json / styles.json に足す処理
+  (実機で試したファイルは、変数もスタイルもファイルの中のものだけだった)
+- `annotations`・`hyperlink`・`textTruncation`・`variableModes` が実データで期待どおりに出ること
 
 計画 (どのノードをどのパスへ出すか) と JSON 化、ZIP 生成、取得結果の振り分けのロジック自体は
 `tests/structure-dump-*.test.mts` で検証済み (画面フレームの型の判定・ネストしたディレクトリ・

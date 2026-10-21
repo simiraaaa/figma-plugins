@@ -1,5 +1,5 @@
 /**
- * 書き出し計画 (schema: dump-v2) の組み立て
+ * 書き出し計画 (schema: dump-v3) の組み立て
  *
  * Figma API 非依存の純関数 (figma グローバルを参照しない)。
  * 選択 (またはページ直下) のノードから「どのノードを ZIP のどのパスへ出すか」を決め、
@@ -12,9 +12,14 @@
  * 相対 import を拒むため。
  */
 
-export const SCHEMA_VERSION = "dump-v2";
+export const SCHEMA_VERSION = "dump-v3";
 
 export const SECTION_JSON_NAME = "_section.json";
+/** ファイル全体の Variables (コレクション・モード・全モードの値) */
+export const VARIABLES_JSON_NAME = "variables.json";
+/** 名前付きスタイル (ファイルのスタイルと、ノードが使っているライブラリのスタイル) */
+export const STYLES_JSON_NAME = "styles.json";
+const SVG_DIR = "assets/svg";
 
 /**
  * プラグインのメニューのコマンド → スクリーンショットの倍率。
@@ -517,7 +522,12 @@ export interface ExportOutput {
 }
 
 export function newExportOutput(warnings: string[] = []): ExportOutput {
-  return { entries: [], warnings, writtenPngs: new Set(), writtenAssets: new Map() };
+  return {
+    entries: [],
+    warnings,
+    writtenPngs: new Set(),
+    writtenAssets: new Map(),
+  };
 }
 
 export type FetchResult = { ok: true; bytes: Uint8Array } | { ok: false; error: unknown };
@@ -573,4 +583,24 @@ export function recordAsset(
     out.entries.push({ name: path, data: result.bytes });
     out.writtenAssets.set(imageRef, path);
   }
+}
+
+/** ベクターだけのノードの SVG。書き出せたら ZIP 内パスを返し、失敗したら warning に残して undefined */
+export function recordSvg(
+  out: ExportOutput,
+  node: { id: string; name: string },
+  result: FetchResult
+): string | undefined {
+  const label = `${node.name} (${node.id})`;
+  if (!result.ok) {
+    out.warnings.push(`SVG の書き出しに失敗: ${label}: ${errorDetail(result.error)}`);
+    return undefined;
+  }
+  if (result.bytes.length === 0) {
+    out.warnings.push(`SVG の書き出しに失敗: ${label}: 空のデータ`);
+    return undefined;
+  }
+  const path = `${SVG_DIR}/${safeId(node.id)}.svg`;
+  out.entries.push({ name: path, data: result.bytes });
+  return path;
 }
