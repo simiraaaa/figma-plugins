@@ -238,7 +238,8 @@ GROUP の子の `x` / `y` は GROUP ではなく外側の container に対する
   `hyperlink: { type, value }`: リンク (`URL` なら URL、`NODE` ならノードの id)。
 - 書式が部分ごとに違うテキストは `textSegments[]` に展開される。
   各要素は `text` と、その部分の書式・`fills`・`textStyle` / `fillStyle` (スタイル名)・`hyperlink`・`variables` (その部分に束縛した変数。塗りの色は `fills` に paint の並びで入る)。
-  文字の範囲ごとに違う変数を束縛したテキストも、書式の値が同じでも展開される。
+  文字の範囲ごとに違う変数 (塗りの色を含む) を束縛したテキストも、書式の値が同じでも展開される。
+  塗りが範囲ごとに違うテキストでは、ノードの `variables` に `fills` は無く、範囲ごとの `textSegments[].variables.fills` にある。
 - `fills[].imageRef`: image fill の元画像。`index.json` の `assets[imageRef]` が ZIP 内のファイルのパス。
   キーが無ければ画像の取得に失敗している (理由は `meta.warnings`)。
 - `svg`: ベクターだけでできたノード (アイコンなど) の SVG ファイルの ZIP 内パス。
@@ -270,7 +271,7 @@ GROUP の子の `x` / `y` は GROUP ではなく外側の container に対する
 - `type`: `COLOR`・`FLOAT`・`STRING`・`BOOLEAN`。
 - `values`: モード名 → 値。色は `#rrggbb` (半透明は `#rrggbbaa`)。
   別の変数を参照する値は `{ "alias": "<変数名>" }`。参照先の名前で引き直す。
-  参照先は別のコレクションのことがあり、そのコレクションのモードが 1 つならその値、複数ならノードの `resolvedVariableModes` にあるそのコレクションのモード (無ければ `defaultMode`) の値を読む。
+  参照先は別のコレクションのことがあり、そのコレクションのモードが 1 つならその値、複数ならそのノードで効いているそのコレクションのモード (「ノードの読み方」の `variables` のとおり、`resolvedVariableModes` を途中の `variableModes` で上書きしたもの。どちらにも無ければ `defaultMode`) の値を読む。
 - `scopes` / `codeSyntax`: Figma で設定した適用範囲とコードでの名前。設定が無ければキーが無い。
 
 ## styles.json

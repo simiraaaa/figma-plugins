@@ -118,6 +118,8 @@ async function variableRef(
 const PAINT_FIELDS: ReadonlySet<string> = new Set(["fills", "strokes"]);
 /** paint・effect 単位で束縛を読み、出力と同じ並びで出す項目 (node.boundVariables の配列は並びが揃っていない) */
 const ALIGNED_FIELDS: ReadonlySet<string> = new Set([...PAINT_FIELDS, "effects"]);
+/** 文字の範囲ごとの塗りの束縛。範囲は textSegments に展開して出すので、ノードには出さない */
+const TEXT_RANGE_FILLS = "textRangeFills";
 
 async function aliasRef(
   bound: unknown,
@@ -195,7 +197,8 @@ async function serializeBoundVariables(
   }
   if (!isRecord(bv)) return Object.keys(out).length > 0 ? out : undefined;
   for (const [field, value] of Object.entries(bv)) {
-    if (consumer !== undefined && ALIGNED_FIELDS.has(field) && Array.isArray(owner[field])) continue;
+    // ノードと文字の範囲では、並びの揃わない node 側の配列は出さない (塗りが混在するテキストの fills も含む)
+    if (consumer !== undefined && (ALIGNED_FIELDS.has(field) || field === TEXT_RANGE_FILLS)) continue;
     if (field === "componentProperties" && isRecord(value)) {
       // プロパティのキー → VariableAlias の辞書
       const props: Record<string, unknown> = {};
@@ -403,7 +406,9 @@ const TEXT_BINDING_FIELDS: readonly string[] = [
 function textBindingsVary(node: AnyNode): boolean {
   const bv = node.boundVariables;
   if (!isRecord(bv)) return false;
-  return TEXT_BINDING_FIELDS.some((field) => Array.isArray(bv[field]) && (bv[field] as unknown[]).length > 1);
+  return [...TEXT_BINDING_FIELDS, TEXT_RANGE_FILLS].some(
+    (field) => Array.isArray(bv[field]) && (bv[field] as unknown[]).length > 1
+  );
 }
 
 async function serializeSegment(

@@ -926,3 +926,42 @@ test("塗りのある枠の中身が図形だけなら、枠ごと 1 枚の SVG 
   );
   assert.deepEqual(svgs, ["33:2"]);
 });
+
+// ---------------------------------------------------------------------------
+// レビュー 3 巡目への対応
+// ---------------------------------------------------------------------------
+
+test("色の値は同じでも範囲ごとに塗りの変数が違うテキストは展開し、ノードには範囲の揃わない配列を出さない", async () => {
+  const { ctx } = makeCtx();
+  const bound = (id: string) => [{ ...solid(1, 0.5, 0), boundVariables: { color: alias(id) } }];
+  const out = await serializeNode(
+    {
+      id: "40:1", name: "rich", type: "TEXT", characters: "AB",
+      fontSize: 14, fontName: { family: "Inter", style: "Medium" }, fontWeight: 500,
+      fills: [solid(1, 0.5, 0)],
+      boundVariables: { textRangeFills: [alias("VariableID:1:2"), alias("VariableID:1:3")] },
+      getStyledTextSegments: () => [
+        { characters: "A", fills: bound("VariableID:1:2") },
+        { characters: "B", fills: bound("VariableID:1:3") },
+      ],
+    },
+    ctx
+  );
+  assert.equal((out.textSegments as unknown[]).length, 2, "範囲ごとに違う塗りの変数で展開していない");
+  assert.equal((out.variables as Record<string, unknown> | undefined)?.textRangeFills, undefined);
+
+  const mixed = await serializeNode(
+    {
+      id: "40:2", name: "mixed", type: "TEXT", characters: "AB",
+      fontSize: 14, fontName: { family: "Inter", style: "Medium" }, fontWeight: 500,
+      fills: MIXED,
+      boundVariables: { fills: [alias("VariableID:1:2")] },
+      getStyledTextSegments: () => [
+        { characters: "A", fills: bound("VariableID:1:2") },
+        { characters: "B", fills: [solid(0, 0, 0)] },
+      ],
+    },
+    ctx
+  );
+  assert.equal(mixed.variables, undefined, "塗りが混在するテキストに、paint と揃わない fills の配列を出した");
+});

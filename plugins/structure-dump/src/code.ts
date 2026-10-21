@@ -283,7 +283,13 @@ async function dump(target: DumpTarget, screenshotScale: number): Promise<DumpOu
         ctx.warn(`SVG の元のコンポーネントを取れない: ${scene.name} (${scene.id})`);
         return undefined;
       }
-      if (resolver.svgs.has(target.id)) return resolver.svgs.get(target.id);
+      if (resolver.svgs.has(target.id)) {
+        const cached = resolver.svgs.get(target.id);
+        if (cached === undefined && target !== scene) {
+          ctx.warn(`SVG の元のコンポーネントの書き出しに失敗済み: ${scene.name} (${scene.id})`);
+        }
+        return cached;
+      }
       // 元のコンポーネントを書き出すときは、warning にどのインスタンスの SVG かも残す
       const label =
         target === scene
