@@ -21,7 +21,9 @@ import {
   type DumpRequest,
   entryPath,
   parseExportBody,
+  type PluginState,
   readStoredZip,
+  type StatusReply,
 } from "../scripts/dev-server-lib.mts";
 import { releaseManifest } from "../scripts/release-lib.mts";
 // 実行するのは esbuild 産物、型は同じソースから取る(産物側は型を持たない)
@@ -245,35 +247,90 @@ test("起動し直した直後の status は、前回の最後の結果を返す
   }
 });
 
-test("書き出し中のプラグインが「生きている」を送り続けていれば、長い書き出しの最中の依頼も受ける", async () => {
-  const { base, close } = await startServer(undefined, { pluginStaleMs: 100 });
+test("渡した依頼の結果がまだなら、プラグインから何も来なくても次の依頼を断らずに待たせる", async () => {
+  const { base, close } = await startServer(undefined, { pluginStaleMs: 50 });
   try {
     const polled = pluginNext(base);
-    const first = fetch(`${base}/export?timeout=2`, { method: "POST", body: "" });
+    const first = fetch(`${base}/export?timeout=5`, { method: "POST", body: "" });
     first.catch(() => {});
-    await json<Next>(polled);
-    // 書き出し中は /next を待たないので、/alive だけが繋がっている印になる
-    for (let i = 0; i < 4; i += 1) {
-      await new Promise((resolve) => setTimeout(resolve, 60));
-      assert.equal((await fetch(`${base}/alive`, { method: "POST", headers: PLUGIN })).status, 204);
-    }
-    const second = await fetch(`${base}/export?timeout=1`, { method: "POST", body: "" });
-    assert.equal(second.status, 504, "生きているのに 503 で断った");
+    const taken = await json<Next>(polled);
+    // 重い書き出しのあいだは Figma ごと固まり、UI からは何も届かない
+    await new Promise((resolve) => setTimeout(resolve, 100));
+    const second = fetch(`${base}/export?timeout=5`, { method: "POST", body: '{"nodeIds":["5:6"]}' });
+    second.catch(() => {});
+    assert.equal(await settleWithin(second, 200), "pending", "処理中なのに断った");
+
+    const { plugin } = await json<StatusReply>(fetch(`${base}/status`));
+    assert.equal(plugin.processing?.seq, 1);
+    assert.equal(typeof plugin.processing?.elapsedSeconds, "number");
+    assert.equal(typeof plugin.lastSeenAt, "string");
+
+    // 書き出しが終わると、待たせていた依頼を次に渡す
+    await pluginPost(base, "result", taken, sampleZip());
+    assert.equal((await first).status, 200);
+    const queued = await json<Next>(pluginNext(base, `?server=${taken.server}&after=1`));
+    assert.equal(queued.seq, 2);
+    assert.deepEqual(queued.nodeIds, ["5:6"]);
+    assert.equal((await json<StatusReply>(fetch(`${base}/status`))).plugin.processing?.seq, 2);
+    await pluginPost(base, "result", queued, sampleZip());
+    assert.equal((await second).status, 200);
   } finally {
     close();
   }
 });
 
-test("書き出しの途中でプラグインが閉じられたら (/alive が止まったら)、繋がっていないと見る", async () => {
+test("時間切れの 504 には、プラグインが処理中の依頼と最後に届いた時刻が載る", async () => {
+  const { base, close } = await startServer();
+  try {
+    const polled = pluginNext(base);
+    const first = fetch(`${base}/export?timeout=5`, { method: "POST", body: '{"nodeIds":["1:2"]}' });
+    first.catch(() => {});
+    await json<Next>(polled);
+    const res = await fetch(`${base}/export?timeout=0.2`, { method: "POST", body: "" });
+    assert.equal(res.status, 504);
+    const body = await json<{ seq: number; plugin: PluginState }>(res);
+    assert.equal(body.seq, 2);
+    assert.equal(body.plugin.processing?.seq, 1);
+    assert.deepEqual(body.plugin.processing?.nodeIds, ["1:2"]);
+    assert.equal(typeof body.plugin.lastSeenAt, "string");
+  } finally {
+    close();
+  }
+});
+
+test("結果を返したあと、しばらくプラグインから何も来なければ繋がっていないと見て 503", async () => {
   const { base, close } = await startServer(undefined, { pluginStaleMs: 50 });
   try {
     const polled = pluginNext(base);
-    const exported = fetch(`${base}/export?timeout=1`, { method: "POST", body: "" });
-    await json<Next>(polled);
-    assert.equal((await exported).status, 504);
+    const exported = fetch(`${base}/export?timeout=5`, { method: "POST", body: "" });
+    await pluginPost(base, "result", await json<Next>(polled), sampleZip());
+    assert.equal((await exported).status, 200);
+    // 結果を返したあと /next を待ちに来ない (プラグインを閉じた)
     await new Promise((resolve) => setTimeout(resolve, 100));
     const res = await fetch(`${base}/export?timeout=5`, { method: "POST", body: "" });
     assert.equal(res.status, 503);
+    const body = await json<{ plugin: PluginState }>(res);
+    assert.equal(body.plugin.processing, undefined);
+    assert.equal(typeof body.plugin.lastSeenAt, "string");
+  } finally {
+    close();
+  }
+});
+
+test("渡した依頼の結果を返さずに /next を待ちに来たら、その依頼はもう処理中と見ない", async () => {
+  const { base, close } = await startServer();
+  try {
+    const polled = pluginNext(base);
+    const exported = fetch(`${base}/export?timeout=5`, { method: "POST", body: "" });
+    exported.catch(() => {});
+    const taken = await json<Next>(polled);
+    assert.equal((await json<StatusReply>(fetch(`${base}/status`))).plugin.processing?.seq, 1);
+    const waiting = new AbortController();
+    const again = pluginNext(base, `?server=${taken.server}&after=1`, waiting.signal);
+    again.catch(() => {});
+    assert.equal(await settleWithin(again, 100), "pending");
+    assert.equal((await json<StatusReply>(fetch(`${base}/status`))).plugin.processing, undefined);
+    waiting.abort();
   } finally {
     close();
   }
@@ -284,7 +341,10 @@ test("プラグインが繋がっていなければ、依頼を積まずにす�
   try {
     const res = await fetch(`${base}/export?timeout=5`, { method: "POST", body: "" });
     assert.equal(res.status, 503);
-    assert.match((await json<{ error: string }>(res)).error, /開発: dev サーバーとつなぐ/);
+    const body = await json<{ error: string; plugin: PluginState }>(res);
+    assert.match(body.error, /開発: dev サーバーとつなぐ/);
+    // 起動してからプラグインが一度も来ていない
+    assert.deepEqual(body.plugin, {});
     // 積んでいないので、あとから繋いだプラグインには何も渡らない
     const next = pluginNext(base);
     next.catch(() => {});

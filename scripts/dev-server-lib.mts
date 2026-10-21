@@ -27,8 +27,8 @@ export const DEV_PORT = 47717;
 /** プラグインの UI が /next を待つ長さ。これを過ぎたら 204 を返し、UI は待ち直す */
 const POLL_HOLD_MS = 25_000;
 /**
- * 待っている /next が無く、最後にプラグインが来てからこれを過ぎたら、繋がっていないと見る。
- * 書き出し中のプラグインは /next を待たない代わりに、UI が POST /alive を 10 秒ごとに送る
+ * 処理中の依頼も待っている /next も無いまま、最後にプラグインが来てからこれを過ぎたら、繋がっていないと見る。
+ * /next の待ちが切れてから UI が聞き直すまでのすき間を含む長さにする
  */
 const DEFAULT_PLUGIN_STALE_MS = POLL_HOLD_MS + 10_000;
 /**
@@ -41,7 +41,6 @@ const PLUGIN_ROUTES: ReadonlySet<string> = new Set([
   "GET /next",
   "POST /result",
   "POST /error",
-  "POST /alive",
 ]);
 const DEFAULT_WAIT_SECONDS = 300;
 const KEEP_REQUESTS = 100;
@@ -171,6 +170,18 @@ export interface DevStatus {
   error?: string;
 }
 
+/** GET /status と、/export の 503・504 に添えるプラグインの様子 */
+export interface PluginState {
+  /** 最後にプラグインから何か届いた時刻。起動してからまだ何も届いていなければ無い */
+  lastSeenAt?: string;
+  /** プラグインへ渡して、まだ結果も失敗も返っていない依頼 */
+  processing?: { seq: number; nodeIds?: string[]; elapsedSeconds: number };
+}
+
+export interface StatusReply extends DevStatus {
+  plugin: PluginState;
+}
+
 type Outcome = { ok: true; status: DevStatus } | { ok: false; status: DevStatus };
 
 export interface DevServerOptions {
@@ -245,6 +256,8 @@ export function createDevServer(options: DevServerOptions): http.RequestListener
   const statusWaiters = new Set<() => void>();
   const pluginStaleMs = options.pluginStaleMs ?? DEFAULT_PLUGIN_STALE_MS;
   let lastPluginSeen = 0;
+  /** プラグインは 1 件ずつ書き出し、終わってから /next を待ちに来るので、処理中の依頼は 1 つだけ持つ */
+  let processing: { request: DumpRequest; handedAt: number } | undefined;
 
   mkdirSync(resultsDir, { recursive: true });
   // results/ は起動をまたいで残る。前回の続きの番号から振らないと、保持件数の掃除が新しい結果を消す
@@ -265,8 +278,28 @@ export function createDevServer(options: DevServerOptions): http.RequestListener
     return { ...previous, version: Math.max(0, ...versions) };
   }
 
+  // 重い書き出しのあいだは Figma ごと固まり、UI から何も届かない。
+  // だから処理中かどうかは、届いたかどうかでなく、渡した依頼の結果がまだかで見る
   function pluginConnected(): boolean {
-    return pollers.size > 0 || Date.now() - lastPluginSeen < pluginStaleMs;
+    return processing !== undefined || pollers.size > 0 || Date.now() - lastPluginSeen < pluginStaleMs;
+  }
+
+  function pluginState(): PluginState {
+    return {
+      lastSeenAt: lastPluginSeen === 0 ? undefined : new Date(lastPluginSeen).toISOString(),
+      processing:
+        processing === undefined
+          ? undefined
+          : {
+              seq: processing.request.seq,
+              nodeIds: processing.request.nodeIds,
+              elapsedSeconds: Math.floor((Date.now() - processing.handedAt) / 1000),
+            },
+    };
+  }
+
+  function statusReply(): StatusReply {
+    return { ...status, plugin: pluginState() };
   }
 
   function nextRequestFor(after: number | undefined): DumpRequest | undefined {
@@ -403,6 +436,7 @@ export function createDevServer(options: DevServerOptions): http.RequestListener
       if (!pluginConnected()) {
         send(res, 503, {
           error: "プラグインが繋がっていない (Figma で「開発: dev サーバーとつなぐ」を開いたままにする)",
+          plugin: pluginState(),
         });
         return;
       }
@@ -426,20 +460,32 @@ export function createDevServer(options: DevServerOptions): http.RequestListener
           return () => outcomeWaiters.get(request.seq)?.delete(resolveOutcome as (o: Outcome) => void);
         },
         seconds * 1000,
-        () =>
+        () => {
+          const plugin = pluginState();
+          const hint =
+            plugin.processing === undefined
+              ? "Figma で「開発: dev サーバーとつなぐ」を開いているか確かめる"
+              : `プラグインは #${plugin.processing.seq} を書き出し中`;
           send(res, 504, {
-            error: `${seconds} 秒待ってもプラグインから結果が来ない (Figma で「開発: dev サーバーとつなぐ」を開いているか確かめる)`,
+            error: `${seconds} 秒待ってもプラグインから結果が来ない (${hint})`,
             seq: request.seq,
-          })
+            plugin,
+          });
+        }
       );
       return;
     }
 
     if (route === "GET /next") {
+      // 書き出し中のプラグインは /next を待たないので、待ちに来たなら手元の依頼はもう無い
+      processing = undefined;
       const afterParam = url.searchParams.get("after");
       const sameServer = url.searchParams.get("server") === serverId;
       const after = afterParam !== null && sameServer ? Number(afterParam) : undefined;
-      const reply = (request: DumpRequest): void => send(res, 200, { server: serverId, ...request });
+      const reply = (request: DumpRequest): void => {
+        processing = { request, handedAt: Date.now() };
+        send(res, 200, { server: serverId, ...request });
+      };
       const ready = nextRequestFor(after);
       if (ready !== undefined) {
         reply(ready);
@@ -474,6 +520,7 @@ export function createDevServer(options: DevServerOptions): http.RequestListener
         send(res, 409, { error: "別の起動のサーバーの依頼の結果は受けない" });
         return;
       }
+      if (processing?.request.seq === seq) processing = undefined;
       const body = await readBody(req);
       if (route === "POST /error") {
         storeError(seq, body.toString("utf8"));
@@ -491,16 +538,11 @@ export function createDevServer(options: DevServerOptions): http.RequestListener
       return;
     }
 
-    if (route === "POST /alive") {
-      send(res, 204);
-      return;
-    }
-
     if (route === "GET /status") {
       const afterParam = url.searchParams.get("after");
       const after = afterParam === null ? undefined : Number(afterParam);
       if (after === undefined || status.version > after) {
-        send(res, 200, status);
+        send(res, 200, statusReply());
         return;
       }
       const seconds = secondsParam(url);
@@ -513,13 +555,13 @@ export function createDevServer(options: DevServerOptions): http.RequestListener
         (wake) => {
           const waiter = (): void => {
             wake();
-            send(res, 200, status);
+            send(res, 200, statusReply());
           };
           statusWaiters.add(waiter);
           return () => statusWaiters.delete(waiter);
         },
         seconds * 1000,
-        () => send(res, 504, { error: `${seconds} 秒待っても新しい結果が来ない`, ...status })
+        () => send(res, 504, { error: `${seconds} 秒待っても新しい結果が来ない`, ...statusReply() })
       );
       return;
     }
