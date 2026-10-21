@@ -146,6 +146,17 @@ async function stylesJson(resolver: Resolver, ctx: SerializeContext): Promise<un
   return { styles: out };
 }
 
+/**
+ * SVG で書き出すノード。非表示のノードは exportAsync が「表示されているレイヤーが無い」で失敗するので、
+ * 非表示の INSTANCE は元のコンポーネントを書き出す (インスタンスで上書きした色などは入らない)。
+ * それ以外の非表示のノードは書き出さない
+ */
+async function svgSource(node: SceneNode): Promise<SceneNode | null> {
+  if (node.visible) return node;
+  if (node.type !== "INSTANCE") return null;
+  return orNull(() => node.getMainComponentAsync());
+}
+
 type ProgressPhase = "frames" | "sections" | "assets";
 
 function postProgress(phase: ProgressPhase, done: number, total: number, name?: string): void {
@@ -234,10 +245,11 @@ async function dump(target: DumpTarget, screenshotScale: number): Promise<DumpOu
     },
     componentName: async (id) => (await resolver.node(id))?.name,
     exportSvg: async (node) => {
-      const scene = node as SceneNode;
-      const written = out.writtenSvgs.get(scene.id);
+      const target = await svgSource(node as SceneNode);
+      if (target === null) return undefined;
+      const written = out.writtenSvgs.get(target.id);
       if (written !== undefined) return written;
-      return recordSvg(out, scene, await fetchBytes(() => scene.exportAsync({ format: "SVG" })));
+      return recordSvg(out, target, await fetchBytes(() => target.exportAsync({ format: "SVG" })));
     },
     registerImage: (hash) => {
       imageHashes.add(hash);

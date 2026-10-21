@@ -13,6 +13,7 @@ AI (Claude Code 等) が最初に読む前提で書いている。
    アイコンなどのベクターは、ノードの `svg` が `assets/svg/` の SVG ファイルを指す。
 5. デザイントークンが要るときは、`variables.json` (Variables の全モードの値) と `styles.json` (名前付きスタイルの中身) を読む。
    ノードの `variables` と `styles` には名前が入っているので、それで引く。
+   どちらも大きくなりやすい (数百 KB) ので、頭から全部は読まず、名前で検索して要る要素だけを読む (例: `jq '.collections[].variables[] | select(.name == "function/primary")' variables.json`)。
 
 ZIP 全体を一度に読み込む必要はない。
 画面 1 枚ぶんの json と png を組で扱うのが最も精度が出る。
@@ -182,7 +183,7 @@ GROUP の子の `x` / `y` は GROUP ではなく外側の container に対する
   どのプロパティで出し入れするかは `propertyRefs.visible` にある。
   プロパティと結び付いていない非表示の子は出ない。
 - `width` / `height`: サイズ。`minWidth` / `maxWidth` / `minHeight` / `maxHeight`: auto layout の最小・最大の大きさ。
-- `layoutMode` / `padding: [上,右,下,左]` / `itemSpacing` / `layoutSizingHorizontal` / `layoutSizingVertical`: auto layout。
+- `layoutMode` / `padding: [上,右,下,左]` / `itemSpacing` / `primaryAxisAlignItems` / `counterAxisAlignItems` / `layoutSizingHorizontal` / `layoutSizingVertical`: auto layout。
   折り返すときは `layoutWrap: "WRAP"` と `counterAxisSpacing` / `counterAxisAlignContent`。
   `strokesIncludedInLayout: true` は、枠線の太さをレイアウトの大きさに含める。
 - `x` / `y` が付くかどうかは、`children[]` で直近の親 (GROUP を含む) が auto layout かで決まる。
@@ -207,16 +208,19 @@ GROUP の子の `x` / `y` は GROUP ではなく外側の container に対する
   - `visible`: このプロパティ (BOOLEAN) で表示を出し入れする。
   - `characters`: このプロパティ (TEXT) の値がテキストの中身になる。
   - `mainComponent`: このプロパティ (INSTANCE_SWAP) でインスタンスの中身を差し替える。
-- `propertyDefinitions`: コンポーネントのプロパティの定義。表示名 → `{ type, default, options, preferredValues, description }`。
+- `propertyDefinitions`: コンポーネントのプロパティの定義。表示名 → `{ type, default, options, description }`。
   `type` は `BOOLEAN`・`TEXT`・`INSTANCE_SWAP`・`VARIANT`。`options` は VARIANT の選択肢。
   INSTANCE_SWAP の `default` は `{ id, name }` (既定のコンポーネント)。
   付くのは `COMPONENT_SET`、セットに属さない `COMPONENT`、直接書き出したバリアント (`COMPONENT`。セットの定義を写す) の 3 つ。
   セットの中のバリアントには付かない (セット側を見る)。
+  直接書き出したバリアントでも `default` はセットの既定値で、そのバリアント自身の値は `props` にある。
 - `description`: コンポーネント (`COMPONENT` / `COMPONENT_SET`) の説明。
 - `variables`: ノードに束縛された Figma Variables。束縛した項目 → `{ name, value }`。
   `value` はそのノードで効いているモードでの値 (色は `#rrggbb`、半透明は `#rrggbbaa`)。
-  `fills` などは paint ごとの配列。値を解決できなかった変数は `name` だけ。
-  全モードの値は `variables.json` を `name` で引く。
+  効いているモードは、ノードか祖先の `variableModes` で明示したモード。どこにも無ければコレクションの `defaultMode`。
+  `fills` / `strokes` は paint ごとの配列、テキストの書式 (`fontSize`・`fontFamily` など) は文字の範囲ごとの配列。
+  角丸は四隅ごと (`topLeftRadius` など) に入る。値を解決できなかった変数は `name` だけ。
+  ほかのモードの値は `variables.json` を `name` で引く。
 - `variableModes`: ノードに明示した Variables のモード。コレクション名 → モード名。
 - `styles`: 名前付きスタイルの名前。`fill`・`stroke`・`text`・`effect`・`grid` → スタイル名。
   中身は `styles.json` を名前で引く。テキストの一部ずつ違うスタイルは `"mixed"` で、中身は `textSegments[]` にある。
@@ -231,6 +235,9 @@ GROUP の子の `x` / `y` は GROUP ではなく外側の container に対する
 - `svg`: ベクターだけでできたノード (アイコンなど) の SVG ファイルの ZIP 内パス。
   付くのは、子孫が図形だけ (テキストも画像も無い) で線を描く図形を含む部分木の、いちばん上のノードだけ。
   その子孫には付かない。長方形と楕円だけの枠には付かない。
+  非表示の INSTANCE (`visible: false`) は Figma が書き出せないので、元のコンポーネントの SVG を指す (ファイル名は元のコンポーネントの id)。
+  インスタンスで上書きした色や大きさはこの SVG に入らないので、json の `width` / `height` と子の `strokes` / `fills` を使う。
+  INSTANCE 以外の非表示のノードには付かない。
   書き出しに失敗したノードにはキーが無い (理由は `meta.warnings`)。
 - `annotations[]`: Dev Mode の注記。`label` (本文) と `properties` (注記に添えたプロパティの種類)。
 - `extractionError`: そのノードの情報を一部読めなかった理由。構造の出力は続いている。
@@ -247,10 +254,12 @@ GROUP の子の `x` / `y` は GROUP ではなく外側の container に対する
 ```
 
 - ファイルのコレクションの全変数と、ノードが使っていたライブラリ (`remote: true`) の変数が入る。
+  ファイルのコレクションには `remote` のキーが無い。
   ライブラリのコレクションには、使われていた変数だけが入る。
 - `type`: `COLOR`・`FLOAT`・`STRING`・`BOOLEAN`。
 - `values`: モード名 → 値。色は `#rrggbb` (半透明は `#rrggbbaa`)。
-  別の変数を参照する値は `{ "alias": "<変数名>" }`。
+  別の変数を参照する値は `{ "alias": "<変数名>" }`。参照先の名前で引き直す。
+  参照先は別のコレクションのことがあり、そのコレクションのモードが 1 つならその値、複数なら同じ名前のモードの値を読む。
 - `scopes` / `codeSyntax`: Figma で設定した適用範囲とコードでの名前。設定が無ければキーが無い。
 
 ## styles.json
@@ -259,7 +268,7 @@ GROUP の子の `x` / `y` は GROUP ではなく外側の container に対する
 { "styles": [ { "id", "name", "type", "remote", "description", ... } ] }
 ```
 
-- ファイルの名前付きスタイルと、ノードが使っていたライブラリのスタイル (`remote: true`)。
+- ファイルの名前付きスタイルと、ノードが使っていたライブラリのスタイル (`remote: true`。ファイルのスタイルにはキーが無い)。
 - `type` ごとの中身は、ノードと同じ書き方。
   - `PAINT`: `paints` (ノードの `fills` と同じ形)。
   - `TEXT`: `fontFamily`・`fontStyle`・`fontSize`・`lineHeight`・`letterSpacing` など。

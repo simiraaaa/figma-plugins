@@ -482,11 +482,7 @@ const definitions = {
 const expectedDefinitions = {
   "Show left icon": { type: "BOOLEAN", default: false },
   "Label text": { type: "TEXT", default: "ボタン" },
-  "Left icon": {
-    type: "INSTANCE_SWAP",
-    default: { id: "c:icon", name: "icon/chevron" },
-    preferredValues: [{ type: "COMPONENT", key: "abc" }],
-  },
+  "Left icon": { type: "INSTANCE_SWAP", default: { id: "c:icon", name: "icon/chevron" } },
   Size: { type: "VARIANT", default: "M", options: ["S", "M", "L"] },
 };
 

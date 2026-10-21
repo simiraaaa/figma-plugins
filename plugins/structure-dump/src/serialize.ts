@@ -468,7 +468,6 @@ interface PropertyDefinition {
   type: string;
   defaultValue: unknown;
   variantOptions?: string[];
-  preferredValues?: unknown[];
   description?: string;
 }
 
@@ -516,10 +515,6 @@ async function serializePropertyDefinitions(
       type: def.type,
       default: defaultValue,
       options: def.variantOptions,
-      preferredValues:
-        Array.isArray(def.preferredValues) && def.preferredValues.length > 0
-          ? def.preferredValues
-          : undefined,
       description: def.description ? def.description : undefined,
     });
   }
