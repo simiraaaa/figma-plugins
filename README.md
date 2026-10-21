@@ -49,7 +49,9 @@ shared/nodeOrder.ts       複数ノードを選択したときの出力順を、
                           document 上の並び順に固定する (両プラグインで共有)
 ```
 
-- どちらのプラグインも `networkAccess: none` (外部送信なし)。ZIP は圧縮なし (stored) の
+- どちらのプラグインも `networkAccess: none` (外部送信なし)。Structure Dump だけは開発ループ用に
+  `devAllowedDomains` で localhost を許し、配布する zip の manifest からは外す
+  ([開発ループ](plugins/structure-dump/README.md#開発ループ-ai-が自分で読み取る))。ZIP は圧縮なし (stored) の
   ZIP 形式で、外部ライブラリを使わない自前実装 (`plugins/structure-dump/src/zip.ts`) で生成する
 - JSON の組み立ては Figma API 非依存の純関数に分離してある
   (`serialize.ts` / `spec.ts` / `nodeOrder.ts`)

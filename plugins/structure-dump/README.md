@@ -44,6 +44,46 @@ assets/<imageRef>.<拡張子>           image fill の元画像 (index.json の 
   正本は [`src/zip-readme.md`](src/zip-readme.md) で、ビルド時に code.js へ埋め込まれる
   (esbuild の `--loader:.md=text`)
 
+## 開発ループ (AI が自分で読み取る)
+
+AI が Figma のデータを、クリックも Figma MCP の回数上限もなしに読み取るための仕組み。
+プラグインを開いておくと、手元の dev サーバーへ来た依頼を書き出し、ZIP を展開した結果を AI が読む。
+使えるのはリポジトリの manifest を取り込んだ開発プラグインだけ (配布する zip の manifest からは外してある)。
+
+1. dev サーバーを起動する (リポルートで。止めるまで動き続ける)
+
+   ```sh
+   npm run dev:server                        # 結果は .dev-dump/ に置く
+   npm run dev:server -- --out <ディレクトリ>  # 置き場所を変える
+   ```
+
+2. Figma でプラグインのメニューから「開発: dev サーバーとつなぐ」を実行し、開いたままにする (最初の 1 回だけ人か computer use の操作が要る)
+3. 書き出しを依頼する。結果が届くまで待ってから、展開先 (`dir`) を含む JSON が返る
+
+   ```sh
+   curl -s -X POST localhost:47717/export -d '{"nodeIds":["9194:16583"]}'
+   curl -s -X POST localhost:47717/export -d '{"nodeIds":["0:1"],"scale":1}'  # ページの id ならページ直下
+   curl -s -X POST localhost:47717/export                                     # Figma で開いているページの選択
+   ```
+
+   - 結果は `<置き場所>/results/<version>/` に展開し、`<置き場所>/latest` がいちばん新しい結果を指す。
+     中身は「ZIP の中身」と同じで、まず `README.md` を読む。
+   - 書き出せなかったとき (ノードが見つからない・すべて非表示など) は HTTP 422 で `error` に理由が入る。
+     プラグインが開いていないなどで 300 秒以内に結果が来なければ HTTP 504 (`?timeout=<秒>` で変えられる)。
+   - `<置き場所>/status.json` と `GET /status` は、最後に受けた結果 (`version`・`seq`・`dir`・`warnings`・`error`) を返す。
+4. プラグインのコードを直したら build する。ホットリロードでプラグインが走り直し、最後の依頼をもう一度書き出して送る
+
+   ```sh
+   npm run build:dump
+   curl -s 'localhost:47717/status?after=<直前の version>'  # 走り直した結果が届くまで待つ
+   ```
+
+   Figma のメニュー「プラグインをホットリロード」が効いている必要がある。
+
+ポートは 47717 で固定 (manifest の `devAllowedDomains` と同じ値)。
+dev サーバーは localhost でだけ待ち受け、ブラウザで開いたサイトからの送信 (Origin が `null` 以外) は断る。
+プラグインの画面には、いつ・なぜ (新しい依頼か、走り直しか) 書き出したかの記録が出る。
+
 ## AI への渡し方のヒント
 
 - 画面 1 枚ぶんの json + png をセットで渡すのが最も精度が出る

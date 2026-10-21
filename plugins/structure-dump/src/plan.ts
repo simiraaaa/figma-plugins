@@ -16,12 +16,21 @@ export const SCHEMA_VERSION = "dump-v2";
 
 export const SECTION_JSON_NAME = "_section.json";
 
-/** プラグインのメニューのコマンド → スクリーンショットの倍率。manifest.json の menu と同じ集合にする */
+/**
+ * プラグインのメニューのコマンド → スクリーンショットの倍率。
+ * manifest.json の menu は、これと DEV_LOOP_COMMAND を合わせた集合にする
+ */
 export const SCREENSHOT_SCALE_BY_COMMAND: Readonly<Record<string, number>> = {
   "export-2x": 2,
   "export-1x": 1,
 };
-const DEFAULT_SCREENSHOT_SCALE = 2;
+export const DEFAULT_SCREENSHOT_SCALE = 2;
+
+/**
+ * 開発ループ (dev サーバーから依頼を受けて書き出し、結果を送る) のコマンド。
+ * 配布する zip の manifest からは、"dev-" で始まるコマンドを外す (scripts/release-lib.mts)
+ */
+export const DEV_LOOP_COMMAND = "dev-loop";
 
 export function screenshotScaleFor(command: string): number {
   return Object.prototype.hasOwnProperty.call(SCREENSHOT_SCALE_BY_COMMAND, command)
@@ -445,18 +454,25 @@ export function buildSectionJson<T extends PlanNode, N>(
 // 書き出し前後の判定と記録 (Figma API の呼び出しは code.ts に残す)
 // ---------------------------------------------------------------------------
 
+/** 書き出すノードをどこから取ったか。selection は選択、page はページ直下、nodes は開発ループの依頼で id を指定した */
+export type RootSource = "selection" | "page" | "nodes";
+
+const HIDDEN_ROOTS_MESSAGE: Readonly<Record<RootSource, string>> = {
+  selection: "選択したノードはすべて非表示です",
+  page: "ページ直下のノードはすべて非表示です",
+  nodes: "指定したノードはすべて非表示です",
+};
+
 /** 出すものが無いときの UI 向けメッセージ。出すものがあれば null */
 export function emptyMessage<T extends PlanNode>(
   plan: DumpPlan<T>,
-  hasSelection: boolean
+  source: RootSource
 ): string | null {
   if (plan.frames.length > 0 || plan.sections.length > 0) return null;
   if (plan.hiddenRoots.length === 0) {
     return "対象がありません (何かを選択するか、空でないページで実行してください)";
   }
-  return hasSelection
-    ? "選択したノードはすべて非表示です"
-    : "ページ直下のノードはすべて非表示です";
+  return HIDDEN_ROOTS_MESSAGE[source];
 }
 
 /** これを超える ZIP 内パスは、展開先によってはパス長の上限に当たるので warning に残す */

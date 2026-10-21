@@ -14,6 +14,7 @@
   button:hover { background: #f0f0f0; }
   #status { color: #777; }
   #error { color: #c62828; white-space: pre-wrap; }
+  #dev-log { white-space: pre-wrap; margin: 4px 0 0; max-height: 360px; overflow: auto; }
 </style>
 </head>
 <body>
@@ -33,6 +34,11 @@
     <h2>index.json プレビュー</h2>
     <pre id="json"></pre>
   </div>
+  <div id="dev" hidden>
+    <h2>開発ループ (dev サーバー: <span id="dev-server"></span>)</h2>
+    <div class="meta">dev サーバーの依頼を待ち、書き出した ZIP を送る。プラグインのコードを build し直すと、最後の依頼をもう一度書き出す。</div>
+    <div id="dev-log"></div>
+  </div>
 
 <script>
 let payload = null;
@@ -44,6 +50,93 @@ function setStatus(text) {
 
 function failureDetail(e) {
   return e instanceof Error ? e.message : String(e);
+}
+
+// ---------------------------------------------------------------------------
+// 開発ループ (メニューの dev-loop で起動したときだけ動く)
+// ポートは manifest の devAllowedDomains と scripts/dev-server-lib.mts の DEV_PORT と同じ値にする
+// ---------------------------------------------------------------------------
+
+const DEV_SERVER = "http://localhost:47717";
+const DEV_RETRY_MS = 2000;
+const DEV_LOG_LINES = 50;
+/** 書き出し中の依頼の結果 (dev-result / dev-error) を受け取る */
+let devResolve = null;
+
+function devLog(text) {
+  const log = document.getElementById("dev-log");
+  const lines = log.textContent === "" ? [] : log.textContent.split("\n");
+  lines.unshift(`${new Date().toLocaleTimeString()} ${text}`);
+  log.textContent = lines.slice(0, DEV_LOG_LINES).join("\n");
+}
+
+function devTargets(request) {
+  return request.nodeIds ? request.nodeIds.join(", ") : "開いているページの選択 (未選択ならページ直下)";
+}
+
+function dumpInPlugin(request) {
+  return new Promise((resolve) => {
+    devResolve = resolve;
+    parent.postMessage({ pluginMessage: { type: "dev-request", request } }, "*");
+  });
+}
+
+/** fetch の本文は Content-Type を付けない形 (Uint8Array・文字列) にし、CORS の preflight を起こさない */
+async function devSend(request, outcome) {
+  if (outcome.type === "dev-result") {
+    const zip = outcome.payload.zip;
+    const bytes = zip instanceof Uint8Array ? zip : new Uint8Array(zip);
+    const res = await fetch(`${DEV_SERVER}/result?seq=${request.seq}`, { method: "POST", body: bytes });
+    if (!res.ok) throw new Error(`HTTP ${res.status}: ${await res.text()}`);
+    const m = outcome.payload.meta;
+    devLog(
+      `#${request.seq} を送った: 画面フレーム ${m.frameCount} 枚・ZIP ${(m.zipBytes / 1024).toFixed(0)} KB・警告 ${m.warnings.length} 件`
+    );
+    return;
+  }
+  const res = await fetch(`${DEV_SERVER}/error?seq=${request.seq}`, { method: "POST", body: outcome.message });
+  if (!res.ok) throw new Error(`HTTP ${res.status}: ${await res.text()}`);
+  devLog(`#${request.seq} は書き出せなかった (dev サーバーへ伝えた): ${outcome.message}`);
+}
+
+async function devLoop() {
+  const startedAt = Date.now();
+  let server = null;
+  let after = null;
+  let offline = false;
+  for (;;) {
+    let request;
+    try {
+      const query = server === null ? "" : `?server=${server}&after=${after}`;
+      const res = await fetch(`${DEV_SERVER}/next${query}`);
+      if (res.status === 204) continue;
+      if (!res.ok) throw new Error(`HTTP ${res.status}: ${await res.text()}`);
+      request = await res.json();
+    } catch (e) {
+      if (!offline) {
+        devLog(`dev サーバーにつながらない (${failureDetail(e)})。npm run dev:server を起動すると自動でつながる`);
+        setStatus("dev サーバーを待っている");
+      }
+      offline = true;
+      await new Promise((resolve) => setTimeout(resolve, DEV_RETRY_MS));
+      continue;
+    }
+    offline = false;
+    server = request.server;
+    after = request.seq;
+    const reason =
+      Date.parse(request.requestedAt) < startedAt
+        ? "起動・build で走り直したので、最後の依頼をもう一度"
+        : "新しい依頼";
+    devLog(`#${request.seq} を書き出す (${reason}): ${devTargets(request)}`);
+    const outcome = await dumpInPlugin(request);
+    try {
+      await devSend(request, outcome);
+    } catch (e) {
+      devLog(`#${request.seq} の送信に失敗: ${failureDetail(e)}`);
+    }
+    setStatus("依頼を待っている");
+  }
 }
 
 onmessage = (event) => {
@@ -58,6 +151,20 @@ onmessage = (event) => {
     return;
   }
   setStatus("");
+
+  if (msg.type === "dev-start") {
+    document.getElementById("dev-server").textContent = DEV_SERVER;
+    document.getElementById("dev").hidden = false;
+    setStatus("依頼を待っている");
+    devLoop();
+    return;
+  }
+  if (msg.type === "dev-result" || msg.type === "dev-error") {
+    const resolve = devResolve;
+    devResolve = null;
+    if (resolve) resolve(msg);
+    return;
+  }
 
   if (msg.type === "error") {
     document.getElementById("error").textContent = msg.message;
