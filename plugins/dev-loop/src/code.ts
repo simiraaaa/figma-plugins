@@ -13,13 +13,15 @@ import {
   DumpTarget,
   failureText,
 } from "../../structure-dump/src/dump";
-import { DEFAULT_SCREENSHOT_SCALE } from "../../structure-dump/src/plan";
+import { DEFAULT_SCREENSHOT_SCALE, ImagesMode, parseImagesMode } from "../../structure-dump/src/plan";
 import { runScript } from "./run";
 
 interface DevRequest {
   seq: number;
   nodeIds?: string[];
   scale?: number;
+  /** 省略は both。dev サーバーが 3 値以外を断るが、届いたら書き出さずに dev-error で返す */
+  images?: ImagesMode;
 }
 
 /** 依頼の id を書き出し対象にする。PAGE の id を 1 つだけ渡したら、そのページ直下を書き出す */
@@ -76,10 +78,20 @@ async function runDevLoop(): Promise<void> {
     }
     if (msg.type !== "dev-request") return;
     const request = msg.request;
+    const images = parseImagesMode(request.images);
+    if (images === null) {
+      figma.ui.postMessage({
+        type: "dev-error",
+        seq: request.seq,
+        message: `images は "both"・"none"・"only" のどれかにする (届いた値: ${JSON.stringify(request.images)})`,
+      });
+      return;
+    }
     try {
       const outcome = await dump(
         await devTarget(request.nodeIds),
-        request.scale ?? DEFAULT_SCREENSHOT_SCALE
+        request.scale ?? DEFAULT_SCREENSHOT_SCALE,
+        images
       );
       if (outcome.type === "empty") {
         figma.ui.postMessage({ type: "dev-error", seq: request.seq, message: outcome.message });

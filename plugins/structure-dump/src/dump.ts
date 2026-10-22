@@ -19,11 +19,14 @@ import {
   buildFrameJson,
   buildIndex,
   buildSectionJson,
+  DEFAULT_IMAGES_MODE,
+  dumpContents,
   emptyMessage,
   errorDetail,
   FetchResult,
   FrameComponent,
   frameComponentOf,
+  ImagesMode,
   longPaths,
   MAX_ZIP_PATH_CHARS,
   newExportOutput,
@@ -40,7 +43,7 @@ import {
 import zipReadme from "./zip-readme.md";
 import { buildZip, utf8Encode, ZipEntry } from "./zip";
 
-export const PLUGIN_VERSION = "0.4.0";
+export const PLUGIN_VERSION = "0.4.1";
 
 // ---------------------------------------------------------------------------
 // Variables・スタイル・コンポーネント名の解決 (書き出し 1 回ぶんの cache を持つ)
@@ -212,17 +215,26 @@ export function currentPageTarget(): DumpTarget {
       };
 }
 
-export async function dump(target: DumpTarget, screenshotScale: number): Promise<DumpOutcome> {
+/**
+ * images が none なら png・SVG・画像を出さず、only なら png と画像だけを出す。
+ * only でも構造は書き出しと同じように辿る (image fill の imageRef と画面フレームのコンポーネント名を集めるため)
+ */
+export async function dump(
+  target: DumpTarget,
+  screenshotScale: number,
+  images: ImagesMode = DEFAULT_IMAGES_MODE
+): Promise<DumpOutcome> {
   const plan = planDump(target.roots, sortInDocumentOrder);
   const empty = emptyMessage(plan, target.source);
   if (empty !== null) return { type: "empty", message: empty };
   const frames = allFrames(plan);
   const sections = allSections(plan);
+  const contents = dumpContents(images);
 
   const out = newExportOutput(
     plan.hiddenRoots.map((node) => `非表示のため除外: ${node.name} (${node.id})`)
   );
-  for (const long of longPaths(plan, MAX_ZIP_PATH_CHARS)) {
+  for (const long of longPaths(plan, MAX_ZIP_PATH_CHARS, contents)) {
     out.warnings.push(`パスが長い (${long.length} 文字): ${long.path}`);
   }
   const imageHashes = new Set<string>();
@@ -267,7 +279,15 @@ export async function dump(target: DumpTarget, screenshotScale: number): Promise
       if (node === null) resolver.warnOnce(`component:${id}`, `コンポーネントを引けない: ${id}`);
       return node?.name;
     },
-    exportSvg: async (node, hidden) => {
+    registerImage: (hash) => {
+      imageHashes.add(hash);
+    },
+    warn: (message) => {
+      out.warnings.push(message);
+    },
+  };
+  if (contents.svgs) {
+    ctx.exportSvg = async (node, hidden) => {
       const scene = node as SceneNode;
       // 非表示のノードは exportAsync が「表示されているレイヤーが無い」で失敗するので、
       // 非表示の INSTANCE は元のコンポーネントを書き出す (インスタンスで上書きした色や大きさは入らない)
@@ -292,14 +312,8 @@ export async function dump(target: DumpTarget, screenshotScale: number): Promise
       const path = recordSvg(out, label, await fetchBytes(() => target.exportAsync({ format: "SVG" })));
       resolver.svgs.set(target.id, path);
       return path;
-    },
-    registerImage: (hash) => {
-      imageHashes.add(hash);
-    },
-    warn: (message) => {
-      out.warnings.push(message);
-    },
-  };
+    };
+  }
 
   // 失敗したノードを黙って省くと出力が欠けたことに気づけないので、中止してノードを示す
   const serialize = async (node: SceneNode): Promise<DumpNode> => {
@@ -316,24 +330,26 @@ export async function dump(target: DumpTarget, screenshotScale: number): Promise
   for (let i = 0; i < frames.length; i += 1) {
     const frame = frames[i];
     const dumped = await serialize(frame.node);
-    out.entries.push(jsonEntry(frame.json, buildFrameJson(frame, dumped)));
+    if (contents.structure) out.entries.push(jsonEntry(frame.json, buildFrameJson(frame, dumped)));
     const component = frameComponentOf(dumped);
     if (component !== undefined) frameComponents.set(frame.id, component);
-    const node = frame.node;
-    const box = "absoluteBoundingBox" in node ? node.absoluteBoundingBox : null;
-    const render = "absoluteRenderBounds" in node ? node.absoluteRenderBounds : null;
-    if (overflowsBounds(box, render)) {
-      out.warnings.push(`枠の外に描画があり、png は枠で切った: ${frame.name} (${frame.id})`);
+    if (contents.screenshots) {
+      const node = frame.node;
+      const box = "absoluteBoundingBox" in node ? node.absoluteBoundingBox : null;
+      const render = "absoluteRenderBounds" in node ? node.absoluteRenderBounds : null;
+      if (overflowsBounds(box, render)) {
+        out.warnings.push(`枠の外に描画があり、png は枠で切った: ${frame.name} (${frame.id})`);
+      }
+      // 枠 (width × height) の範囲で書き出し、png の左上を枠の左上に合わせる (座標で png を指せるようにする)
+      const shot = await fetchBytes(() =>
+        node.exportAsync({
+          format: "PNG",
+          useAbsoluteBounds: true,
+          constraint: { type: "SCALE", value: screenshotScale },
+        })
+      );
+      recordScreenshot(out, frame, shot);
     }
-    // 枠 (width × height) の範囲で書き出し、png の左上を枠の左上に合わせる (座標で png を指せるようにする)
-    const shot = await fetchBytes(() =>
-      node.exportAsync({
-        format: "PNG",
-        useAbsoluteBounds: true,
-        constraint: { type: "SCALE", value: screenshotScale },
-      })
-    );
-    recordScreenshot(out, frame, shot);
     postProgress("frames", i + 1, frames.length, frame.name);
   }
 
@@ -344,17 +360,21 @@ export async function dump(target: DumpTarget, screenshotScale: number): Promise
     for (const node of section.others) {
       nodes.push(await serialize(node));
     }
-    out.entries.push(jsonEntry(section.sectionJson as string, buildSectionJson(section, nodes)));
+    if (contents.structure) {
+      out.entries.push(jsonEntry(section.sectionJson as string, buildSectionJson(section, nodes)));
+    }
     postProgress("sections", i + 1, sectionsWithJson.length);
   }
 
-  // styles.json の paint の image fill も assets に載せるため、画像を取る前に組む。
+  // styles.json の paint の image fill も assets に載せるため、画像を取る前に組む (only でも組んで、画像だけ使う)。
   // variables.json はスタイルが束縛した変数も入れるので、styles.json のあとに組む
   const styles = jsonEntry(STYLES_JSON_NAME, await stylesJson(resolver, ctx));
-  const variables = jsonEntry(VARIABLES_JSON_NAME, await variablesJson(resolver));
+  const structureEntries = contents.structure
+    ? [jsonEntry(VARIABLES_JSON_NAME, await variablesJson(resolver)), styles]
+    : [];
 
   // image fill の元画像。index.json の assets で imageRef → ZIP 内パスを引けるようにする
-  const hashes = Array.from(imageHashes);
+  const hashes = contents.assets ? Array.from(imageHashes) : [];
   for (let i = 0; i < hashes.length; i += 1) {
     const hash = hashes[i];
     let result: FetchResult | null;
@@ -377,6 +397,7 @@ export async function dump(target: DumpTarget, screenshotScale: number): Promise
       exportedAt: new Date().toISOString(),
       scope,
       screenshotScale,
+      images,
       warnings: out.warnings,
     },
     out.writtenPngs,
@@ -387,8 +408,7 @@ export async function dump(target: DumpTarget, screenshotScale: number): Promise
   const zip = buildZip([
     { name: "README.md", data: utf8Encode(zipReadme) },
     { name: "index.json", data: utf8Encode(indexText) },
-    variables,
-    styles,
+    ...structureEntries,
     ...out.entries,
   ]);
 
@@ -404,6 +424,7 @@ export async function dump(target: DumpTarget, screenshotScale: number): Promise
         frameCount: frames.length,
         screenshotCount: out.writtenPngs.size,
         screenshotScale,
+        images,
         sectionCount: sections.length,
         assetCount: out.writtenAssets.size,
         zipBytes: zip.length,

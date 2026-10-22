@@ -37,6 +37,45 @@ export function screenshotScaleFor(command: string): number {
     : DEFAULT_SCREENSHOT_SCALE;
 }
 
+/**
+ * 画像の有無 (index.json の meta.images)。both は構造と画像、none は構造だけ、only は画像だけ。
+ * Structure Dump のメニューからは常に both。none / only は Dev Loop への依頼でだけ出る
+ */
+export type ImagesMode = "both" | "none" | "only";
+
+export const DEFAULT_IMAGES_MODE: ImagesMode = "both";
+
+const IMAGES_MODES: readonly ImagesMode[] = ["both", "none", "only"];
+
+/** dev サーバーの依頼の images。省略は both、3 値以外は null */
+export function parseImagesMode(value: unknown): ImagesMode | null {
+  if (value === undefined) return DEFAULT_IMAGES_MODE;
+  return IMAGES_MODES.find((mode) => mode === value) ?? null;
+}
+
+/** 画像の有無ごとに ZIP へ出すもの。README.md と index.json はどのモードでも出す */
+export interface DumpContents {
+  /** 画面フレームの json・_section.json・styles.json・variables.json */
+  structure: boolean;
+  /** 画面フレームの png */
+  screenshots: boolean;
+  /** ベクターだけのノードの svg。構造の json の svg キーからしか引けないので、構造を出すときだけ */
+  svgs: boolean;
+  /** image fill の元画像 */
+  assets: boolean;
+}
+
+export function dumpContents(mode: ImagesMode): DumpContents {
+  switch (mode) {
+    case "both":
+      return { structure: true, screenshots: true, svgs: true, assets: true };
+    case "none":
+      return { structure: true, screenshots: false, svgs: false, assets: false };
+    case "only":
+      return { structure: false, screenshots: true, svgs: false, assets: true };
+  }
+}
+
 /** shared/nodeOrder.ts の OrderableNode と同じ形 */
 export interface DocNode {
   readonly id: string;
@@ -301,6 +340,7 @@ export interface IndexMeta {
   exportedAt: string;
   scope: string;
   screenshotScale: number;
+  images: ImagesMode;
   warnings: string[];
 }
 
@@ -342,17 +382,22 @@ export function overflowsBounds(box: Rect | null, render: Rect | null): boolean 
   );
 }
 
+interface IndexSources {
+  contents: DumpContents;
+  writtenPngs: ReadonlySet<string>;
+  components: ReadonlyMap<string, FrameComponent>;
+}
+
 function frameEntry<T extends PlanNode>(
   frame: FramePlan<T>,
-  writtenPngs: ReadonlySet<string>,
-  components: ReadonlyMap<string, FrameComponent>
+  sources: IndexSources
 ): Record<string, unknown> {
   const entry: Record<string, unknown> = { id: frame.id, name: frame.name, type: frame.node.type };
-  const component = components.get(frame.id);
+  const component = sources.components.get(frame.id);
   if (component?.componentName !== undefined) entry.componentName = component.componentName;
   if (component?.componentSetName !== undefined) entry.componentSetName = component.componentSetName;
-  if (writtenPngs.has(frame.png)) entry.png = frame.png;
-  entry.json = frame.json;
+  if (sources.contents.screenshots && sources.writtenPngs.has(frame.png)) entry.png = frame.png;
+  if (sources.contents.structure) entry.json = frame.json;
   return { ...entry, ...placementOf(frame) };
 }
 
@@ -369,25 +414,27 @@ function placementOf(p: Placement): Placement {
 
 function sectionEntry<T extends PlanNode>(
   section: SectionPlan<T>,
-  writtenPngs: ReadonlySet<string>,
-  components: ReadonlyMap<string, FrameComponent>
+  sources: IndexSources
 ): Record<string, unknown> {
   const entry: Record<string, unknown> = {
     id: section.id,
     name: section.name,
     dir: section.dir,
     ...placementOf(section),
-    frames: section.frames.map((f) => frameEntry(f, writtenPngs, components)),
-    sections: section.sections.map((s) => sectionEntry(s, writtenPngs, components)),
+    frames: section.frames.map((f) => frameEntry(f, sources)),
+    sections: section.sections.map((s) => sectionEntry(s, sources)),
   };
-  if (section.sectionJson !== undefined) entry.sectionJson = section.sectionJson;
+  if (sources.contents.structure && section.sectionJson !== undefined) {
+    entry.sectionJson = section.sectionJson;
+  }
   return entry;
 }
 
 /**
  * writtenPngs は書き出しに成功した png のパス。失敗したフレームは png キー無しで載せる。
  * writtenAssets は書き出しに成功した imageRef → ZIP 内パス。失敗した imageRef はキーを作らない。
- * components は画面フレームの id → 由来のコンポーネント。無いフレームはキー無しで載せる
+ * components は画面フレームの id → 由来のコンポーネント。無いフレームはキー無しで載せる。
+ * meta.images で出さないもの (none の png・画像、only の json・_section.json) は、渡された集合に関わらず指さない
  */
 export function buildIndex<T extends PlanNode>(
   plan: DumpPlan<T>,
@@ -396,6 +443,8 @@ export function buildIndex<T extends PlanNode>(
   writtenAssets: ReadonlyMap<string, string>,
   components: ReadonlyMap<string, FrameComponent>
 ): Record<string, unknown> {
+  const contents = dumpContents(meta.images);
+  const sources: IndexSources = { contents, writtenPngs, components };
   return {
     meta: {
       fileName: meta.fileName,
@@ -404,11 +453,12 @@ export function buildIndex<T extends PlanNode>(
       exportedAt: meta.exportedAt,
       scope: meta.scope,
       screenshotScale: meta.screenshotScale,
+      images: meta.images,
       warnings: meta.warnings,
     },
-    sections: plan.sections.map((s) => sectionEntry(s, writtenPngs, components)),
-    frames: plan.frames.map((f) => frameEntry(f, writtenPngs, components)),
-    assets: assetsObject(writtenAssets),
+    sections: plan.sections.map((s) => sectionEntry(s, sources)),
+    frames: plan.frames.map((f) => frameEntry(f, sources)),
+    assets: contents.assets ? assetsObject(writtenAssets) : {},
   };
 }
 
@@ -483,15 +533,26 @@ export interface LongPath {
   length: number;
 }
 
-/** セクションのディレクトリ・画面フレームの png/json・_section.json のうち limit 文字を超えるもの */
-export function longPaths<T extends PlanNode>(plan: DumpPlan<T>, limit: number): LongPath[] {
+/**
+ * セクションのディレクトリ・画面フレームの png/json・_section.json のうち limit 文字を超えるもの。
+ * contents で出さないファイルは数えない
+ */
+export function longPaths<T extends PlanNode>(
+  plan: DumpPlan<T>,
+  limit: number,
+  contents: DumpContents = dumpContents(DEFAULT_IMAGES_MODE)
+): LongPath[] {
   const paths: string[] = [];
+  const pushFrame = (frame: FramePlan<T>): void => {
+    if (contents.screenshots) paths.push(frame.png);
+    if (contents.structure) paths.push(frame.json);
+  };
   for (const section of allSections(plan)) {
     paths.push(section.dir);
-    for (const frame of section.frames) paths.push(frame.png, frame.json);
-    if (section.sectionJson !== undefined) paths.push(section.sectionJson);
+    section.frames.forEach(pushFrame);
+    if (contents.structure && section.sectionJson !== undefined) paths.push(section.sectionJson);
   }
-  for (const frame of plan.frames) paths.push(frame.png, frame.json);
+  plan.frames.forEach(pushFrame);
   return paths
     .map((path) => ({ path, length: Array.from(path).length }))
     .filter((p) => p.length > limit);

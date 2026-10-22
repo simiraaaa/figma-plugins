@@ -6,6 +6,7 @@ AI (Claude Code 等) が最初に読む前提で書いている。
 ## 読む順番
 
 1. `index.json` で、セクションと画面フレームの一覧を見る。
+   `meta.images` が `both` でなければ、構造か画像の片方しか入っていない (下の「index.json」の `meta.images`)。
 2. 実装する画面を 1 枚ずつ選び、その `.json` (構造) と `.png` (見た目) をセットで読む。
 3. 画面の間の注記・矢印が要るときは、そのセクションの `_section.json` を読む。
    ただし `GROUP` にまとめた矢印や、部品の `INSTANCE` は、`_section.json` ではなく画面フレームとして `index.json` に載る (下の「何が画面フレームになるか」)。
@@ -87,7 +88,7 @@ GROUP の子の `x` / `y` は GROUP ではなく外側の container に対する
 
 ```
 {
-  "meta": { "fileName", "pluginVersion", "schemaVersion": "dump-v3", "exportedAt", "scope", "screenshotScale", "warnings": [] },
+  "meta": { "fileName", "pluginVersion", "schemaVersion": "dump-v3", "exportedAt", "scope", "screenshotScale", "images", "warnings": [] },
   "sections": [ <セクション> ],
   "frames": [ <画面フレーム> ],
   "assets": { "<imageRef>": "assets/<imageRef>.<拡張子>" }
@@ -101,6 +102,17 @@ GROUP の子の `x` / `y` は GROUP ではなく外側の container に対する
   座標を png のピクセルに当てるときは、座標にこの倍率を掛ける。
   枠の外にはみ出した描画 (横スクロールの続き・影など) は png に入らない。
   はみ出しがあったフレームは `meta.warnings` に出て、はみ出した部分のノードは json にある。
+- `meta.images`: 構造と画像のどちらを入れたか。`both` (構造と画像)・`none` (構造だけ)・`only` (画像だけ) のどれか。
+  Structure Dump のメニューからの書き出しは常に `both`。
+  `none` / `only` は、開発用プラグイン Dev Loop への依頼で指定したときだけ出る。
+  - `none`: 画面フレームの png・`assets/` の画像・`assets/svg/` の SVG が無い。
+    `index.json` の画面フレームに `png` キーが無く、`assets` は空。ノードに `svg` キーが無い。
+    ノードの `fills[].imageRef` は残るが、`assets` では引けない (取得の失敗ではないので `meta.warnings` にも出ない)。
+    `meta.screenshotScale` には依頼の倍率が入るが、png は無い。
+  - `only`: 画面フレームの json・`_section.json`・`variables.json`・`styles.json`・`assets/svg/` の SVG が無い。
+    `index.json` の画面フレームに `json` キーが無く、セクションに `sectionJson` キーが無い。
+    画面フレームの一覧 (`id`・`name`・`type`・`componentName`・`componentSetName`・`png`・座標と大きさ) と `assets` は、`both` と同じに読める。
+    構造の json が無いので、`assets` の画像がどのノードのものかは引けない。
 - `meta.warnings`: 次のものが 1 行ずつ入る。
   - 書き出し中に起きた失敗 (スクリーンショット失敗・空の PNG・画像の取得失敗・コンポーネント情報の読み取り失敗など)
   - 非表示のため除外したノード (`非表示のため除外: <name> (<id>)`)
@@ -144,6 +156,7 @@ GROUP の子の `x` / `y` は GROUP ではなく外側の container に対する
 - `png` / `json`: ZIP 内のパス。
 - スクリーンショットに失敗したフレームには `png` キーが無い。
   理由は `meta.warnings` にある。
+- `meta.images` が `none` なら `png` キーが、`only` なら `json` キーが、どのフレームにも無い。
 
 ## 画面フレームの json
 
