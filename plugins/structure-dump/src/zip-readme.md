@@ -95,7 +95,7 @@ GROUP の子の `x` / `y` は GROUP ではなく外側の container に対する
 }
 ```
 
-- `meta.scope`: `selection` (選択を書き出した)・`page:<ページ名>` (ページ直下を書き出した)・`nodes` (開発用プラグイン Dev Loop への依頼で id を指定したノードを書き出した。Structure Dump のメニューからの書き出しでは出ない) のどれか。
+- `meta.scope`: `selection` (選択を書き出した)・`page:<ページ名>` (ページ直下を書き出した)・`nodes` (Dev Loop への依頼で id を指定したノードを書き出した。Structure Dump のメニューからの書き出しでは出ない) のどれか。
   `nodes` のときは、指定したノードが「直接選ばれたノード」と同じ扱いになる。
 - `meta.screenshotScale`: スクリーンショットの倍率 (`2` か `1`)。
   png は画面フレームの枠で切って書き出すので、png のピクセル数は `width` / `height` にこの倍率を掛けた値になり、png の左上は枠の左上に当たる。

@@ -4,13 +4,13 @@
 配るのは Structure Dump と Component Spec で、どちらも「Figma のデザインを AI (Claude 等) に渡せる形に書き出す」ためのプラグイン。
 コード生成はしない (解釈とコード化は AI 側の仕事)。
 Dev Loop は、AI が自分で書き出しや script の実行を頼むためのプラグインで、リリースの zip には入れない。
-使う人 (開発者もデザイナーも) は、リポジトリを clone して取り込む ([導入手順](plugins/dev-loop/README.md#導入手順-デザイナー向け))。
+使う人 (開発者もデザイナーも) は、リポジトリを clone して、Figma に取り込む ([導入手順](plugins/dev-loop/README.md#導入手順-デザイナー向け))。
 
 | プラグイン | 用途 |
 |---|---|
 | [Structure Dump](plugins/structure-dump/) | 選択範囲をセクション・画面フレームごとの構造 JSON + スクリーンショットに分け、1 つの ZIP で書き出す |
 | [Component Spec](plugins/component-spec/) | 選択中のコンポーネント群から variant / props の仕様 JSON を書き出す |
-| [Dev Loop](plugins/dev-loop/) | リリースの zip に入れない (clone して取り込む)。手元の dev サーバー経由で、AI が Structure Dump と同じ書き出しと Plugin API の script の実行を頼める |
+| [Dev Loop](plugins/dev-loop/) | リリースの zip に入れない (clone して、Figma に取り込む)。手元の dev サーバー経由で、AI が Structure Dump と同じ書き出しと Plugin API の script の実行を頼める |
 
 ## セットアップ
 
