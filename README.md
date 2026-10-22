@@ -3,13 +3,14 @@
 汎用の Figma プラグイン集。特定の UI ライブラリやプロジェクトには依存しない。
 配るのは Structure Dump と Component Spec で、どちらも「Figma のデザインを AI (Claude 等) に渡せる形に書き出す」ためのプラグイン。
 コード生成はしない (解釈とコード化は AI 側の仕事)。
-Dev Loop は、AI が自分で書き出しを頼むための開発用プラグインで、配らない。
+Dev Loop は、AI が自分で書き出しや script の実行を頼むためのプラグインで、リリースの zip には入れない。
+使う人 (開発者もデザイナーも) は、リポジトリを clone して、Figma に取り込む ([導入手順](plugins/dev-loop/README.md#導入手順-デザイナー向け))。
 
 | プラグイン | 用途 |
 |---|---|
 | [Structure Dump](plugins/structure-dump/) | 選択範囲をセクション・画面フレームごとの構造 JSON + スクリーンショットに分け、1 つの ZIP で書き出す |
 | [Component Spec](plugins/component-spec/) | 選択中のコンポーネント群から variant / props の仕様 JSON を書き出す |
-| [Dev Loop](plugins/dev-loop/) | 開発用 (配らない)。手元の dev サーバー経由で、AI が Structure Dump と同じ書き出しと Plugin API の script の実行を頼める |
+| [Dev Loop](plugins/dev-loop/) | リリースの zip に入れない (clone して、Figma に取り込む)。手元の dev サーバー経由で、AI が Structure Dump と同じ書き出しと Plugin API の script の実行を頼める |
 
 ## セットアップ
 
@@ -50,13 +51,13 @@ clone 直後や pull 直後は必ずビルドしてから Figma に読み込む�
 ```
 plugins/structure-dump/   構造 JSON + スクリーンショットの ZIP 書き出し
 plugins/component-spec/   variant / props の仕様書き出し
-plugins/dev-loop/         開発用。dev サーバー (scripts/dev-server.mts) につなぎ、AI の依頼を実行する
+plugins/dev-loop/         dev サーバー (scripts/dev-server.mts) につなぎ、AI の依頼を実行する
 shared/nodeOrder.ts       複数ノードを選択したときの出力順を、選択順でなく
                           document 上の並び順に固定する (Structure Dump と Component Spec で共有)
 ```
 
 - Structure Dump と Component Spec は `networkAccess: none` (外部送信なし)。
-  dev サーバーにつなぐのは配らない Dev Loop だけで、`devAllowedDomains` で localhost を許す。
+  dev サーバーにつなぐのは、リリースの zip に入れない Dev Loop だけで、`devAllowedDomains` で localhost を許す。
   Dev Loop は Structure Dump の書き出し (`plugins/structure-dump/src/dump.ts`) を build で取り込むので、
   どちらから書き出しても同じ ZIP になる
 - ZIP は圧縮なし (stored) の ZIP 形式で、外部ライブラリを使わない自前実装 (`plugins/structure-dump/src/zip.ts`) で生成する

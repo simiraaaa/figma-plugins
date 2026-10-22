@@ -49,7 +49,7 @@ assets/svg/<id>.svg                  ベクターだけのノード (アイコ�
 
 ## 開発ループ (AI が自分で読み取る)
 
-AI から dev サーバー経由で書き出しを頼む仕組みは、開発用プラグイン [Dev Loop](../dev-loop/) にある。
+AI から dev サーバー経由で書き出しを頼む仕組みは、リリースの zip に入れないプラグイン [Dev Loop](../dev-loop/) にある。
 Dev Loop はこのプラグインの書き出し (`src/dump.ts`) を build で取り込むので、どちらから書き出しても同じ ZIP になる。
 Structure Dump 自体は通信しない。
 
