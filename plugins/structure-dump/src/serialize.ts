@@ -17,6 +17,8 @@ export interface ResolvedVariable {
   resolved?: { value: unknown; resolvedType: string };
 }
 
+export type SvgExporter = (node: unknown, hidden: boolean) => Promise<string | undefined>;
+
 export interface SerializeContext {
   /** figma.mixed と同一性比較するための番兵 */
   readonly mixed: unknown;
@@ -33,9 +35,10 @@ export interface SerializeContext {
   componentName(id: string): Promise<string | undefined>;
   /**
    * ノードを SVG で書き出し、ZIP 内のパスを返す。失敗したら warn して undefined。
-   * hidden はノード自身か祖先が非表示であること (Figma は非表示のノードを書き出せない)
+   * hidden はノード自身か祖先が非表示であること (Figma は非表示のノードを書き出せない)。
+   * 無ければ SVG を書き出さない (svg キーも SVG の warning も作らない)
    */
-  exportSvg(node: unknown, hidden: boolean): Promise<string | undefined>;
+  exportSvg?: SvgExporter;
   /** image fill の imageRef を収集する (bytes の取得と書き出しは呼び出し側) */
   registerImage(hash: string): void;
   /** 中止せずに続行した失敗を、利用者に見える warning として残す */
@@ -938,10 +941,14 @@ async function serializeTree(
  * 非表示のノードは Figma が書き出せないので、INSTANCE だけ書き出しを頼み (元のコンポーネントを書き出す)、
  * それ以外は中の INSTANCE を探す。書き出す手段の無い非表示の図形は警告に残す
  */
-async function attachSvgs(tree: Serialized, ctx: SerializeContext): Promise<void> {
+async function attachSvgs(
+  tree: Serialized,
+  exportSvg: SvgExporter,
+  ctx: SerializeContext
+): Promise<void> {
   if (isSvgTarget(tree.vector)) {
     if (!tree.hidden || tree.node.type === "INSTANCE") {
-      const path = await ctx.exportSvg(tree.node, tree.hidden);
+      const path = await exportSvg(tree.node, tree.hidden);
       if (path !== undefined) tree.out.svg = path;
       return;
     }
@@ -950,7 +957,7 @@ async function attachSvgs(tree: Serialized, ctx: SerializeContext): Promise<void
       return;
     }
   }
-  for (const child of tree.children) await attachSvgs(child, ctx);
+  for (const child of tree.children) await attachSvgs(child, exportSvg, ctx);
 }
 
 export async function serializeNode(
@@ -959,7 +966,7 @@ export async function serializeNode(
   parentLayout?: ParentLayout
 ): Promise<DumpNode> {
   const root = await serializeTree(input as AnyNode, ctx, parentLayout, true, false);
-  await attachSvgs(root, ctx);
+  if (ctx.exportSvg !== undefined) await attachSvgs(root, ctx.exportSvg, ctx);
   return root.out;
 }
 

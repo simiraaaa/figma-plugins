@@ -65,6 +65,13 @@ function devTargets(request) {
   return request.nodeIds ? request.nodeIds.join(", ") : "開いているページの選択 (未選択ならページ直下)";
 }
 
+const DEV_IMAGES_LABELS = new Map([["both", "構造と画像"], ["none", "構造だけ"], ["only", "画像だけ"]]);
+
+function devImages(request) {
+  const images = request.images === undefined ? "both" : request.images;
+  return DEV_IMAGES_LABELS.get(images) ?? `images の不明な指定 ${JSON.stringify(images)}`;
+}
+
 function scriptHead(code) {
   const line = code.trim().split("\n")[0];
   return line.length > 60 ? `${line.slice(0, 60)}…` : line;
@@ -218,7 +225,7 @@ async function devLoop() {
         });
         await devSendRun(request, outcome.body);
       } else {
-        devLog(`#${request.seq} を書き出す (${reason}): ${devTargets(request)}`);
+        devLog(`#${request.seq} を書き出す (${reason}・${devImages(request)}): ${devTargets(request)}`);
         await devSend(request, await askPlugin({ type: "dev-request", request }));
       }
     } catch (e) {

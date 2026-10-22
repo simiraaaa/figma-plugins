@@ -593,6 +593,30 @@ test("SVG の書き出しに失敗したノードには svg キーを作らな�
   assert.equal("svg" in out, false);
 });
 
+test("exportSvg が無い (画像を省く書き出し) なら、svg キーも SVG の warning も作らず、image fill は集める", async () => {
+  const { ctx, images, warnings } = makeCtx();
+  const { exportSvg: _, ...rest } = ctx;
+  const withoutSvg: SerializeContext = rest;
+  const out = await serializeNode(
+    {
+      id: "18:2", name: "Card", type: "FRAME",
+      children: [
+        { id: "18:3", name: "Icon", type: "INSTANCE", children: [vector("18:4")] },
+        {
+          id: "18:5", name: "Hidden shape", type: "VECTOR", visible: false, width: 16, height: 16,
+          componentPropertyReferences: { visible: "Show#1:0" },
+        },
+        { id: "18:6", name: "Photo", type: "RECTANGLE", fills: [{ type: "IMAGE", imageHash: "h2" }] },
+      ],
+    },
+    withoutSvg
+  );
+  assert.equal(out.children[0].svg, undefined);
+  assert.equal("svg" in out.children[1], false);
+  assert.deepEqual(warnings, []);
+  assert.deepEqual(images, ["h2"]);
+});
+
 test("MCP にあって dump-v2 に無かった見た目と配置の項目を出す", async () => {
   const { ctx } = makeCtx();
   const out = await serializeNode(
