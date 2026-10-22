@@ -1,0 +1,19 @@
+{
+  "name": "Dev Loop",
+  "id": "figma-plugins-dev-loop",
+  "api": "1.0.0",
+  "main": "dist/code.js",
+  "ui": "src/ui.html",
+  "editorType": ["figma"],
+  "documentAccess": "dynamic-page",
+  "networkAccess": {
+    "allowedDomains": ["none"],
+    "devAllowedDomains": [
+      "http://localhost:47717/",
+      "http://localhost:47718/",
+      "http://localhost:47719/",
+      "http://localhost:47720/",
+      "http://localhost:47721/"
+    ]
+  }
+}

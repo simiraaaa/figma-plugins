@@ -18,11 +18,12 @@ export function assertPluginVersion(codeSource: string, version: string, label: 
   }
 }
 
-/** 開発ループ用のメニューのコマンドの接頭辞 (plugins/structure-dump/src/plan.ts の DEV_LOOP_COMMAND) */
+/** 開発用のメニューのコマンドの接頭辞 */
 const DEV_COMMAND_PREFIX = "dev-";
 
 /**
  * 配る manifest から開発用の設定 (devAllowedDomains と "dev-" で始まるメニュー) を外す。
+ * 配るプラグインは開発用の設定を持たない (開発ループは配らない plugins/dev-loop にある) が、紛れ込んでも配らない。
  * 配った zip もマニフェストから取り込む開発プラグインとして動くので、残すと devAllowedDomains が効く
  */
 export function releaseManifest(manifest: Record<string, unknown>): Record<string, unknown> {

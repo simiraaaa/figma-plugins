@@ -39,7 +39,7 @@ const version = (
 const tag = `v${version}`;
 
 for (const p of [
-  "plugins/structure-dump/src/code.ts",
+  "plugins/structure-dump/src/dump.ts",
   "plugins/component-spec/src/code.ts",
 ]) {
   assertPluginVersion(readFileSync(path.join(root, p), "utf8"), version, p);
