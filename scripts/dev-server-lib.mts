@@ -58,7 +58,7 @@ const RUN_DEFAULT_WAIT_SECONDS = 90;
 const KEEP_REQUESTS = 100;
 const DEFAULT_KEEP_RESULTS = 20;
 const SCREENSHOT_SCALES: ReadonlySet<number> = new Set([1, 2]);
-const IMAGE_MODES: ReadonlySet<unknown> = new Set<ImageMode>(["both", "none", "only"]);
+export const IMAGE_MODES: ReadonlySet<unknown> = new Set<ImageMode>(["both", "none", "only"]);
 
 // ---------------------------------------------------------------------------
 // ZIP の読み取り (プラグインの zip.ts が作る無圧縮 ZIP だけを読む)

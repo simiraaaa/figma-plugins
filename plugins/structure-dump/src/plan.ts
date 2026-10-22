@@ -45,7 +45,7 @@ export type ImagesMode = "both" | "none" | "only";
 
 export const DEFAULT_IMAGES_MODE: ImagesMode = "both";
 
-const IMAGES_MODES: readonly ImagesMode[] = ["both", "none", "only"];
+export const IMAGES_MODES: readonly ImagesMode[] = ["both", "none", "only"];
 
 /** dev サーバーの依頼の images。省略は both、3 値以外は null */
 export function parseImagesMode(value: unknown): ImagesMode | null {

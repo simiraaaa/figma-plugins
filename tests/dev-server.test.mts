@@ -22,6 +22,7 @@ import {
   type DevStatus,
   type DumpRequest,
   entryPath,
+  IMAGE_MODES,
   listenOnCandidatePorts,
   listenOnHosts,
   notStartedMessage,
@@ -37,6 +38,9 @@ import { releaseManifest } from "../scripts/release-lib.mts";
 import * as zipDist from "../plugins/structure-dump/dist/zip.mjs";
 const { buildZip, utf8Encode } =
   zipDist as unknown as typeof import("../plugins/structure-dump/src/zip.ts");
+import * as planDist from "../plugins/structure-dump/dist/plan.mjs";
+const { IMAGES_MODES, parseImagesMode } =
+  planDist as unknown as typeof import("../plugins/structure-dump/src/plan.ts");
 
 type Next = DumpRequest & { server: string };
 type RunNext = RunRequest & { server: string };
@@ -187,6 +191,22 @@ test("依頼の本文: images は both・none・only を受け、省けば欄を
   }
 });
 
+test("images の 3 値は、dev サーバーとプラグイン (Structure Dump の plan) で同じ集合で、同じ値を受けて同じ値を断る", () => {
+  assert.deepEqual([...IMAGE_MODES].sort(), [...IMAGES_MODES].sort());
+  const candidates = [...new Set([...IMAGE_MODES, ...IMAGES_MODES]), "png", "None", "", 1, null, true, ["none"]];
+  for (const value of candidates) {
+    const serverAccepts = (() => {
+      try {
+        parseExportBody(JSON.stringify({ images: value }));
+        return true;
+      } catch {
+        return false;
+      }
+    })();
+    assert.equal(serverAccepts, parseImagesMode(value) !== null, `images: ${JSON.stringify(value)} の扱いが食い違う`);
+  }
+});
+
 test("images の付いた書き出しの依頼は、プラグインへそのまま渡り、処理中・結果・依頼の様子にモードが載る", async () => {
   const { base, close } = await startServer();
   try {
@@ -218,6 +238,45 @@ test("images の付いた書き出しの依頼は、プラグインへそのま�
     assert.equal((await json<StatusReply>(fetch(`${base}/status`))).plugin.processing?.images, undefined);
     await pluginPost(base, "result", plainNext, sampleZip());
     assert.equal("images" in (await json<DevStatus>(plain)), false);
+  } finally {
+    close();
+  }
+});
+
+test("images が none の書き出しの結果は、status.json と GET /status にモードが載る", async () => {
+  const { base, outDir, close } = await startServer();
+  try {
+    const polled = pluginNext(base);
+    const exported = fetch(`${base}/export?timeout=5`, {
+      method: "POST",
+      body: JSON.stringify({ nodeIds: ["1:2"], images: "none" }),
+    });
+    await pluginPost(base, "result", await json<Next>(polled), sampleZip());
+    assert.equal((await exported).status, 200);
+    assert.equal(JSON.parse(readFileSync(path.join(outDir, "status.json"), "utf8")).images, "none");
+    assert.equal((await json<StatusReply>(fetch(`${base}/status`))).images, "none");
+  } finally {
+    close();
+  }
+});
+
+test("images が only の依頼が失敗しても、status.json・GET /status・status?seq にモードが載る", async () => {
+  const { base, outDir, close } = await startServer();
+  try {
+    const polled = pluginNext(base);
+    const exported = fetch(`${base}/export?timeout=5`, {
+      method: "POST",
+      body: JSON.stringify({ nodeIds: ["9:9"], images: "only" }),
+    });
+    await pluginPost(base, "error", await json<Next>(polled), "ノードが見つからない: 9:9");
+    const res = await exported;
+    assert.equal(res.status, 422);
+    assert.equal((await json<DevStatus>(res)).images, "only");
+    const stored = JSON.parse(readFileSync(path.join(outDir, "status.json"), "utf8"));
+    assert.deepEqual([stored.error, stored.images], ["ノードが見つからない: 9:9", "only"]);
+    assert.equal((await json<StatusReply>(fetch(`${base}/status`))).images, "only");
+    const reply = await json<RequestReply>(fetch(`${base}/status?seq=1`));
+    assert.deepEqual([reply.state, reply.images], ["failed", "only"]);
   } finally {
     close();
   }

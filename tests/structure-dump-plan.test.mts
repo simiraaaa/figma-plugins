@@ -839,12 +839,27 @@ function modeFixture() {
   });
   const pngs = new Set(allFrames(plan).map((f) => f.png));
   const assets = new Map([["abc", "assets/abc.png"]]);
-  return { plan, meta, pngs, assets };
+  const components = new Map([
+    ["m:2", { componentName: "Property 1=Default", componentSetName: "Card" }],
+    ["m:4", { componentName: "Button" }],
+  ]);
+  return { plan, meta, pngs, assets, components };
+}
+
+/** 画面フレームの由来のコンポーネントは、どのモードでも同じに読める */
+function assertComponentsKept(home: Record<string, unknown>, loose: Record<string, unknown>) {
+  assert.deepEqual(
+    [home, loose].map((f) => [f.componentName, f.componentSetName]),
+    [
+      ["Property 1=Default", "Card"],
+      ["Button", undefined],
+    ]
+  );
 }
 
 test("index.json (images: only): 画面フレームは id・name・png・大きさが読め、json と sectionJson は指さない", () => {
-  const { plan, meta, pngs, assets } = modeFixture();
-  const index = buildIndex(plan, meta("only"), pngs, assets, new Map());
+  const { plan, meta, pngs, assets, components } = modeFixture();
+  const index = buildIndex(plan, meta("only"), pngs, assets, components);
   assert.equal((index.meta as { images: string }).images, "only");
   const [flow] = index.sections as Record<string, unknown>[];
   assert.equal("sectionJson" in flow, false, "only なのに _section.json を指した");
@@ -861,11 +876,12 @@ test("index.json (images: only): 画面フレームは id・name・png・大き�
     ]
   );
   assert.deepEqual(index.assets, { abc: "assets/abc.png" });
+  assertComponentsKept(home, loose);
 });
 
 test("index.json (images: none): json と sectionJson は指し、png と assets は書き出し済みの集合があっても指さない", () => {
-  const { plan, meta, pngs, assets } = modeFixture();
-  const index = buildIndex(plan, meta("none"), pngs, assets, new Map());
+  const { plan, meta, pngs, assets, components } = modeFixture();
+  const index = buildIndex(plan, meta("none"), pngs, assets, components);
   assert.equal((index.meta as { images: string }).images, "none");
   const [flow] = index.sections as Record<string, unknown>[];
   assert.equal(flow.sectionJson, "Flow.m-1/_section.json");
@@ -876,15 +892,19 @@ test("index.json (images: none): json と sectionJson は指し、png と assets
     assert.equal("png" in entry, false, "none なのに png を指した");
   }
   assert.deepEqual(index.assets, {});
+  assertComponentsKept(home, loose);
 });
 
 test("index.json (images: both): meta.images は both で、png と json を両方指す", () => {
-  const { plan, meta, pngs, assets } = modeFixture();
-  const index = buildIndex(plan, meta("both"), pngs, assets, new Map());
+  const { plan, meta, pngs, assets, components } = modeFixture();
+  const index = buildIndex(plan, meta("both"), pngs, assets, components);
   assert.equal((index.meta as { images: string }).images, "both");
+  const [flow] = index.sections as Record<string, unknown>[];
+  const [home] = flow.frames as Record<string, unknown>[];
   const [loose] = index.frames as Record<string, unknown>[];
   assert.deepEqual([loose.png, loose.json], ["Loose.m-4.png", "Loose.m-4.json"]);
   assert.deepEqual(index.assets, { abc: "assets/abc.png" });
+  assertComponentsKept(home, loose);
 });
 
 test("longPaths: 出さないファイルのパスは数えない (only は json、none は png)", () => {
