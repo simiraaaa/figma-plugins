@@ -273,7 +273,7 @@ test("候補のポートで dev サーバーが動いていれば、起動せず
   const { port, outDir, close } = await startServer();
   try {
     const outcome = await listenOnCandidatePorts((_req, res) => res.end(), [port], ["127.0.0.1"]);
-    assert.deepEqual(outcome, { kind: "running", port, outDir });
+    assert.deepEqual(outcome, { kind: "running", port, outDir, current: true });
     const message = notStartedMessage(outcome as Exclude<typeof outcome, { kind: "listening" }>);
     assert.match(message, /dev サーバーはもう .*:\d+ で動いている/);
     assert.ok(message.includes(String(port)), "ポートが無い");
@@ -283,13 +283,33 @@ test("候補のポートで dev サーバーが動いていれば、起動せず
   }
 });
 
+test("候補のポートで古い版の dev サーバー (GET /hello に印を返さない) が動いていれば、止めて起動し直すよう案内する", async () => {
+  // 変更前の版は GET /status に答え、知らない経路には 404 の JSON を返す
+  const old = http.createServer((req, res) => {
+    res.writeHead(req.url === "/status" ? 200 : 404, { "Content-Type": "application/json" });
+    res.end(req.url === "/status" ? '{"version": 3}' : '{"error": "知らない経路"}');
+  });
+  await new Promise<void>((resolve) => old.listen(0, "127.0.0.1", resolve));
+  const { port } = old.address() as AddressInfo;
+  try {
+    const outcome = await listenOnCandidatePorts((_req, res) => res.end(), [port], ["127.0.0.1"]);
+    assert.deepEqual(outcome, { kind: "running", port, outDir: undefined, current: false });
+    const message = notStartedMessage(outcome as Exclude<typeof outcome, { kind: "listening" }>);
+    assert.match(message, /古い版/);
+    assert.match(message, /起動し直す/);
+    assert.doesNotMatch(message, /そのまま依頼する/);
+  } finally {
+    old.close();
+  }
+});
+
 test("後ろの候補のポートで dev サーバーが動いていれば、前の候補が空いていても起動しない", async () => {
   const free = await freePort();
   const { port, outDir, close } = await startServer();
   try {
     const outcome = await listenOnCandidatePorts((_req, res) => res.end("ok"), [free, port], ["127.0.0.1"]);
     if (outcome.kind === "listening") outcome.servers.forEach((s) => s.close());
-    assert.deepEqual(outcome, { kind: "running", port, outDir });
+    assert.deepEqual(outcome, { kind: "running", port, outDir, current: true });
   } finally {
     close();
   }
@@ -896,6 +916,38 @@ test("GET /hello はプラグインの口で、dev サーバーの印を返す",
     assert.equal(res.status, 200);
     assert.deepEqual(await json(res), { app: DEV_SERVER_APP });
     assert.equal((await fetch(`${base}/hello`, { headers: { Origin: "https://example.com" } })).status, 403);
+  } finally {
+    close();
+  }
+});
+
+test("負例: GET /hello を聞いただけでは、プラグインが繋がっているとは見ない", async () => {
+  const { base, close } = await startServer();
+  try {
+    // ポートを探す curl も、プラグインの UI の探索も /hello を聞く。どちらも依頼を待つ相手ではない
+    assert.equal((await fetch(`${base}/hello`)).status, 200);
+    assert.equal((await fetch(`${base}/hello`, { headers: PLUGIN })).status, 200);
+    const res = await fetch(`${base}/export?timeout=1`, { method: "POST", body: "" });
+    assert.equal(res.status, 503);
+  } finally {
+    close();
+  }
+});
+
+test("負例: 決着した script の依頼に、あとから届いた結果は受けず、最初の結果を残す", async () => {
+  const { base, close } = await startServer();
+  try {
+    const polled = pluginNext(base);
+    const ran = runRequest(base, "return 1;");
+    const next = await json<RunNext>(polled);
+    assert.equal((await pluginRunResult(base, next, { ok: true, value: 1 })).status, 200);
+    assert.deepEqual(await json(ran), { seq: 1, value: 1 });
+    // 1 回目の応答を受け取れなかった UI が、送信の失敗として送り直した
+    const again = await pluginRunResult(base, next, { ok: false, error: "script は実行したが、結果の送信に失敗" });
+    assert.equal(again.status, 409);
+    const reply = await json<RequestReply>(fetch(`${base}/status?seq=1`));
+    assert.equal(reply.state, "done");
+    assert.equal(reply.value, 1);
   } finally {
     close();
   }

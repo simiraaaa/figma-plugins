@@ -317,23 +317,36 @@ function hostnameOf(host: string | undefined): string | undefined {
   }
 }
 
-/** 使用中のポートの相手が dev サーバーとして GET /status に答えれば、その本文 */
-async function runningDevServer(base: string): Promise<Partial<StatusReply> | undefined> {
+async function getJson(url: string): Promise<Record<string, unknown> | undefined> {
   try {
-    const res = await fetch(`${base}/status`, { signal: AbortSignal.timeout(2000) });
-    const body = (await res.json()) as Partial<StatusReply>;
-    return typeof body.version === "number" ? body : undefined;
+    const body = (await (await fetch(url, { signal: AbortSignal.timeout(2000) })).json()) as unknown;
+    return typeof body === "object" && body !== null ? (body as Record<string, unknown>) : undefined;
   } catch {
     // JSON を返さない・2 秒以内に答えない
     return undefined;
   }
 }
 
+/** 使用中のポートの相手が dev サーバーとして GET /status に答えれば、その置き場所と、いまのプラグインがつながる版か */
+async function runningDevServer(base: string): Promise<{ outDir?: string; current: boolean } | undefined> {
+  const status = await getJson(`${base}/status`);
+  if (typeof status?.version !== "number") return undefined;
+  // GET /hello が無い版には、候補のポートを探す新しいプラグインがつながらない
+  const hello = await getJson(`${base}/hello`);
+  return {
+    outDir: typeof status.outDir === "string" ? status.outDir : undefined,
+    current: hello?.app === DEV_SERVER_APP,
+  };
+}
+
 export type CandidateOutcome =
   /** busy は、先に試して dev サーバーでない相手が使っていたポート */
   | { kind: "listening"; port: number; servers: http.Server[]; errors: string[]; busy: number[] }
-  /** 候補のポートで dev サーバーがもう動いている (古い版は outDir を返さない) */
-  | { kind: "running"; port: number; outDir?: string }
+  /**
+   * 候補のポートで dev サーバーがもう動いている。outDir は古い版では無い。
+   * current が false なら、いまのプラグインがつながらない古い版
+   */
+  | { kind: "running"; port: number; outDir?: string; current: boolean }
   /** 候補のポートがどれも、dev サーバーでない相手に使われている */
   | { kind: "busy"; ports: number[] };
 
@@ -350,9 +363,7 @@ export async function listenOnCandidatePorts(
   // (前の候補を使っていた別のアプリが、その dev サーバーの起動後にポートを手放した)
   for (const port of ports) {
     const running = await runningDevServer(`http://${urlHost(hosts[0])}:${port}`);
-    if (running !== undefined) {
-      return { kind: "running", port, outDir: typeof running.outDir === "string" ? running.outDir : undefined };
-    }
+    if (running !== undefined) return { kind: "running", port, ...running };
   }
   const busy: number[] = [];
   for (const port of ports) {
@@ -362,9 +373,7 @@ export async function listenOnCandidatePorts(
     }
     // localhost に聞くと、もう片方のアドレスで別のものに届きうるので、使用中だったアドレスに聞く
     const running = await runningDevServer(`http://${outcome.inUse}:${port}`);
-    if (running !== undefined) {
-      return { kind: "running", port, outDir: typeof running.outDir === "string" ? running.outDir : undefined };
-    }
+    if (running !== undefined) return { kind: "running", port, ...running };
     busy.push(port);
   }
   return { kind: "busy", ports: busy };
@@ -374,6 +383,13 @@ export async function listenOnCandidatePorts(
 export function notStartedMessage(outcome: Exclude<CandidateOutcome, { kind: "listening" }>): string {
   if (outcome.kind === "running") {
     const where = outcome.outDir === undefined ? "" : `結果の置き場所は ${outcome.outDir}。`;
+    if (!outcome.current) {
+      return (
+        `古い版の dev サーバーが http://localhost:${outcome.port} で動いている。${where}` +
+        "いまのプラグインはこの版につながらないので、止めてから npm run dev:server で起動し直す。" +
+        "止めると、それを使っているほかのセッションの依頼も止まるので、止める前に人に確かめる"
+      );
+    }
     return (
       `dev サーバーはもう http://localhost:${outcome.port} で動いている。${where}新しく起動せず、動いているほうにそのまま依頼する。` +
       "止めると、それを使っているほかのセッションの依頼も止まる"
@@ -766,7 +782,8 @@ export function createDevServer(options: DevServerOptions): http.RequestListener
       send(res, 403, { error: `この Origin からは受けない: ${origin}` });
       return;
     }
-    if (fromPlugin) lastPluginSeen = Date.now();
+    // /hello はポートを探すだけの送信 (curl からも来る) で、依頼を待つプラグインがいる印にならない
+    if (fromPlugin && route !== "GET /hello") lastPluginSeen = Date.now();
 
     if (route === "POST /export") {
       const seconds = secondsParam(url);
@@ -865,6 +882,11 @@ export function createDevServer(options: DevServerOptions): http.RequestListener
       const kind = requestOf(seq)?.kind;
       if (kind !== undefined && (kind === "run") !== (route === "POST /run-result")) {
         send(res, 409, { error: `#${seq} は ${kind === "run" ? "script の実行" : "書き出し"} の依頼なので、この口では受けない` });
+        return;
+      }
+      // 応答を受け取れなかった UI が送り直してきても、先に届いた結果を残す (書き出しは build のたびに書き出し直すので上書きする)
+      if (kind === "run" && outcomes.has(seq)) {
+        send(res, 409, { error: `#${seq} の script の結果はもう受けている` });
         return;
       }
       const body = await readBody(req);
