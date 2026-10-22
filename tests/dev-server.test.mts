@@ -1017,6 +1017,23 @@ test("候補のポートと dev サーバーの印は、サーバー・Dev Loop 
   assert.ok(ui.includes(`const DEV_SERVER_APP = "${DEV_SERVER_APP}";`), "ui.html の DEV_SERVER_APP が違う");
 });
 
+test("Dev Loop の manifest は、書き出しに効く実行条件が Structure Dump と同じ", () => {
+  const read = (name: string) =>
+    JSON.parse(readFileSync(path.join(root, `plugins/${name}/manifest.json`), "utf8")) as Record<string, unknown>;
+  const dump = read("structure-dump");
+  const devLoop = read("dev-loop");
+  for (const key of ["api", "editorType", "documentAccess", "permissions", "enableProposedApi"]) {
+    assert.deepEqual(devLoop[key], dump[key], `manifest の ${key} が違う`);
+  }
+});
+
+test("Structure Dump の build は Dev Loop も作り直す (Dev Loop は書き出しを build で取り込む)", () => {
+  const pkg = JSON.parse(readFileSync(path.join(root, "package.json"), "utf8")) as {
+    scripts: Record<string, string>;
+  };
+  assert.match(pkg.scripts["build:dump"], /npm run build:dev-loop/);
+});
+
 test("配るプラグインの manifest は通信の設定と開発用のコマンドを持たない", () => {
   for (const name of ["structure-dump", "component-spec"]) {
     const manifest = JSON.parse(

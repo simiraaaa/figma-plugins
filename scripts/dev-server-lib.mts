@@ -397,7 +397,7 @@ export function notStartedMessage(outcome: Exclude<CandidateOutcome, { kind: "li
   return (
     `候補のポート ${outcome.ports.join("・")} がどれも、dev サーバーとして答えない相手 (別のアプリか、答えられなくなった dev サーバー) に使われている。` +
     "どれかを空けるか、候補を変える " +
-    "(scripts/dev-server-lib.mts の DEV_PORTS・manifest の devAllowedDomains・ui.html の DEV_PORTS をそろえて変え、プラグインを起動し直す)"
+    "(scripts/dev-server-lib.mts の DEV_PORTS・plugins/dev-loop/manifest.json の devAllowedDomains・plugins/dev-loop/src/ui.html の DEV_PORTS をそろえて変え、Dev Loop を起動し直す)"
   );
 }
 

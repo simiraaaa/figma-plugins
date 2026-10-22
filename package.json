@@ -6,8 +6,8 @@
   "description": "General-purpose Figma plugins: structure-dump (structure JSON + screenshots ZIP export) and component-spec (variant/props spec export)",
   "license": "MIT",
   "scripts": {
-    "build": "npm run build:dump && npm run build:spec && npm run build:dev-loop",
-    "build:dump": "esbuild plugins/structure-dump/src/code.ts --bundle --loader:.md=text --outfile=plugins/structure-dump/dist/code.js --target=es2017",
+    "build": "npm run build:dump && npm run build:spec",
+    "build:dump": "esbuild plugins/structure-dump/src/code.ts --bundle --loader:.md=text --outfile=plugins/structure-dump/dist/code.js --target=es2017 && npm run build:dev-loop",
     "build:dump-test": "esbuild plugins/structure-dump/src/serialize.ts plugins/structure-dump/src/zip.ts plugins/structure-dump/src/plan.ts --format=esm --outdir=plugins/structure-dump/dist --out-extension:.js=.mjs",
     "build:dev-loop": "esbuild plugins/dev-loop/src/code.ts --bundle --loader:.md=text --outfile=plugins/dev-loop/dist/code.js --target=es2017",
     "build:dev-loop-test": "esbuild plugins/dev-loop/src/run.ts --format=esm --outdir=plugins/dev-loop/dist --out-extension:.js=.mjs",

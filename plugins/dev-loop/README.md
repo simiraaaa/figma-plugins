@@ -52,6 +52,7 @@ Figma への取り込みは[リポルート README の共通手順](../../README
    - Dev Loop が前の依頼を書き出しているあいだに来た依頼は、断らずに待たせ、前の依頼が終わってから順に書き出す。
      書き出し中の Dev Loop からは何も届かない (重いページでは Figma ごと固まる) が、dev サーバーは、渡した依頼の結果がまだ返っていなければ書き出し中と見る。
      Figma のウィンドウがほかのアプリの裏にあると、書き出しが大きく遅れ、止まったように見えることもある (前に出すと進む)。
+     画面がスリープかロックしているあいだも書き出しは止まり、画面を起こすと進む。
    - 書き出し中の依頼が無く、Dev Loop から 35 秒何も届いていなければ、繋がっていないと見て、依頼を積まずにすぐ HTTP 503 を返す。
    - 300 秒以内に結果が来なければ HTTP 504 (`?timeout=<秒>` で変えられる)。
      Claude Code の Bash ツールは既定で 120 秒で切れるので、大きな書き出しでは Bash の timeout も延ばす。
@@ -75,16 +76,16 @@ Figma への取り込みは[リポルート README の共通手順](../../README
      `GET /status` には `plugin` と、結果の置き場所 `outDir` も入る。
      `GET /status?after=<version>` は、それより新しい結果が届くまで待つ (どの依頼の結果でも返る)。
      300 秒待っても届かなければ HTTP 504 で、待つ長さは `?timeout=<秒>` で変えられる。
-4. Structure Dump の書き出しか Dev Loop のコードを直したら、Dev Loop を build する。
+4. コードを直したら build する。
    ホットリロードで Dev Loop が走り直し、最後の書き出しの依頼をもう一度書き出して送る
 
    ```sh
-   npm run build:dev-loop
+   npm run build:dump      # Structure Dump の書き出しを直したとき (Structure Dump と Dev Loop の両方を作り直す)
+   npm run build:dev-loop  # Dev Loop のコードだけを直したとき
    curl -s 'localhost:47717/status?after=<直前の version>'  # 走り直した結果が届くまで待つ
    ```
 
    Figma のメニュー「プラグインをホットリロード」が効いている必要がある。
-   Structure Dump のメニューから書き出すほうにも直しを入れるには、`npm run build:dump` も実行する (`npm run build` なら両方)。
 
 Dev Loop の画面には、いつ・なぜ (新しい依頼か、起動より前に積まれていた依頼か) 書き出したか・実行したかの記録が出る。
 

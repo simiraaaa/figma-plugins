@@ -239,6 +239,7 @@ onmessage = (event) => {
     else if (msg.phase === "assets") setStatus(`書き出し中… 画像 ${count}`);
     return;
   }
+  setStatus("");
 
   if (msg.type === "dev-start") {
     document.getElementById("dev").hidden = false;
@@ -259,7 +260,6 @@ onmessage = (event) => {
     return;
   }
   if (msg.type === "error") {
-    setStatus("");
     document.getElementById("error").textContent = msg.message;
   }
 };

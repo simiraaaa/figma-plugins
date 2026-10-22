@@ -18,6 +18,8 @@ npm install
 npm run build        # 全部ビルド (個別: build:dump / build:spec / build:dev-loop)
 ```
 
+`build:dump` は Dev Loop も作り直す (Dev Loop は Structure Dump の書き出しを取り込むので、片方だけ古いままにしない)。
+
 ビルドすると各プラグインの `dist/code.js` が生成される。生成物はコミットしないので、
 clone 直後や pull 直後は必ずビルドしてから Figma に読み込む。
 

@@ -12,7 +12,7 @@ Figma の構造をまるごと書き出すプラグイン。特定の UI ライ�
 
 ```sh
 npm install        # リポルートで (未実施なら)
-npm run build:dump
+npm run build:dump # Dev Loop も作り直す
 ```
 
 Figma への取り込みは[リポルート README の共通手順](../../README.md#figma-への取り込み-共通手順)を参照
