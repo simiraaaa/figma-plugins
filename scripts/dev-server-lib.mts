@@ -58,6 +58,7 @@ const RUN_DEFAULT_WAIT_SECONDS = 90;
 const KEEP_REQUESTS = 100;
 const DEFAULT_KEEP_RESULTS = 20;
 const SCREENSHOT_SCALES: ReadonlySet<number> = new Set([1, 2]);
+const IMAGE_MODES: ReadonlySet<unknown> = new Set<ImageMode>(["both", "none", "only"]);
 
 // ---------------------------------------------------------------------------
 // ZIP の読み取り (プラグインの zip.ts が作る無圧縮 ZIP だけを読む)
@@ -134,11 +135,16 @@ interface RequestBase {
   requestedAt: string;
 }
 
+/** 書き出す中身。none は構造だけ (画像を省く)、only は画像だけ */
+export type ImageMode = "both" | "none" | "only";
+
 export interface DumpRequest extends RequestBase {
   kind: "export";
   /** 無ければプラグインで開いているページの選択 (未選択ならページ直下) */
   nodeIds?: string[];
   scale?: number;
+  /** 無ければ both。省いた依頼はこの欄を付けずにプラグインへ渡す */
+  images?: ImageMode;
 }
 
 export interface RunRequest extends RequestBase {
@@ -152,16 +158,16 @@ export interface RunRequest extends RequestBase {
 export type DevRequest = DumpRequest | RunRequest;
 
 /** POST /export の本文を依頼の形にする。形が違えば throw */
-export function parseExportBody(text: string): Pick<DumpRequest, "nodeIds" | "scale"> {
+export function parseExportBody(text: string): ExportFields {
   if (text.trim() === "") return {};
   const body = JSON.parse(text) as unknown;
   if (typeof body !== "object" || body === null || Array.isArray(body)) {
     throw new Error("本文は JSON のオブジェクトにする ({\"nodeIds\": [...], \"scale\": 2})");
   }
-  const { nodeIds, scale, ...rest } = body as Record<string, unknown>;
+  const { nodeIds, scale, images, ...rest } = body as Record<string, unknown>;
   const unknownKeys = Object.keys(rest);
   if (unknownKeys.length > 0) throw new Error(`知らないキー: ${unknownKeys.join(", ")}`);
-  const out: Pick<DumpRequest, "nodeIds" | "scale"> = {};
+  const out: ExportFields = {};
   if (nodeIds !== undefined) {
     if (
       !Array.isArray(nodeIds) ||
@@ -178,14 +184,22 @@ export function parseExportBody(text: string): Pick<DumpRequest, "nodeIds" | "sc
     }
     out.scale = scale;
   }
+  if (images !== undefined) {
+    if (!IMAGE_MODES.has(images)) throw new Error("images は both・none・only のどれかにする (省けば both)");
+    out.images = images as ImageMode;
+  }
   return out;
 }
+
+type ExportFields = Pick<DumpRequest, "nodeIds" | "scale" | "images">;
 
 export interface DevStatus {
   /** 結果か失敗を受けるたびに 1 増える。0 はまだ何も受けていない */
   version: number;
   seq?: number;
   nodeIds?: string[];
+  /** 依頼の images。both (省いたときを含む) なら無い */
+  images?: ImageMode;
   receivedAt?: string;
   /** 展開したディレクトリ (outDir/latest はここを指す) */
   dir?: string;
@@ -201,7 +215,14 @@ export interface PluginState {
   /** 最後にプラグインから何か届いた時刻。起動してからまだ何も届いていなければ無い */
   lastSeenAt?: string;
   /** プラグインへ渡して、まだ結果も失敗も返っていない依頼 */
-  processing?: { seq: number; kind: DevRequest["kind"]; nodeIds?: string[]; elapsedSeconds: number };
+  processing?: {
+    seq: number;
+    kind: DevRequest["kind"];
+    nodeIds?: string[];
+    /** 依頼の images。both (省いたときを含む) なら無い */
+    images?: ImageMode;
+    elapsedSeconds: number;
+  };
 }
 
 /** POST /run の応答。script の結果は書き出しの結果ではないので、status.json と version は動かさない */
@@ -528,6 +549,7 @@ export function createDevServer(options: DevServerOptions): http.RequestListener
               seq: processing.request.seq,
               kind: processing.request.kind,
               nodeIds: nodeIdsOf(processing.request),
+              images: imagesOf(processing.request),
               elapsedSeconds: Math.floor((Date.now() - processing.handedAt) / 1000),
             },
     };
@@ -535,6 +557,10 @@ export function createDevServer(options: DevServerOptions): http.RequestListener
 
   function nodeIdsOf(request: DevRequest | undefined): string[] | undefined {
     return request?.kind === "export" ? request.nodeIds : undefined;
+  }
+
+  function imagesOf(request: DevRequest | undefined): ImageMode | undefined {
+    return request?.kind === "export" && request.images !== "both" ? request.images : undefined;
   }
 
   function statusReply(): StatusReply {
@@ -554,7 +580,14 @@ export function createDevServer(options: DevServerOptions): http.RequestListener
     if (outcome !== undefined) {
       return { ...outcome.body, seq, kind: request.kind, state: outcome.ok ? "done" : "failed", plugin };
     }
-    return { seq, kind: request.kind, nodeIds: nodeIdsOf(request), state: unsettledState(request), plugin };
+    return {
+      seq,
+      kind: request.kind,
+      nodeIds: nodeIdsOf(request),
+      images: imagesOf(request),
+      state: unsettledState(request),
+      plugin,
+    };
   }
 
   function unsettledState(request: DevRequest): RequestState {
@@ -639,6 +672,7 @@ export function createDevServer(options: DevServerOptions): http.RequestListener
         version,
         seq,
         nodeIds: nodeIdsOf(requestOf(seq)),
+        images: imagesOf(requestOf(seq)),
         receivedAt: new Date().toISOString(),
         dir,
         ...indexMeta(files),
@@ -655,6 +689,7 @@ export function createDevServer(options: DevServerOptions): http.RequestListener
         version: status.version + 1,
         seq,
         nodeIds: nodeIdsOf(requestOf(seq)),
+        images: imagesOf(requestOf(seq)),
         receivedAt: new Date().toISOString(),
         error: message,
       },
@@ -704,7 +739,9 @@ export function createDevServer(options: DevServerOptions): http.RequestListener
 
   function describe(request: DevRequest): string {
     if (request.kind === "run") return `script の実行 (${request.code.length} 文字)`;
-    return request.nodeIds ? request.nodeIds.join(", ") : "プラグインで開いているページの選択";
+    const target = request.nodeIds ? request.nodeIds.join(", ") : "プラグインで開いているページの選択";
+    const images = imagesOf(request);
+    return images === undefined ? target : `${target} (images: ${images})`;
   }
 
   /** 依頼を積み、プラグインから決着が届いたら res に返す。seconds 待っても届かなければ 504 */
@@ -790,7 +827,7 @@ export function createDevServer(options: DevServerOptions): http.RequestListener
         send(res, 400, { error: "timeout は正の秒数にする" });
         return;
       }
-      let parsed: Pick<DumpRequest, "nodeIds" | "scale">;
+      let parsed: ExportFields;
       try {
         parsed = parseExportBody((await readBody(req)).toString("utf8"));
       } catch (e) {
