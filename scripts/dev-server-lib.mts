@@ -1,12 +1,12 @@
 /**
  * Structure Dump の開発用サーバー (dev:server) の本体。
  *
- * AI (curl) から書き出しの依頼を受け、開いている開発プラグインの UI がそれを long-poll で取り、
- * 書き出した ZIP をこのサーバーへ POST する。受けた ZIP は outDir の下へ展開する。
+ * AI (curl) から書き出しと script の実行の依頼を受け、開いている開発プラグインの UI がそれを long-poll で取り、
+ * 書き出した ZIP や script の返り値をこのサーバーへ POST する。受けた ZIP は outDir の下へ展開する。
  * プラグインはメニューの「開発: dev サーバーとつなぐ」で起動したときだけつなぐ。
- * ホットリロードで走り直したプラグインは、最後の依頼をもう一度書き出す。
+ * ホットリロードで走り直したプラグインは、まだ渡していない最後の依頼を受け取る (無ければ最後の書き出しの依頼をもう一度書き出す)。
  *
- * ポートはプラグインの manifest の devAllowedDomains と ui.html が同じ値を持つ
+ * 候補のポートと dev サーバーの印は、プラグインの manifest の devAllowedDomains と ui.html が同じ値を持つ
  * (tests/structure-dump-dev-server.test.mts が一致を見る)。
  */
 import { randomUUID } from "node:crypto";
@@ -22,7 +22,13 @@ import {
 import http from "node:http";
 import path from "node:path";
 
-export const DEV_PORT = 47717;
+/**
+ * 待ち受けるポートの候補。前から順に、空いている最初のポートで起動する。
+ * プラグインの UI は devAllowedDomains に書いたポートにしか届かず、乱数のポートは前もって書けないので並べておく
+ */
+export const DEV_PORTS: readonly number[] = [47717, 47718, 47719, 47720, 47721];
+/** GET /hello が返す印。プラグインの UI は、候補のうちこれを返したポートを dev サーバーと見る */
+export const DEV_SERVER_APP = "structure-dump-dev-server";
 
 /** プラグインの UI が /next を待つ長さ。これを過ぎたら 204 を返し、UI は待ち直す */
 const POLL_HOLD_MS = 25_000;
@@ -38,11 +44,18 @@ const DEFAULT_PLUGIN_STALE_MS = POLL_HOLD_MS + 10_000;
 const LOOPBACK_HOSTNAMES: ReadonlySet<string> = new Set(["localhost", "127.0.0.1", "[::1]"]);
 /** プラグインの UI (Origin: null) が使う口。残りは AI (curl。Origin を付けない) が使う口 */
 const PLUGIN_ROUTES: ReadonlySet<string> = new Set([
+  "GET /hello",
   "GET /next",
   "POST /result",
   "POST /error",
+  "POST /run-result",
 ]);
 const DEFAULT_WAIT_SECONDS = 300;
+/**
+ * script は Claude Code の Bash ツールの既定 (120 秒) で curl が止められる前に、seq の入った 504 を返す。
+ * seq を受け取れないと、依頼した側は送り直し、書き換えが二重にかかる
+ */
+const RUN_DEFAULT_WAIT_SECONDS = 90;
 const KEEP_REQUESTS = 100;
 const DEFAULT_KEEP_RESULTS = 20;
 const SCREENSHOT_SCALES: ReadonlySet<number> = new Set([1, 2]);
@@ -117,13 +130,27 @@ export function entryPath(dir: string, name: string): string {
 // 依頼と結果
 // ---------------------------------------------------------------------------
 
-export interface DumpRequest {
+interface RequestBase {
   seq: number;
+  requestedAt: string;
+}
+
+export interface DumpRequest extends RequestBase {
+  kind: "export";
   /** 無ければプラグインで開いているページの選択 (未選択ならページ直下) */
   nodeIds?: string[];
   scale?: number;
-  requestedAt: string;
 }
+
+export interface RunRequest extends RequestBase {
+  kind: "run";
+  /** async 関数の本体。プラグインが figma を渡して実行する */
+  code: string;
+  /** X-Run-Token。照合はプラグインが行う (合言葉を知っているのはプラグインだけ) */
+  token: string;
+}
+
+export type DevRequest = DumpRequest | RunRequest;
 
 /** POST /export の本文を依頼の形にする。形が違えば throw */
 export function parseExportBody(text: string): Pick<DumpRequest, "nodeIds" | "scale"> {
@@ -175,7 +202,15 @@ export interface PluginState {
   /** 最後にプラグインから何か届いた時刻。起動してからまだ何も届いていなければ無い */
   lastSeenAt?: string;
   /** プラグインへ渡して、まだ結果も失敗も返っていない依頼 */
-  processing?: { seq: number; nodeIds?: string[]; elapsedSeconds: number };
+  processing?: { seq: number; kind: DevRequest["kind"]; nodeIds?: string[]; elapsedSeconds: number };
+}
+
+/** POST /run の応答。script の結果は書き出しの結果ではないので、status.json と version は動かさない */
+export interface RunReply {
+  seq: number;
+  /** script が return した値。return しなければ null */
+  value?: unknown;
+  error?: string;
 }
 
 export interface StatusReply extends DevStatus {
@@ -185,18 +220,46 @@ export interface StatusReply extends DevStatus {
 }
 
 /**
- * GET /status?seq=<seq> が返す 1 件の依頼の様子。done と failed はその依頼の結果 (DevStatus) を持つ。
- * skipped は、プラグインがあとの依頼を受け取ったので、もう書き出されない依頼
+ * GET /status?seq=<seq> が返す 1 件の依頼の様子。done と failed はその依頼の結果 (DevStatus か RunReply) を持つ。
+ * skipped は、プラグインがあとの依頼を受け取ったので、もう処理されない依頼 (書き出しは、渡したのに結果が返らなかったものも含む)
  */
-export type RequestState = "queued" | "processing" | "done" | "failed" | "skipped";
+export type RequestState =
+  | "queued"
+  | "processing"
+  | "done"
+  | "failed"
+  | "skipped"
+  /** script だけ: 渡したのに結果が返らないままプラグインが先へ進んだ (途中まで実行したかもしれない) */
+  | "abandoned"
+  /** script だけ: 渡す前に依頼した側が待つのをやめたので取り消した (実行していない) */
+  | "cancelled";
 
 export interface RequestReply extends Partial<DevStatus> {
   seq: number;
+  kind: DevRequest["kind"];
   state: RequestState;
+  value?: unknown;
   plugin: PluginState;
 }
 
-type Outcome = { ok: true; status: DevStatus } | { ok: false; status: DevStatus };
+/** 依頼の決着。body は依頼した側へ返す本文 */
+interface Outcome {
+  ok: boolean;
+  body: DevStatus | RunReply;
+}
+
+/** プラグインが送った script の結果 (run.ts の RunResultBody の JSON) を、依頼した側への応答にする。形が違えば undefined */
+function runOutcomeOf(seq: number, text: string): Outcome | undefined {
+  let body: { ok?: unknown; value?: unknown; error?: unknown };
+  try {
+    body = JSON.parse(text) as typeof body;
+  } catch {
+    return undefined;
+  }
+  if (body?.ok === true) return { ok: true, body: { seq, value: body.value ?? null } };
+  if (body?.ok === false && typeof body.error === "string") return { ok: false, body: { seq, error: body.error } };
+  return undefined;
+}
 
 export interface DevServerOptions {
   outDir: string;
@@ -238,9 +301,9 @@ function indexMeta(files: ZipFile[]): Pick<DevStatus, "fileName" | "warnings"> {
 }
 
 /** 秒数のクエリ。無ければ既定、正の数でなければ undefined */
-function secondsParam(url: URL): number | undefined {
+function secondsParam(url: URL, fallback = DEFAULT_WAIT_SECONDS): number | undefined {
   const raw = url.searchParams.get("timeout");
-  if (raw === null) return DEFAULT_WAIT_SECONDS;
+  if (raw === null) return fallback;
   const seconds = Number(raw);
   return Number.isFinite(seconds) && seconds > 0 ? seconds : undefined;
 }
@@ -254,25 +317,88 @@ function hostnameOf(host: string | undefined): string | undefined {
   }
 }
 
-/** ポートが使用中で起動できなかったとき、使っているのが dev サーバーかを GET /status で確かめ、次にどうするかを返す */
-export async function portInUseMessage(base: string): Promise<string> {
+async function getJson(url: string): Promise<Record<string, unknown> | undefined> {
   try {
-    const res = await fetch(`${base}/status`, { signal: AbortSignal.timeout(2000) });
-    const body = (await res.json()) as Partial<StatusReply>;
-    if (typeof body.version === "number") {
-      const where = typeof body.outDir === "string" ? `結果の置き場所は ${body.outDir}。` : "";
-      return (
-        `dev サーバーはもう動いている。${where}新しく起動せず、動いているほうにそのまま依頼する。` +
-        "止めると、それを使っているほかのセッションの依頼も止まる"
-      );
-    }
+    const body = (await (await fetch(url, { signal: AbortSignal.timeout(2000) })).json()) as unknown;
+    return typeof body === "object" && body !== null ? (body as Record<string, unknown>) : undefined;
   } catch {
     // JSON を返さない・2 秒以内に答えない
+    return undefined;
+  }
+}
+
+/** 使用中のポートの相手が dev サーバーとして GET /status に答えれば、その置き場所と、いまのプラグインがつながる版か */
+async function runningDevServer(base: string): Promise<{ outDir?: string; current: boolean } | undefined> {
+  const status = await getJson(`${base}/status`);
+  if (typeof status?.version !== "number") return undefined;
+  // GET /hello が無い版には、候補のポートを探す新しいプラグインがつながらない
+  const hello = await getJson(`${base}/hello`);
+  return {
+    outDir: typeof status.outDir === "string" ? status.outDir : undefined,
+    current: hello?.app === DEV_SERVER_APP,
+  };
+}
+
+export type CandidateOutcome =
+  /** busy は、先に試して dev サーバーでない相手が使っていたポート */
+  | { kind: "listening"; port: number; servers: http.Server[]; errors: string[]; busy: number[] }
+  /**
+   * 候補のポートで dev サーバーがもう動いている。outDir は古い版では無い。
+   * current が false なら、いまのプラグインがつながらない古い版
+   */
+  | { kind: "running"; port: number; outDir?: string; current: boolean }
+  /** 候補のポートがどれも、dev サーバーでない相手に使われている */
+  | { kind: "busy"; ports: number[] };
+
+/**
+ * 候補のポートを前から順に試し、空いている最初のポートの hosts で待ち受ける。
+ * どれかの候補で dev サーバーが動いていれば、新しく起動せずに相乗りする (プラグインは 1 つの dev サーバーにしかつながらない)
+ */
+export async function listenOnCandidatePorts(
+  handler: http.RequestListener,
+  ports: readonly number[],
+  hosts: readonly string[]
+): Promise<CandidateOutcome> {
+  // 前の候補が空いていても、後ろの候補で動いている dev サーバーがある
+  // (前の候補を使っていた別のアプリが、その dev サーバーの起動後にポートを手放した)
+  for (const port of ports) {
+    const running = await runningDevServer(`http://${urlHost(hosts[0])}:${port}`);
+    if (running !== undefined) return { kind: "running", port, ...running };
+  }
+  const busy: number[] = [];
+  for (const port of ports) {
+    const outcome = await listenOnHosts(handler, port, hosts);
+    if (outcome.inUse === undefined) {
+      return { kind: "listening", port, servers: outcome.servers, errors: outcome.errors, busy };
+    }
+    // localhost に聞くと、もう片方のアドレスで別のものに届きうるので、使用中だったアドレスに聞く
+    const running = await runningDevServer(`http://${outcome.inUse}:${port}`);
+    if (running !== undefined) return { kind: "running", port, ...running };
+    busy.push(port);
+  }
+  return { kind: "busy", ports: busy };
+}
+
+/** 候補のポートで起動しなかったとき、次にどうするかを返す */
+export function notStartedMessage(outcome: Exclude<CandidateOutcome, { kind: "listening" }>): string {
+  if (outcome.kind === "running") {
+    const where = outcome.outDir === undefined ? "" : `結果の置き場所は ${outcome.outDir}。`;
+    if (!outcome.current) {
+      return (
+        `古い版の dev サーバーが http://localhost:${outcome.port} で動いている。${where}` +
+        "いまのプラグインはこの版につながらないので、止めてから npm run dev:server で起動し直す。" +
+        "止めると、それを使っているほかのセッションの依頼も止まるので、止める前に人に確かめる"
+      );
+    }
+    return (
+      `dev サーバーはもう http://localhost:${outcome.port} で動いている。${where}新しく起動せず、動いているほうにそのまま依頼する。` +
+      "止めると、それを使っているほかのセッションの依頼も止まる"
+    );
   }
   return (
-    `ポート ${DEV_PORT} を使っている相手が dev サーバーとして答えない (別のアプリか、答えられなくなった dev サーバー)。` +
-    "そのアプリを止めるか、ポートを変える " +
-    "(scripts/dev-server-lib.mts の DEV_PORT・manifest の devAllowedDomains・ui.html の DEV_SERVER をそろえて変え、プラグインを起動し直す)"
+    `候補のポート ${outcome.ports.join("・")} がどれも、dev サーバーとして答えない相手 (別のアプリか、答えられなくなった dev サーバー) に使われている。` +
+    "どれかを空けるか、候補を変える " +
+    "(scripts/dev-server-lib.mts の DEV_PORTS・manifest の devAllowedDomains・ui.html の DEV_PORTS をそろえて変え、プラグインを起動し直す)"
   );
 }
 
@@ -283,6 +409,11 @@ export interface ListenOutcome {
   inUse?: string;
   /** 使用中以外の理由で待ち受けられなかったアドレスと理由 */
   errors: string[];
+}
+
+/** 待ち受けるアドレスを URL に書く形にする (IPv6 は [] で囲む) */
+function urlHost(host: string): string {
+  return host.includes(":") ? `[${host}]` : host;
 }
 
 /**
@@ -312,7 +443,7 @@ export function listenOnHosts(
     for (const host of hosts) {
       const server = http.createServer(handler);
       server.once("error", (e: NodeJS.ErrnoException) => {
-        if (e.code === "EADDRINUSE") inUse ??= host.includes(":") ? `[${host}]` : host;
+        if (e.code === "EADDRINUSE") inUse ??= urlHost(host);
         else errors.push(`${host}: ${e.message}`);
         settle();
       });
@@ -334,9 +465,9 @@ export function createDevServer(options: DevServerOptions): http.RequestListener
   const serverId = randomUUID().slice(0, 8);
   const lastSeqFile = path.join(outDir, "last-seq");
 
-  const requests: DumpRequest[] = [];
+  const requests: DevRequest[] = [];
   /** done と failed の依頼の結果。requests から落ちた依頼の分は消す */
-  const outcomes = new Map<number, DevStatus>();
+  const outcomes = new Map<number, Outcome>();
   const pollers = new Set<() => void>();
   const outcomeWaiters = new Map<number, Set<(outcome: Outcome) => void>>();
   const statusWaiters = new Set<() => void>();
@@ -344,10 +475,13 @@ export function createDevServer(options: DevServerOptions): http.RequestListener
   const requestWaiters = new Set<() => void>();
   const pluginStaleMs = options.pluginStaleMs ?? DEFAULT_PLUGIN_STALE_MS;
   let lastPluginSeen = 0;
-  /** プラグインは 1 件ずつ書き出し、終わってから /next を待ちに来るので、処理中の依頼は 1 つだけ持つ */
-  let processing: { request: DumpRequest; handedAt: number } | undefined;
-  /** プラグインは seq の小さい順に受け取るので、これ以下で結果の無い依頼は書き出されない */
-  let lastHandedSeq = 0;
+  /** プラグインは 1 件ずつ処理し、終わってから /next を待ちに来るので、処理中の依頼は 1 つだけ持つ */
+  let processing: { request: DevRequest; handedAt: number } | undefined;
+  /**
+   * プラグインへ渡した (handed)・あとの依頼を渡したので飛ばした (skipped)・依頼した側が待つのをやめたので取り消した (cancelled) 依頼。
+   * どれでもない依頼だけを、これから渡す
+   */
+  const fates = new Map<number, "handed" | "skipped" | "cancelled">();
 
   mkdirSync(resultsDir, { recursive: true });
   // results/ は起動をまたいで残る。前回の続きの番号から振らないと、保持件数の掃除が新しい結果を消す
@@ -393,10 +527,15 @@ export function createDevServer(options: DevServerOptions): http.RequestListener
           ? undefined
           : {
               seq: processing.request.seq,
-              nodeIds: processing.request.nodeIds,
+              kind: processing.request.kind,
+              nodeIds: nodeIdsOf(processing.request),
               elapsedSeconds: Math.floor((Date.now() - processing.handedAt) / 1000),
             },
     };
+  }
+
+  function nodeIdsOf(request: DevRequest | undefined): string[] | undefined {
+    return request?.kind === "export" ? request.nodeIds : undefined;
   }
 
   function statusReply(): StatusReply {
@@ -414,33 +553,65 @@ export function createDevServer(options: DevServerOptions): http.RequestListener
     const outcome = outcomes.get(seq);
     const plugin = pluginState();
     if (outcome !== undefined) {
-      return { ...outcome, seq, state: outcome.error === undefined ? "done" : "failed", plugin };
+      return { ...outcome.body, seq, kind: request.kind, state: outcome.ok ? "done" : "failed", plugin };
     }
-    const state: RequestState =
-      processing?.request.seq === seq ? "processing" : seq <= lastHandedSeq ? "skipped" : "queued";
-    return { seq, nodeIds: request.nodeIds, state, plugin };
+    return { seq, kind: request.kind, nodeIds: nodeIdsOf(request), state: unsettledState(request), plugin };
   }
 
-  function nextRequestFor(after: number | undefined): DumpRequest | undefined {
-    if (after === undefined) return requests[requests.length - 1];
-    return requests.find((r) => r.seq > after);
+  function unsettledState(request: DevRequest): RequestState {
+    if (processing?.request.seq === request.seq) return "processing";
+    const fate = fates.get(request.seq);
+    if (fate === undefined) return "queued";
+    // 渡したのに結果が返らないままプラグインが先へ進んだ。書き出しは送り直せばよいが、script は途中まで実行したかもしれない
+    if (fate === "handed") return request.kind === "run" ? "abandoned" : "skipped";
+    return fate;
   }
 
-  function publish(next: DevStatus, outcome: Outcome["ok"]): void {
-    status = next;
-    writeFileSync(path.join(outDir, "status.json"), JSON.stringify(status, null, 2) + "\n");
-    if (next.seq !== undefined) outcomes.set(next.seq, next);
-    const waiters = next.seq === undefined ? undefined : outcomeWaiters.get(next.seq);
+  function pending(request: DevRequest): boolean {
+    return !fates.has(request.seq);
+  }
+
+  function nextRequestFor(after: number | undefined): DevRequest | undefined {
+    if (after !== undefined) return requests.find((r) => r.seq > after && pending(r));
+    // 走り直したプラグイン (待ち位置を持たない) には、まだ渡していない最後の依頼を渡す (それより前の依頼は飛ばす)。
+    // 無ければ最後の書き出しをやり直させる (build したプラグインの結果を status?after で待つ使い方)。
+    // 渡し済みの script は渡し直さない (書き換えが二重にかかる)
+    return requests.findLast(pending) ?? requests.findLast((r) => r.kind === "export");
+  }
+
+  /** 依頼した側が待つのをやめた script は、まだ渡していなければ取り消す。あとで開いたプラグインや別のファイルで実行させない */
+  function cancelIfPending(request: DevRequest): boolean {
+    if (request.kind !== "run" || !pending(request)) return false;
+    fates.set(request.seq, "cancelled");
+    log(`#${request.seq} の script を取り消した (依頼した側が待つのをやめた。まだ渡していない)`);
+    requestWaiters.forEach((wake) => wake());
+    return true;
+  }
+
+  function settle(seq: number, outcome: Outcome): void {
+    outcomes.set(seq, outcome);
+    const waiters = outcomeWaiters.get(seq);
     if (waiters !== undefined) {
-      outcomeWaiters.delete(next.seq as number);
-      waiters.forEach((resolve) => resolve({ ok: outcome, status } as Outcome));
+      outcomeWaiters.delete(seq);
+      waiters.forEach((resolve) => resolve(outcome));
     }
-    statusWaiters.forEach((wake) => wake());
     requestWaiters.forEach((wake) => wake());
   }
 
-  function requestOf(seq: number): DumpRequest | undefined {
+  function publish(next: DevStatus, ok: boolean): void {
+    status = next;
+    writeFileSync(path.join(outDir, "status.json"), JSON.stringify(status, null, 2) + "\n");
+    statusWaiters.forEach((wake) => wake());
+    if (next.seq !== undefined) settle(next.seq, { ok, body: next });
+  }
+
+  function requestOf(seq: number): DevRequest | undefined {
     return requests.find((r) => r.seq === seq);
+  }
+
+  function storeRunOutcome(seq: number, outcome: Outcome): void {
+    settle(seq, outcome);
+    log(outcome.ok ? `#${seq} の script の結果を受けた` : `#${seq} の script は失敗: ${(outcome.body as RunReply).error}`);
   }
 
   function storeResult(seq: number, files: ZipFile[]): void {
@@ -464,12 +635,11 @@ export function createDevServer(options: DevServerOptions): http.RequestListener
     for (const old of kept.slice(keepResults)) {
       rmSync(path.join(resultsDir, String(old)), { recursive: true, force: true });
     }
-    const request = requestOf(seq);
     publish(
       {
         version,
         seq,
-        nodeIds: request?.nodeIds,
+        nodeIds: nodeIdsOf(requestOf(seq)),
         receivedAt: new Date().toISOString(),
         dir,
         ...indexMeta(files),
@@ -481,12 +651,11 @@ export function createDevServer(options: DevServerOptions): http.RequestListener
   }
 
   function storeError(seq: number, message: string): void {
-    const request = requestOf(seq);
     publish(
       {
         version: status.version + 1,
         seq,
-        nodeIds: request?.nodeIds,
+        nodeIds: nodeIdsOf(requestOf(seq)),
         receivedAt: new Date().toISOString(),
         error: message,
       },
@@ -499,7 +668,9 @@ export function createDevServer(options: DevServerOptions): http.RequestListener
     res: http.ServerResponse,
     register: (wake: () => void) => () => void,
     ms: number,
-    onTimeout: () => void
+    onTimeout: () => void,
+    /** 返す前に相手が接続を切った */
+    onClose?: () => void
   ): void {
     let done = false;
     const finish = (): void => {
@@ -516,8 +687,81 @@ export function createDevServer(options: DevServerOptions): http.RequestListener
       onTimeout();
     }, ms);
     res.on("close", () => {
-      if (!done) finish();
+      if (done) return;
+      finish();
+      onClose?.();
     });
+  }
+
+  /** 繋がっていないのに積むと、あとで開いたプラグインが誰も待っていない依頼を処理するので、積まずに 503 を返す */
+  function refuseUnlessConnected(res: http.ServerResponse): boolean {
+    if (pluginConnected()) return false;
+    send(res, 503, {
+      error: "プラグインが繋がっていない (Figma で「開発: dev サーバーとつなぐ」を開いたままにする)",
+      plugin: pluginState(),
+    });
+    return true;
+  }
+
+  function describe(request: DevRequest): string {
+    if (request.kind === "run") return `script の実行 (${request.code.length} 文字)`;
+    return request.nodeIds ? request.nodeIds.join(", ") : "プラグインで開いているページの選択";
+  }
+
+  /** 依頼を積み、プラグインから決着が届いたら res に返す。seconds 待っても届かなければ 504 */
+  function enqueueAndWait(
+    res: http.ServerResponse,
+    fields: Omit<DumpRequest, "seq" | "requestedAt"> | Omit<RunRequest, "seq" | "requestedAt">,
+    seconds: number
+  ): void {
+    const request = { ...fields, seq: nextSeq, requestedAt: new Date().toISOString() } as DevRequest;
+    nextSeq += 1;
+    writeFileSync(lastSeqFile, `${request.seq}\n`);
+    requests.push(request);
+    if (requests.length > KEEP_REQUESTS) {
+      const dropped = (requests.shift() as DevRequest).seq;
+      outcomes.delete(dropped);
+      fates.delete(dropped);
+    }
+    log(`#${request.seq} を受けた: ${describe(request)}`);
+    pollers.forEach((wake) => wake());
+    let resolveOutcome: ((outcome: Outcome) => void) | undefined;
+    waitFor(
+      res,
+      (wake) => {
+        resolveOutcome = (outcome) => {
+          wake();
+          send(res, outcome.ok ? 200 : 422, outcome.body);
+        };
+        const set = outcomeWaiters.get(request.seq) ?? new Set();
+        set.add(resolveOutcome);
+        outcomeWaiters.set(request.seq, set);
+        return () => outcomeWaiters.get(request.seq)?.delete(resolveOutcome as (o: Outcome) => void);
+      },
+      seconds * 1000,
+      () => {
+        const plugin = pluginState();
+        if (cancelIfPending(request)) {
+          send(res, 504, {
+            error: `${seconds} 秒待ってもプラグインに渡せなかったので取り消した (実行していない。送り直してよい)`,
+            seq: request.seq,
+            plugin,
+          });
+          return;
+        }
+        // 処理の途中でプラグインを閉じても処理中は残るので、「処理中」とは断定しない
+        const hint =
+          plugin.processing === undefined
+            ? "Figma で「開発: dev サーバーとつなぐ」を開いているか確かめる"
+            : `プラグインへ渡した #${plugin.processing.seq} の結果がまだ来ていない`;
+        send(res, 504, {
+          error: `${seconds} 秒待ってもプラグインから結果が来ない (${hint})`,
+          seq: request.seq,
+          plugin,
+        });
+      },
+      () => cancelIfPending(request)
+    );
   }
 
   async function handle(req: http.IncomingMessage, res: http.ServerResponse): Promise<void> {
@@ -538,7 +782,8 @@ export function createDevServer(options: DevServerOptions): http.RequestListener
       send(res, 403, { error: `この Origin からは受けない: ${origin}` });
       return;
     }
-    if (fromPlugin) lastPluginSeen = Date.now();
+    // /hello はポートを探すだけの送信 (curl からも来る) で、依頼を待つプラグインがいる印にならない
+    if (fromPlugin && route !== "GET /hello") lastPluginSeen = Date.now();
 
     if (route === "POST /export") {
       const seconds = secondsParam(url);
@@ -553,49 +798,34 @@ export function createDevServer(options: DevServerOptions): http.RequestListener
         send(res, 400, { error: e instanceof Error ? e.message : String(e) });
         return;
       }
-      // 繋がっていないのに積むと、あとで開いたプラグインが誰も待っていない依頼を書き出す
-      if (!pluginConnected()) {
-        send(res, 503, {
-          error: "プラグインが繋がっていない (Figma で「開発: dev サーバーとつなぐ」を開いたままにする)",
-          plugin: pluginState(),
-        });
+      if (refuseUnlessConnected(res)) return;
+      enqueueAndWait(res, { kind: "export", ...parsed }, seconds);
+      return;
+    }
+
+    if (route === "POST /run") {
+      const seconds = secondsParam(url, RUN_DEFAULT_WAIT_SECONDS);
+      if (seconds === undefined) {
+        send(res, 400, { error: "timeout は正の秒数にする" });
         return;
       }
-      const request: DumpRequest = { seq: nextSeq, ...parsed, requestedAt: new Date().toISOString() };
-      nextSeq += 1;
-      writeFileSync(lastSeqFile, `${request.seq}\n`);
-      requests.push(request);
-      if (requests.length > KEEP_REQUESTS) outcomes.delete((requests.shift() as DumpRequest).seq);
-      log(`#${request.seq} を受けた: ${request.nodeIds ? request.nodeIds.join(", ") : "プラグインで開いているページの選択"}`);
-      pollers.forEach((wake) => wake());
-      let resolveOutcome: ((outcome: Outcome) => void) | undefined;
-      waitFor(
-        res,
-        (wake) => {
-          resolveOutcome = (outcome) => {
-            wake();
-            send(res, outcome.ok ? 200 : 422, outcome.status);
-          };
-          const set = outcomeWaiters.get(request.seq) ?? new Set();
-          set.add(resolveOutcome);
-          outcomeWaiters.set(request.seq, set);
-          return () => outcomeWaiters.get(request.seq)?.delete(resolveOutcome as (o: Outcome) => void);
-        },
-        seconds * 1000,
-        () => {
-          const plugin = pluginState();
-          // 書き出しの途中でプラグインを閉じても処理中は残るので、「書き出し中」とは断定しない
-          const hint =
-            plugin.processing === undefined
-              ? "Figma で「開発: dev サーバーとつなぐ」を開いているか確かめる"
-              : `プラグインへ渡した #${plugin.processing.seq} の結果がまだ来ていない`;
-          send(res, 504, {
-            error: `${seconds} 秒待ってもプラグインから結果が来ない (${hint})`,
-            seq: request.seq,
-            plugin,
-          });
-        }
-      );
+      const token = req.headers["x-run-token"];
+      if (typeof token !== "string" || token === "") {
+        send(res, 400, { error: "X-Run-Token が無い (プラグインの画面に出ている合言葉をヘッダに付ける)" });
+        return;
+      }
+      const code = (await readBody(req)).toString("utf8");
+      if (code.trim() === "") {
+        send(res, 400, { error: "本文に実行するコードを入れる" });
+        return;
+      }
+      if (refuseUnlessConnected(res)) return;
+      enqueueAndWait(res, { kind: "run", code, token }, seconds);
+      return;
+    }
+
+    if (route === "GET /hello") {
+      send(res, 200, { app: DEV_SERVER_APP });
       return;
     }
 
@@ -603,8 +833,10 @@ export function createDevServer(options: DevServerOptions): http.RequestListener
       const afterParam = url.searchParams.get("after");
       const sameServer = url.searchParams.get("server") === serverId;
       const after = afterParam !== null && sameServer ? Number(afterParam) : undefined;
-      const reply = (request: DumpRequest): void => {
-        lastHandedSeq = Math.max(lastHandedSeq, request.seq);
+      const reply = (request: DevRequest): void => {
+        // プラグインは seq の小さい順に受け取るので、これより前でまだ渡していない依頼は、もう渡さない
+        for (const r of requests) if (r.seq < request.seq && pending(r)) fates.set(r.seq, "skipped");
+        fates.set(request.seq, "handed");
         setProcessing({ request, handedAt: Date.now() });
         send(res, 200, { server: serverId, ...request });
       };
@@ -635,7 +867,7 @@ export function createDevServer(options: DevServerOptions): http.RequestListener
       return;
     }
 
-    if (route === "POST /result" || route === "POST /error") {
+    if (route === "POST /result" || route === "POST /error" || route === "POST /run-result") {
       const seq = Number(url.searchParams.get("seq"));
       if (!Number.isInteger(seq) || seq < 1) {
         send(res, 400, { error: "seq が無い" });
@@ -646,10 +878,32 @@ export function createDevServer(options: DevServerOptions): http.RequestListener
         send(res, 409, { error: "別の起動のサーバーの依頼の結果は受けない" });
         return;
       }
+      // 版の古いプラグインの UI は script の依頼を書き出しとして扱い、書き出しの結果を返してくる
+      const kind = requestOf(seq)?.kind;
+      if (kind !== undefined && (kind === "run") !== (route === "POST /run-result")) {
+        send(res, 409, { error: `#${seq} は ${kind === "run" ? "script の実行" : "書き出し"} の依頼なので、この口では受けない` });
+        return;
+      }
+      // 応答を受け取れなかった UI が送り直してきても、先に届いた結果を残す (書き出しは build のたびに書き出し直すので上書きする)
+      if (kind === "run" && outcomes.has(seq)) {
+        send(res, 409, { error: `#${seq} の script の結果はもう受けている` });
+        return;
+      }
       const body = await readBody(req);
       // 本文を受け取り終えるまでは処理中のままにする (受信中に時間切れになった依頼側に、処理中と見せる)。
-      // ここでは待ちを起こさない。結果を保存する前に起こすと、結果の無い依頼として skipped と答える (保存の publish が起こす)
+      // ここでは待ちを起こさない。結果を保存する前に起こすと、結果の無い依頼として skipped と答える (保存の settle が起こす)
       if (processing?.request.seq === seq) processing = undefined;
+      if (route === "POST /run-result") {
+        const text = body.toString("utf8");
+        const read = runOutcomeOf(seq, text);
+        const outcome = read ?? {
+          ok: false,
+          body: { seq, error: `プラグインから届いた script の結果を読めない: ${text.slice(0, 200)}` },
+        };
+        storeRunOutcome(seq, outcome);
+        send(res, read === undefined ? 400 : 200, outcome.body);
+        return;
+      }
       if (route === "POST /error") {
         storeError(seq, body.toString("utf8"));
         send(res, 200, status);

@@ -15,17 +15,20 @@ import path from "node:path";
 import { fileURLToPath } from "node:url";
 import {
   createDevServer,
-  DEV_PORT,
+  DEV_PORTS,
+  DEV_SERVER_APP,
   type DevServerOptions,
   type DevStatus,
   type DumpRequest,
   entryPath,
+  listenOnCandidatePorts,
   listenOnHosts,
+  notStartedMessage,
   parseExportBody,
   type PluginState,
-  portInUseMessage,
   readStoredZip,
   type RequestReply,
+  type RunRequest,
   type StatusReply,
 } from "../scripts/dev-server-lib.mts";
 import { releaseManifest } from "../scripts/release-lib.mts";
@@ -35,6 +38,7 @@ const { buildZip, utf8Encode } =
   zipDist as unknown as typeof import("../plugins/structure-dump/src/zip.ts");
 
 type Next = DumpRequest & { server: string };
+type RunNext = RunRequest & { server: string };
 
 async function json<T>(res: Response | Promise<Response>): Promise<T> {
   return (await (await res).json()) as T;
@@ -89,6 +93,38 @@ function pluginPost(
     headers: PLUGIN,
     body,
   });
+}
+
+/** AI が script の実行を頼む */
+function runRequest(base: string, code: string, query = "", token = "t1"): Promise<Response> {
+  return fetch(`${base}/run${query}`, { method: "POST", headers: { "X-Run-Token": token }, body: code });
+}
+
+function pluginRunResult(base: string, next: { seq: number; server: string }, body: unknown): Promise<Response> {
+  return fetch(`${base}/run-result?seq=${next.seq}&server=${next.server}`, {
+    method: "POST",
+    headers: PLUGIN,
+    body: JSON.stringify(body),
+  });
+}
+
+/** いま空いているポート */
+async function freePort(): Promise<number> {
+  const probe = http.createServer();
+  await new Promise<void>((resolve) => probe.listen(0, "127.0.0.1", resolve));
+  const { port } = probe.address() as AddressInfo;
+  await new Promise((resolve) => probe.close(resolve));
+  return port;
+}
+
+/** dev サーバーとして答えない別のアプリ */
+async function otherApp(): Promise<{ port: number; close: () => void }> {
+  const other = http.createServer((_req, res) => {
+    res.writeHead(200, { "Content-Type": "text/html" });
+    res.end("<html></html>");
+  });
+  await new Promise<void>((resolve) => other.listen(0, "127.0.0.1", resolve));
+  return { port: (other.address() as AddressInfo).port, close: () => other.close() };
 }
 
 /** long-poll がまだ返っていないことを見る (ms 以内に返れば中身を、返らなければ "pending") */
@@ -233,31 +269,79 @@ test("起動し直しても版の番号は前回の続きから振り、新し�
   }
 });
 
-test("ポートが使用中のとき、使っているのが dev サーバーなら結果の置き場所を添えて、そのまま使うよう案内する", async () => {
-  const { base, outDir, close } = await startServer();
+test("候補のポートで dev サーバーが動いていれば、起動せずにそのポートと結果の置き場所を返し、そのまま使うよう案内する", async () => {
+  const { port, outDir, close } = await startServer();
   try {
-    assert.equal((await json<StatusReply>(fetch(`${base}/status`))).outDir, outDir);
-    const message = await portInUseMessage(base);
-    assert.match(message, /dev サーバーはもう動いている/);
+    const outcome = await listenOnCandidatePorts((_req, res) => res.end(), [port], ["127.0.0.1"]);
+    assert.deepEqual(outcome, { kind: "running", port, outDir, current: true });
+    const message = notStartedMessage(outcome as Exclude<typeof outcome, { kind: "listening" }>);
+    assert.match(message, /dev サーバーはもう .*:\d+ で動いている/);
+    assert.ok(message.includes(String(port)), "ポートが無い");
     assert.ok(message.includes(outDir), "結果の置き場所が無い");
   } finally {
     close();
   }
 });
 
-test("ポートが使用中のとき、使っているのが dev サーバーとして答えなければ、ポートの変え方を案内する", async () => {
-  const other = http.createServer((_req, res) => {
-    res.writeHead(200, { "Content-Type": "text/html" });
-    res.end("<html></html>");
+test("候補のポートで古い版の dev サーバー (GET /hello に印を返さない) が動いていれば、止めて起動し直すよう案内する", async () => {
+  // 変更前の版は GET /status に答え、知らない経路には 404 の JSON を返す
+  const old = http.createServer((req, res) => {
+    res.writeHead(req.url === "/status" ? 200 : 404, { "Content-Type": "application/json" });
+    res.end(req.url === "/status" ? '{"version": 3}' : '{"error": "知らない経路"}');
   });
-  await new Promise<void>((resolve) => other.listen(0, "127.0.0.1", resolve));
+  await new Promise<void>((resolve) => old.listen(0, "127.0.0.1", resolve));
+  const { port } = old.address() as AddressInfo;
   try {
-    const { port } = other.address() as AddressInfo;
-    const message = await portInUseMessage(`http://127.0.0.1:${port}`);
+    const outcome = await listenOnCandidatePorts((_req, res) => res.end(), [port], ["127.0.0.1"]);
+    assert.deepEqual(outcome, { kind: "running", port, outDir: undefined, current: false });
+    const message = notStartedMessage(outcome as Exclude<typeof outcome, { kind: "listening" }>);
+    assert.match(message, /古い版/);
+    assert.match(message, /起動し直す/);
+    assert.doesNotMatch(message, /そのまま依頼する/);
+  } finally {
+    old.close();
+  }
+});
+
+test("後ろの候補のポートで dev サーバーが動いていれば、前の候補が空いていても起動しない", async () => {
+  const free = await freePort();
+  const { port, outDir, close } = await startServer();
+  try {
+    const outcome = await listenOnCandidatePorts((_req, res) => res.end("ok"), [free, port], ["127.0.0.1"]);
+    if (outcome.kind === "listening") outcome.servers.forEach((s) => s.close());
+    assert.deepEqual(outcome, { kind: "running", port, outDir, current: true });
+  } finally {
+    close();
+  }
+});
+
+test("候補のポートが別のアプリに使われていれば、次の候補で待ち受ける", async () => {
+  const other = await otherApp();
+  const free = await freePort();
+  const outcome = await listenOnCandidatePorts((_req, res) => res.end("ok"), [other.port, free], ["127.0.0.1"]);
+  try {
+    assert.equal(outcome.kind, "listening");
+    assert.equal((outcome as { port: number }).port, free);
+    assert.equal(await (await fetch(`http://127.0.0.1:${free}/`)).text(), "ok");
+  } finally {
+    if (outcome.kind === "listening") outcome.servers.forEach((s) => s.close());
+    other.close();
+  }
+});
+
+test("候補のポートがどれも別のアプリに使われていれば、起動せずに空け方と候補の足し方を案内する", async () => {
+  const first = await otherApp();
+  const second = await otherApp();
+  try {
+    const outcome = await listenOnCandidatePorts((_req, res) => res.end(), [first.port, second.port], ["127.0.0.1"]);
+    assert.deepEqual(outcome, { kind: "busy", ports: [first.port, second.port] });
+    const message = notStartedMessage(outcome as Exclude<typeof outcome, { kind: "listening" }>);
     assert.match(message, /dev サーバーとして答えない/);
+    assert.ok(message.includes(String(second.port)), "候補のポートが無い");
     assert.match(message, /devAllowedDomains/);
   } finally {
-    other.close();
+    first.close();
+    second.close();
   }
 });
 
@@ -614,6 +698,261 @@ test("負例: 別の起動のサーバー宛ての結果と、数字でない ti
   }
 });
 
+test("script の実行: 依頼 → プラグインが取る → 結果を送ると、依頼した側に返り値が返り、書き出しの結果は動かない", async () => {
+  const { base, outDir, close } = await startServer();
+  try {
+    const polled = pluginNext(base);
+    const ran = runRequest(base, "return figma.currentPage.name;");
+    const next = await json<RunNext>(polled);
+    assert.equal(next.kind, "run");
+    assert.equal(next.seq, 1);
+    assert.equal(next.code, "return figma.currentPage.name;");
+    assert.equal(next.token, "t1");
+
+    assert.equal((await pluginRunResult(base, next, { ok: true, value: { name: "Page 1" } })).status, 200);
+    const res = await ran;
+    assert.equal(res.status, 200);
+    assert.deepEqual(await json(res), { seq: 1, value: { name: "Page 1" } });
+
+    const status = await json<StatusReply>(fetch(`${base}/status`));
+    assert.equal(status.version, 0);
+    assert.equal(existsSync(path.join(outDir, "status.json")), false);
+    const reply = await json<RequestReply>(fetch(`${base}/status?seq=1`));
+    assert.equal(reply.kind, "run");
+    assert.equal(reply.state, "done");
+    assert.deepEqual(reply.value, { name: "Page 1" });
+    assert.equal("code" in reply || "token" in reply, false, "依頼の様子にコードか合言葉が載った");
+
+    // 返り値の無い script は value が null
+    const again = pluginNext(base, `?server=${next.server}&after=1`);
+    const empty = runRequest(base, "figma.notify('x');");
+    await pluginRunResult(base, await json<RunNext>(again), { ok: true });
+    assert.deepEqual(await json(empty), { seq: 2, value: null });
+  } finally {
+    close();
+  }
+});
+
+test("script の実行: プラグインで失敗したら、依頼した側に 422 と理由が返る", async () => {
+  const { base, close } = await startServer();
+  try {
+    const polled = pluginNext(base);
+    const ran = runRequest(base, "return 1;", "", "wrong");
+    const next = await json<RunNext>(polled);
+    await pluginRunResult(base, next, { ok: false, error: "合言葉が違う" });
+    const res = await ran;
+    assert.equal(res.status, 422);
+    assert.deepEqual(await json(res), { seq: 1, error: "合言葉が違う" });
+    const reply = await json<RequestReply>(fetch(`${base}/status?seq=1`));
+    assert.equal(reply.state, "failed");
+    assert.equal(reply.error, "合言葉が違う");
+  } finally {
+    close();
+  }
+});
+
+test("負例: script の実行の依頼は、合言葉のヘッダかコードが無ければ積まずに 400 を返す", async () => {
+  const { base, close } = await startServer();
+  try {
+    const polled = pluginNext(base);
+    polled.catch(() => {});
+    const noToken = await fetch(`${base}/run?timeout=1`, { method: "POST", body: "return 1;" });
+    assert.equal(noToken.status, 400);
+    assert.match((await json<{ error: string }>(noToken)).error, /X-Run-Token/);
+    const noCode = await runRequest(base, "  \n", "?timeout=1");
+    assert.equal(noCode.status, 400);
+    assert.equal(await settleWithin(polled, 200), "pending", "断った依頼がプラグインに渡った");
+  } finally {
+    close();
+  }
+});
+
+test("走り直したプラグインには、渡し済みの script をもう一度渡さず、その依頼は abandoned と答える", async () => {
+  const { base, close } = await startServer();
+  try {
+    const polled = pluginNext(base);
+    const ran = runRequest(base, "figma.currentPage.selection[0].remove();", "?timeout=5");
+    ran.catch(() => {});
+    await json<RunNext>(polled);
+    const waiting = fetch(`${base}/status?seq=1`);
+    assert.equal(await settleWithin(waiting, 100), "pending");
+
+    // 走り直したプラグインはサーバーの id を知らない
+    const fresh = pluginNext(base);
+    fresh.catch(() => {});
+    assert.equal(await settleWithin(fresh, 200), "pending", "渡し済みの script をもう一度渡した");
+    const reply = await json<RequestReply>(waiting);
+    assert.equal(reply.state, "abandoned");
+
+    // そのあとに来た依頼は渡す
+    const exported = fetch(`${base}/export?timeout=5`, { method: "POST", body: "" });
+    exported.catch(() => {});
+    const next = await json<Next>(fresh);
+    assert.equal(next.seq, 2);
+    assert.equal(next.kind, "export");
+  } finally {
+    close();
+  }
+});
+
+test("最後の依頼が渡し済みの script なら、走り直したプラグインには最後の書き出しをやり直させ、script は渡し直さない", async () => {
+  const { base, close } = await startServer();
+  try {
+    const polled = pluginNext(base);
+    const exported = fetch(`${base}/export?timeout=5`, { method: "POST", body: '{"nodeIds":["1:2"]}' });
+    const first = await json<Next>(polled);
+    await pluginPost(base, "result", first, sampleZip());
+    await exported;
+    const again = pluginNext(base, `?server=${first.server}&after=1`);
+    const ran = runRequest(base, "return 1;", "?timeout=5");
+    await pluginRunResult(base, await json<RunNext>(again), { ok: true, value: 1 });
+    await ran;
+
+    // build で走り直したプラグインは、書き出しをやり直して status?after の待ちに結果を届ける
+    const fresh = await json<Next>(pluginNext(base));
+    assert.equal(fresh.seq, 1);
+    assert.equal(fresh.kind, "export");
+    const after = pluginNext(base, `?server=${fresh.server}&after=1`);
+    after.catch(() => {});
+    assert.equal(await settleWithin(after, 200), "pending", "書き出しのあとに渡し済みの script を渡した");
+  } finally {
+    close();
+  }
+});
+
+test("依頼した側が待つのをやめた script は、まだ渡していなければ取り消し、あとからも渡さない", async () => {
+  const { base, close } = await startServer();
+  try {
+    const polled = pluginNext(base);
+    const exported = fetch(`${base}/export?timeout=5`, { method: "POST", body: "" });
+    exported.catch(() => {});
+    const busy = await json<Next>(polled);
+
+    // 時間切れ (書き出しの後ろで待っているあいだに切れた)
+    const timedOut = await runRequest(base, "return 1;", "?timeout=0.2");
+    assert.equal(timedOut.status, 504);
+    const body = await json<{ seq: number; error: string }>(timedOut);
+    assert.equal(body.seq, 2);
+    assert.match(body.error, /取り消した/);
+    assert.equal((await json<RequestReply>(fetch(`${base}/status?seq=2`))).state, "cancelled");
+
+    // 接続が切れた (Bash の時間切れで curl が止められた)
+    const aborted = new AbortController();
+    runRequest(base, "return 2;", "?timeout=5").catch(() => {});
+    const dropped = fetch(`${base}/run?timeout=5`, {
+      method: "POST",
+      headers: { "X-Run-Token": "t1" },
+      body: "return 3;",
+      signal: aborted.signal,
+    });
+    dropped.catch(() => {});
+    await new Promise((resolve) => setTimeout(resolve, 50));
+    aborted.abort();
+    await new Promise((resolve) => setTimeout(resolve, 50));
+    assert.equal((await json<RequestReply>(fetch(`${base}/status?seq=4`))).state, "cancelled");
+
+    // 書き出しが終わったプラグインには、待っている #3 だけを渡す
+    await pluginPost(base, "result", busy, sampleZip());
+    const next = await json<RunNext>(pluginNext(base, `?server=${busy.server}&after=1`));
+    assert.equal(next.seq, 3);
+    const later = pluginNext(base, `?server=${busy.server}&after=3`);
+    later.catch(() => {});
+    assert.equal(await settleWithin(later, 200), "pending", "取り消した script を渡した");
+  } finally {
+    close();
+  }
+});
+
+test("走り直したプラグインには、まだ渡していない script は渡す", async () => {
+  const { base, close } = await startServer();
+  try {
+    const polled = pluginNext(base);
+    const exported = fetch(`${base}/export?timeout=5`, { method: "POST", body: "" });
+    exported.catch(() => {});
+    await json<Next>(polled);
+    const ran = runRequest(base, "return 1;", "?timeout=5");
+    ran.catch(() => {});
+    await new Promise((resolve) => setTimeout(resolve, 50));
+    const fresh = await json<RunNext>(pluginNext(base));
+    assert.equal(fresh.seq, 2);
+    assert.equal(fresh.kind, "run");
+    await pluginRunResult(base, fresh, { ok: true, value: 1 });
+    assert.deepEqual(await json(ran), { seq: 2, value: 1 });
+    // 渡したあと結果が返らなかった書き出しは、いままでどおり skipped
+    assert.equal((await json<RequestReply>(fetch(`${base}/status?seq=1`))).state, "skipped");
+  } finally {
+    close();
+  }
+});
+
+test("負例: 書き出しの依頼に script の結果を、script の依頼に書き出しの結果を送ると断る", async () => {
+  const { base, outDir, close } = await startServer();
+  try {
+    const polled = pluginNext(base);
+    const exported = fetch(`${base}/export?timeout=1`, { method: "POST", body: "" });
+    exported.catch(() => {});
+    const exportNext = await json<Next>(polled);
+    assert.equal((await pluginRunResult(base, exportNext, { ok: true, value: 1 })).status, 409);
+
+    const again = pluginNext(base, `?server=${exportNext.server}&after=1`);
+    const ran = runRequest(base, "return 1;", "?timeout=1");
+    ran.catch(() => {});
+    const runNext = await json<RunNext>(again);
+    assert.equal((await pluginPost(base, "result", runNext, sampleZip())).status, 409);
+    assert.equal((await pluginPost(base, "error", runNext, "x")).status, 409);
+    assert.equal(existsSync(path.join(outDir, "latest")), false);
+    const still = await fetch(`${base}/status?seq=2&timeout=0.2`);
+    assert.equal(still.status, 504);
+    assert.equal((await json<RequestReply>(still)).state, "processing");
+  } finally {
+    close();
+  }
+});
+
+test("GET /hello はプラグインの口で、dev サーバーの印を返す", async () => {
+  const { base, close } = await startServer();
+  try {
+    const res = await fetch(`${base}/hello`, { headers: PLUGIN });
+    assert.equal(res.status, 200);
+    assert.deepEqual(await json(res), { app: DEV_SERVER_APP });
+    assert.equal((await fetch(`${base}/hello`, { headers: { Origin: "https://example.com" } })).status, 403);
+  } finally {
+    close();
+  }
+});
+
+test("負例: GET /hello を聞いただけでは、プラグインが繋がっているとは見ない", async () => {
+  const { base, close } = await startServer();
+  try {
+    // ポートを探す curl も、プラグインの UI の探索も /hello を聞く。どちらも依頼を待つ相手ではない
+    assert.equal((await fetch(`${base}/hello`)).status, 200);
+    assert.equal((await fetch(`${base}/hello`, { headers: PLUGIN })).status, 200);
+    const res = await fetch(`${base}/export?timeout=1`, { method: "POST", body: "" });
+    assert.equal(res.status, 503);
+  } finally {
+    close();
+  }
+});
+
+test("負例: 決着した script の依頼に、あとから届いた結果は受けず、最初の結果を残す", async () => {
+  const { base, close } = await startServer();
+  try {
+    const polled = pluginNext(base);
+    const ran = runRequest(base, "return 1;");
+    const next = await json<RunNext>(polled);
+    assert.equal((await pluginRunResult(base, next, { ok: true, value: 1 })).status, 200);
+    assert.deepEqual(await json(ran), { seq: 1, value: 1 });
+    // 1 回目の応答を受け取れなかった UI が、送信の失敗として送り直した
+    const again = await pluginRunResult(base, next, { ok: false, error: "script は実行したが、結果の送信に失敗" });
+    assert.equal(again.status, 409);
+    const reply = await json<RequestReply>(fetch(`${base}/status?seq=1`));
+    assert.equal(reply.state, "done");
+    assert.equal(reply.value, 1);
+  } finally {
+    close();
+  }
+});
+
 test("負例: ブラウザのサイトからの送信と、AI 側の口への Origin 付きの送信は、依頼を受けずに断る", async () => {
   const { base, port, outDir, close } = await startServer();
   try {
@@ -627,6 +966,12 @@ test("負例: ブラウザのサイトからの送信と、AI 側の口への Or
         body: "",
       });
       assert.equal(res.status, 403, `Origin ${origin} の /export を受けた`);
+      const run = await fetch(`${base}/run?timeout=1`, {
+        method: "POST",
+        headers: { Origin: origin, "X-Run-Token": "t1" },
+        body: "return 1;",
+      });
+      assert.equal(run.status, 403, `Origin ${origin} の /run を受けた`);
       const status = await fetch(`${base}/status`, { headers: { Origin: origin } });
       assert.equal(status.status, 403, `Origin ${origin} の /status を返した`);
     }
@@ -654,17 +999,21 @@ test("負例: ブラウザのサイトからの送信と、AI 側の口への Or
   }
 });
 
-test("ポートの値はサーバー・manifest の devAllowedDomains・ui.html でそろっている", () => {
+test("候補のポートと dev サーバーの印は、サーバー・manifest の devAllowedDomains・ui.html でそろっている", () => {
   const manifest = JSON.parse(
     readFileSync(path.join(root, "plugins/structure-dump/manifest.json"), "utf8")
   ) as { networkAccess: { allowedDomains: string[]; devAllowedDomains?: string[] } };
   assert.deepEqual(manifest.networkAccess.allowedDomains, ["none"]);
-  assert.deepEqual(manifest.networkAccess.devAllowedDomains, [`http://localhost:${DEV_PORT}/`]);
+  assert.deepEqual(
+    manifest.networkAccess.devAllowedDomains,
+    DEV_PORTS.map((port) => `http://localhost:${port}/`)
+  );
   const ui = readFileSync(path.join(root, "plugins/structure-dump/src/ui.html"), "utf8");
   assert.ok(
-    ui.includes(`const DEV_SERVER = "http://localhost:${DEV_PORT}";`),
-    "ui.html の DEV_SERVER が DEV_PORT と違う"
+    ui.includes(`const DEV_PORTS = [${DEV_PORTS.join(", ")}];`),
+    "ui.html の DEV_PORTS がサーバーの DEV_PORTS と違う"
   );
+  assert.ok(ui.includes(`const DEV_SERVER_APP = "${DEV_SERVER_APP}";`), "ui.html の DEV_SERVER_APP が違う");
 });
 
 test("配る manifest からは devAllowedDomains と dev- のコマンドが外れ、ほかは残る", () => {
