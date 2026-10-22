@@ -168,6 +168,77 @@ test("依頼の本文: 空なら選択、nodeIds と scale を受け、形が違
   assert.throws(() => parseExportBody("[]"), /オブジェクト/);
 });
 
+test("依頼の本文: images は both・none・only を受け、省けば欄を作らず、ほかの値は断る", () => {
+  for (const images of ["both", "none", "only"] as const) {
+    assert.deepEqual(parseExportBody(JSON.stringify({ images })), { images });
+  }
+  assert.deepEqual(parseExportBody('{"nodeIds":["1:2"],"images":"none","scale":1}'), {
+    nodeIds: ["1:2"],
+    scale: 1,
+    images: "none",
+  });
+  assert.equal("images" in parseExportBody('{"nodeIds":["1:2"]}'), false);
+  for (const bad of ['"png"', '"None"', '""', "1", "null", "true", '["none"]']) {
+    assert.throws(
+      () => parseExportBody(`{"images":${bad}}`),
+      /^Error: images は both・none・only のどれかにする \(省けば both\)$/,
+      `images: ${bad} を受けた`
+    );
+  }
+});
+
+test("images の付いた書き出しの依頼は、プラグインへそのまま渡り、処理中・結果・依頼の様子にモードが載る", async () => {
+  const { base, close } = await startServer();
+  try {
+    const polled = pluginNext(base);
+    const exported = fetch(`${base}/export?timeout=5`, {
+      method: "POST",
+      body: JSON.stringify({ nodeIds: ["1:2"], images: "only" }),
+    });
+    const next = await json<Next>(polled);
+    assert.equal(next.images, "only");
+    assert.deepEqual(next.nodeIds, ["1:2"]);
+
+    const { plugin } = await json<StatusReply>(fetch(`${base}/status`));
+    assert.equal(plugin.processing?.images, "only");
+    const processing = await json<RequestReply>(fetch(`${base}/status?seq=1&timeout=0.1`));
+    assert.equal(processing.state, "processing");
+    assert.equal(processing.images, "only");
+
+    await pluginPost(base, "result", next, sampleZip());
+    const status = await json<DevStatus>(exported);
+    assert.equal(status.images, "only");
+    assert.equal((await json<RequestReply>(fetch(`${base}/status?seq=1`))).images, "only");
+
+    // 省いた依頼は images を付けずに渡し (プラグインは無ければ both と読む)、モードも載せない
+    const again = pluginNext(base, `?server=${next.server}&after=1`);
+    const plain = fetch(`${base}/export?timeout=5`, { method: "POST", body: "" });
+    const plainNext = await json<Next>(again);
+    assert.equal("images" in plainNext, false);
+    assert.equal((await json<StatusReply>(fetch(`${base}/status`))).plugin.processing?.images, undefined);
+    await pluginPost(base, "result", plainNext, sampleZip());
+    assert.equal("images" in (await json<DevStatus>(plain)), false);
+  } finally {
+    close();
+  }
+});
+
+test("負例: images が both・none・only でない書き出しの依頼は、積まずに 400 と理由を返す", async () => {
+  const { base, close } = await startServer();
+  try {
+    const polled = pluginNext(base);
+    polled.catch(() => {});
+    for (const bad of ['"png"', "null", "2"]) {
+      const res = await fetch(`${base}/export?timeout=1`, { method: "POST", body: `{"images":${bad}}` });
+      assert.equal(res.status, 400, `images: ${bad} を受けた`);
+      assert.equal((await json<{ error: string }>(res)).error, "images は both・none・only のどれかにする (省けば both)");
+    }
+    assert.equal(await settleWithin(polled, 200), "pending", "断った依頼がプラグインに渡った");
+  } finally {
+    close();
+  }
+});
+
 test("依頼 → プラグインが取る → 結果を送ると、依頼した側に展開先が返る", async () => {
   const { base, outDir, close } = await startServer();
   try {
