@@ -55,7 +55,7 @@ Figma のログインや MCP の認証は要らない (script の実行だけ合
    npm run dev:server
    ```
 
-4. Figma で **プラグイン** → **開発** → **マニフェストからプラグインをインポート…** を選び、`plugins/dev-loop/manifest.json` を選ぶ (初回だけ)。
+4. Figma で **プラグイン** → **開発** → **マニフェストからプラグインをインポート…** から、`plugins/dev-loop/manifest.json` を取り込む ([共通手順](../../README.md#figma-への取り込み-共通手順))。
 5. 対象のファイルを開き、Dev Loop を起動して開いたままにする。
 6. Dev Loop の画面の「AI に渡す文をコピー」を押し、AI のセッションに貼る。
    渡す文には、dev サーバーの URL・合言葉・この README のファイルパスが入る。

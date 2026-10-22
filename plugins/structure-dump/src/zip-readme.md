@@ -104,7 +104,7 @@ GROUP の子の `x` / `y` は GROUP ではなく外側の container に対する
   はみ出しがあったフレームは `meta.warnings` に出て、はみ出した部分のノードは json にある。
 - `meta.images`: 構造と画像のどちらを入れたか。`both` (構造と画像)・`none` (構造だけ)・`only` (画像だけ) のどれか。
   Structure Dump のメニューからの書き出しは常に `both`。
-  `none` / `only` は、開発用プラグイン Dev Loop への依頼で指定したときだけ出る。
+  `none` / `only` は、Dev Loop への依頼で指定したときだけ出る。
   - `none`: 画面フレームの png・`assets/` の画像・`assets/svg/` の SVG が無い。
     `index.json` の画面フレームに `png` キーが無く、`assets` は空。ノードに `svg` キーが無い。
     ノードの `fills[].imageRef` は残るが、`assets` では引けない (取得の失敗ではないので `meta.warnings` にも出ない)。
