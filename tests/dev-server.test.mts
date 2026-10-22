@@ -22,6 +22,7 @@ import {
   type DevStatus,
   type DumpRequest,
   entryPath,
+  IMAGE_MODES,
   listenOnCandidatePorts,
   listenOnHosts,
   notStartedMessage,
@@ -37,6 +38,9 @@ import { releaseManifest } from "../scripts/release-lib.mts";
 import * as zipDist from "../plugins/structure-dump/dist/zip.mjs";
 const { buildZip, utf8Encode } =
   zipDist as unknown as typeof import("../plugins/structure-dump/src/zip.ts");
+import * as planDist from "../plugins/structure-dump/dist/plan.mjs";
+const { IMAGES_MODES, parseImagesMode } =
+  planDist as unknown as typeof import("../plugins/structure-dump/src/plan.ts");
 
 type Next = DumpRequest & { server: string };
 type RunNext = RunRequest & { server: string };
@@ -166,6 +170,164 @@ test("依頼の本文: 空なら選択、nodeIds と scale を受け、形が違
   assert.throws(() => parseExportBody('{"scale":3}'), /scale/);
   assert.throws(() => parseExportBody('{"node":"1:2"}'), /知らないキー: node/);
   assert.throws(() => parseExportBody("[]"), /オブジェクト/);
+});
+
+test("依頼の本文: images は both・none・only を受け、省けば欄を作らず、ほかの値は断る", () => {
+  for (const images of ["both", "none", "only"] as const) {
+    assert.deepEqual(parseExportBody(JSON.stringify({ images })), { images });
+  }
+  assert.deepEqual(parseExportBody('{"nodeIds":["1:2"],"images":"none","scale":1}'), {
+    nodeIds: ["1:2"],
+    scale: 1,
+    images: "none",
+  });
+  assert.equal("images" in parseExportBody('{"nodeIds":["1:2"]}'), false);
+  for (const bad of ['"png"', '"None"', '""', "1", "null", "true", '["none"]']) {
+    assert.throws(
+      () => parseExportBody(`{"images":${bad}}`),
+      /^Error: images は both・none・only のどれかにする \(省けば both\)$/,
+      `images: ${bad} を受けた`
+    );
+  }
+});
+
+test("images の 3 値は、dev サーバーとプラグイン (Structure Dump の plan) で同じ集合で、同じ値を受けて同じ値を断る", () => {
+  assert.deepEqual([...IMAGE_MODES].sort(), [...IMAGES_MODES].sort());
+  const candidates = [...new Set([...IMAGE_MODES, ...IMAGES_MODES]), "png", "None", "", 1, null, true, ["none"]];
+  for (const value of candidates) {
+    const serverAccepts = (() => {
+      try {
+        parseExportBody(JSON.stringify({ images: value }));
+        return true;
+      } catch {
+        return false;
+      }
+    })();
+    assert.equal(serverAccepts, parseImagesMode(value) !== null, `images: ${JSON.stringify(value)} の扱いが食い違う`);
+  }
+});
+
+test("images の付いた書き出しの依頼は、プラグインへそのまま渡り、処理中・結果・依頼の様子にモードが載る", async () => {
+  const { base, close } = await startServer();
+  try {
+    const polled = pluginNext(base);
+    const exported = fetch(`${base}/export?timeout=5`, {
+      method: "POST",
+      body: JSON.stringify({ nodeIds: ["1:2"], images: "only" }),
+    });
+    const next = await json<Next>(polled);
+    assert.equal(next.images, "only");
+    assert.deepEqual(next.nodeIds, ["1:2"]);
+
+    const { plugin } = await json<StatusReply>(fetch(`${base}/status`));
+    assert.equal(plugin.processing?.images, "only");
+    const processing = await json<RequestReply>(fetch(`${base}/status?seq=1&timeout=0.1`));
+    assert.equal(processing.state, "processing");
+    assert.equal(processing.images, "only");
+
+    await pluginPost(base, "result", next, sampleZip());
+    const status = await json<DevStatus>(exported);
+    assert.equal(status.images, "only");
+    assert.equal((await json<RequestReply>(fetch(`${base}/status?seq=1`))).images, "only");
+
+    // 省いた依頼は images を付けずに渡し (プラグインは無ければ both と読む)、モードも載せない
+    const again = pluginNext(base, `?server=${next.server}&after=1`);
+    const plain = fetch(`${base}/export?timeout=5`, { method: "POST", body: "" });
+    const plainNext = await json<Next>(again);
+    assert.equal("images" in plainNext, false);
+    const plainProcessing = (await json<StatusReply>(fetch(`${base}/status`))).plugin.processing;
+    assert.deepEqual([plainProcessing?.seq, plainProcessing?.kind], [2, "export"]);
+    assert.equal("images" in (plainProcessing as object), false);
+    await pluginPost(base, "result", plainNext, sampleZip());
+    assert.equal("images" in (await json<DevStatus>(plain)), false);
+  } finally {
+    close();
+  }
+});
+
+test("images が none の依頼は、プラグインへ none のまま渡り、結果の status.json と GET /status にモードが載る", async () => {
+  const { base, outDir, close } = await startServer();
+  try {
+    const polled = pluginNext(base);
+    const exported = fetch(`${base}/export?timeout=5`, {
+      method: "POST",
+      body: JSON.stringify({ nodeIds: ["1:2"], images: "none" }),
+    });
+    const next = await json<Next>(polled);
+    assert.equal(next.images, "none");
+    await pluginPost(base, "result", next, sampleZip());
+    assert.equal((await exported).status, 200);
+    assert.equal(JSON.parse(readFileSync(path.join(outDir, "status.json"), "utf8")).images, "none");
+    assert.equal((await json<StatusReply>(fetch(`${base}/status`))).images, "none");
+  } finally {
+    close();
+  }
+});
+
+test("images に both を書いた依頼は、プラグインへ both のまま渡り、処理中・結果の status にはモードを載せない", async () => {
+  const { base, outDir, close } = await startServer();
+  try {
+    const polled = pluginNext(base);
+    const exported = fetch(`${base}/export?timeout=5`, {
+      method: "POST",
+      body: JSON.stringify({ nodeIds: ["1:2"], images: "both" }),
+    });
+    const next = await json<Next>(polled);
+    assert.equal(next.images, "both");
+
+    const processing = (await json<StatusReply>(fetch(`${base}/status`))).plugin.processing;
+    assert.deepEqual([processing?.seq, processing?.kind], [1, "export"]);
+    assert.equal("images" in (processing as object), false);
+    const pendingReply = await json<RequestReply>(fetch(`${base}/status?seq=1&timeout=0.1`));
+    assert.equal(pendingReply.state, "processing");
+    assert.equal("images" in pendingReply, false);
+
+    await pluginPost(base, "result", next, sampleZip());
+    assert.equal("images" in (await json<DevStatus>(exported)), false);
+    assert.equal("images" in JSON.parse(readFileSync(path.join(outDir, "status.json"), "utf8")), false);
+    assert.equal("images" in (await json<StatusReply>(fetch(`${base}/status`))), false);
+    assert.equal("images" in (await json<RequestReply>(fetch(`${base}/status?seq=1`))), false);
+  } finally {
+    close();
+  }
+});
+
+test("images が only の依頼が失敗しても、status.json・GET /status・status?seq にモードが載る", async () => {
+  const { base, outDir, close } = await startServer();
+  try {
+    const polled = pluginNext(base);
+    const exported = fetch(`${base}/export?timeout=5`, {
+      method: "POST",
+      body: JSON.stringify({ nodeIds: ["9:9"], images: "only" }),
+    });
+    await pluginPost(base, "error", await json<Next>(polled), "ノードが見つからない: 9:9");
+    const res = await exported;
+    assert.equal(res.status, 422);
+    assert.equal((await json<DevStatus>(res)).images, "only");
+    const stored = JSON.parse(readFileSync(path.join(outDir, "status.json"), "utf8"));
+    assert.deepEqual([stored.error, stored.images], ["ノードが見つからない: 9:9", "only"]);
+    assert.equal((await json<StatusReply>(fetch(`${base}/status`))).images, "only");
+    const reply = await json<RequestReply>(fetch(`${base}/status?seq=1`));
+    assert.deepEqual([reply.state, reply.images], ["failed", "only"]);
+  } finally {
+    close();
+  }
+});
+
+test("負例: images が both・none・only でない書き出しの依頼は、積まずに 400 と理由を返す", async () => {
+  const { base, close } = await startServer();
+  try {
+    const polled = pluginNext(base);
+    polled.catch(() => {});
+    for (const bad of ['"png"', "null", "2"]) {
+      const res = await fetch(`${base}/export?timeout=1`, { method: "POST", body: `{"images":${bad}}` });
+      assert.equal(res.status, 400, `images: ${bad} を受けた`);
+      assert.equal((await json<{ error: string }>(res)).error, "images は both・none・only のどれかにする (省けば both)");
+    }
+    assert.equal(await settleWithin(polled, 200), "pending", "断った依頼がプラグインに渡った");
+  } finally {
+    close();
+  }
 });
 
 test("依頼 → プラグインが取る → 結果を送ると、依頼した側に展開先が返る", async () => {

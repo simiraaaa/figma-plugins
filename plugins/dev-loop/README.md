@@ -43,21 +43,36 @@ Figma への取り込みは[リポルート README の共通手順](../../README
    curl -s -X POST localhost:47717/export -d '{"nodeIds":["9194:16583"]}'
    curl -s -X POST localhost:47717/export -d '{"nodeIds":["0:1"],"scale":1}'  # ページの id ならページ直下
    curl -s -X POST localhost:47717/export                                     # Figma で開いているページの選択
+   curl -s -X POST localhost:47717/export -d '{"nodeIds":["9194:16583"],"images":"none"}'  # 構造だけ (画像を省く)
+   curl -s -X POST localhost:47717/export -d '{"nodeIds":["9194:16583"],"images":"only"}'  # 画像だけ
    ```
 
    - 結果は `<置き場所>/results/<version>/` に展開し、`<置き場所>/latest` がいちばん新しく成功した結果を指す。
      中身は Structure Dump の [ZIP の中身](../structure-dump/README.md#zip-の中身-schema-dump-v3)と同じで、まず `README.md` を読む。
      `version` と依頼の番号 `seq` は、dev サーバーを起動し直しても前回の続きから振る。結果は新しいほうから 20 個残す。
+   - 本文の `images` で、書き出す中身を選べる。省くと `both` と同じ。
+     - `both`: 構造と画像の両方。Structure Dump のメニューから書き出したものと同じ。
+     - `none`: 構造だけ。画面フレームの PNG・ベクターの SVG (`assets/svg/`)・画像の素材 (`assets/`) を省く。
+       構造の json・`_section.json`・`styles.json`・`variables.json`・`README.md`・`index.json` は出す。
+     - `only`: 画像だけ。画面フレームの PNG と画像の素材 (`assets/`) だけを出す。
+       構造の json・`_section.json`・`styles.json`・`variables.json`・SVG は出さない。
+       `index.json` (画面フレームの一覧) と `README.md` は残す。
+     - どれで書き出したかは、`index.json` の `meta.images` に入る。
+     - 3 つ以外の値 (別の文字列・数値・`null` など) は、積まずに HTTP 400 で断る。
+     - Dev Loop へ渡す依頼には、本文に `images` を書いたときだけ `images` が入る。Dev Loop は、無ければ `both` と読む。
    - 書き出せなかったとき (ノードが見つからない・すべて非表示など) は HTTP 422 で `error` に理由が入る。
    - Dev Loop が前の依頼を書き出しているあいだに来た依頼は、断らずに待たせ、前の依頼が終わってから順に書き出す。
      書き出し中の Dev Loop からは何も届かない (重いページでは Figma ごと固まる) が、dev サーバーは、渡した依頼の結果がまだ返っていなければ書き出し中と見る。
      Figma のウィンドウがほかのアプリの裏にあると、書き出しが大きく遅れ、止まったように見えることもある (前に出すと進む)。
      画面がスリープかロックしているあいだも書き出しは止まり、画面を起こすと進む。
+     スリープ中に進んだ書き出しが、警告 (「変数のモードを引けない」など) つきで欠けた結果になったことが 1 回ある。
+     結果の `meta.warnings` (応答の `warnings`) に、同じノードの書き出しで普段は出ない警告があれば、画面を起こしたまま書き出し直す。
+     非表示のため除外したノードのように、毎回出る警告は書き出し直しても消えない。
    - 書き出し中の依頼が無く、Dev Loop から 35 秒何も届いていなければ、繋がっていないと見て、依頼を積まずにすぐ HTTP 503 を返す。
    - 300 秒以内に結果が来なければ HTTP 504 (`?timeout=<秒>` で変えられる)。
      Claude Code の Bash ツールは既定で 120 秒で切れるので、大きな書き出しでは Bash の timeout も延ばす。
    - 503 と 504 の本文には、Dev Loop の様子 (`plugin`) が入る。
-     `plugin.processing` は Dev Loop へ渡してまだ結果が返っていない依頼 (`seq`・種類 `kind` (書き出しは `export`、script は `run`)・`nodeIds`・渡してからの秒数 `elapsedSeconds`) で、`plugin.lastSeenAt` は最後に Dev Loop から何か届いた時刻。
+     `plugin.processing` は Dev Loop へ渡してまだ結果が返っていない依頼 (`seq`・種類 `kind` (書き出しは `export`、script は `run`)・`nodeIds`・`images` (`none` か `only` のときだけ)・渡してからの秒数 `elapsedSeconds`) で、`plugin.lastSeenAt` は最後に Dev Loop から何か届いた時刻。
    - 504 になっても依頼は消えない。送り直さずに、504 の `seq` で `GET /status?seq=<seq>` を呼んで待つ。
      この呼び出しは、その依頼が決着するまで待ち、`state` で今の様子を返す。
      Bash の timeout も延ばす。
@@ -72,7 +87,7 @@ Figma への取り込みは[リポルート README の共通手順](../../README
        `queued` で `plugin.processing` が無く、`plugin.lastSeenAt` が 35 秒より前なら、Dev Loop が開いていない。人か computer use に Dev Loop を開いてもらう。
        `processing` のまま `plugin.processing.elapsedSeconds` が伸び続けるときは、Figma が前に出ているか、Dev Loop が開いているかを人か computer use で確かめる (書き出しの途中で Dev Loop を閉じても `processing` のまま残る)。
      - HTTP 404: この起動の dev サーバーが受けていない依頼 (dev サーバーを起動し直す前の依頼など)。送り直す。
-   - `<置き場所>/status.json` と `GET /status` は、最後に受けた結果 (`version`・`seq`・`dir`・`fileName`・`warnings`・`error`) を返す。
+   - `<置き場所>/status.json` と `GET /status` は、最後に受けた結果 (`version`・`seq`・`images` (`none` か `only` のときだけ)・`dir`・`fileName`・`warnings`・`error`) を返す。
      `GET /status` には `plugin` と、結果の置き場所 `outDir` も入る。
      `GET /status?after=<version>` は、それより新しい結果が届くまで待つ (どの依頼の結果でも返る)。
      300 秒待っても届かなければ HTTP 504 で、待つ長さは `?timeout=<秒>` で変えられる。

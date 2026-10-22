@@ -22,7 +22,9 @@ const {
   buildIndex,
   buildSectionJson,
   dropDescendants,
+  dumpContents,
   emptyMessage,
+  parseImagesMode,
   longPaths,
   MAX_ZIP_PATH_CHARS,
   newExportOutput,
@@ -213,7 +215,7 @@ test("ネストしたセクションでも INSTANCE・COMPONENT・GROUP は画�
 
   const index = buildIndex(
     plan,
-    { fileName: "f", pluginVersion: "0", exportedAt: "t", scope: "s", screenshotScale: 2, warnings: [] },
+    { fileName: "f", pluginVersion: "0", exportedAt: "t", scope: "s", screenshotScale: 2, images: "both", warnings: [] },
     new Set(allFrames(plan).map((f) => f.png)),
     new Map(),
     new Map()
@@ -427,6 +429,7 @@ test("index.json・画面フレーム json・_section.json の形", () => {
     exportedAt: "2026-10-08T00:00:00.000Z",
     scope: "page:Page 1",
     screenshotScale: 2,
+    images: "both" as const,
     warnings: ["スクリーンショット失敗: Broken (2:2): x"],
   };
 
@@ -719,7 +722,7 @@ test("recordAsset: 成功は assets 対応表に入り、失敗と画像なし�
   page([shown]);
   const index = buildIndex(
     planOf([shown]),
-    { fileName: "f", pluginVersion: "0", exportedAt: "t", scope: "s", screenshotScale: 2, warnings: out.warnings },
+    { fileName: "f", pluginVersion: "0", exportedAt: "t", scope: "s", screenshotScale: 2, images: "both", warnings: out.warnings },
     out.writtenPngs,
     out.writtenAssets,
     new Map()
@@ -774,7 +777,7 @@ test("componentSetName だけのフレームは、index.json に componentName �
   const component = frameComponentOf({ componentSetName: "Card" });
   const index = buildIndex(
     plan,
-    { fileName: "f", pluginVersion: "0", exportedAt: "t", scope: "s", screenshotScale: 2, warnings: [] },
+    { fileName: "f", pluginVersion: "0", exportedAt: "t", scope: "s", screenshotScale: 2, images: "both", warnings: [] },
     new Set(),
     new Map(),
     new Map(component ? [["5:1", component]] : [])
@@ -794,4 +797,134 @@ test("枠の外への描画の判定: 描画範囲が枠を少しでも越えた
   assert.equal(overflowsBounds(box, { x: 110, y: 210, width: 100, height: 40 }), false);
   assert.equal(overflowsBounds(box, null), false);
   assert.equal(overflowsBounds(null, box), false);
+});
+
+test("画像の有無: both は全部、none は構造だけ、only は png と画像の素材だけを出す", () => {
+  assert.deepEqual(dumpContents("both"), { structure: true, screenshots: true, svgs: true, assets: true });
+  assert.deepEqual(dumpContents("none"), { structure: true, screenshots: false, svgs: false, assets: false });
+  assert.deepEqual(dumpContents("only"), { structure: false, screenshots: true, svgs: false, assets: true });
+});
+
+test("依頼の images: 省略は both、3 値はそのまま、それ以外は null", () => {
+  assert.equal(parseImagesMode(undefined), "both");
+  assert.equal(parseImagesMode("both"), "both");
+  assert.equal(parseImagesMode("none"), "none");
+  assert.equal(parseImagesMode("only"), "only");
+  for (const bad of ["NONE", "", "images", null, 1, true, ["none"], { mode: "none" }]) {
+    assert.equal(parseImagesMode(bad), null, JSON.stringify(bad));
+  }
+});
+
+function modeFixture() {
+  const p = page([
+    section("m:1", "Flow", {
+      w: 2000,
+      h: 1000,
+      children: [
+        frame("m:2", "Home", { w: 390, h: 844 }),
+        node("TEXT", "m:3", "memo", { w: 10, h: 10, y: 900 }),
+      ],
+    }),
+    frame("m:4", "Loose", { w: 100, h: 50, x: 3000 }),
+  ]);
+  const plan = planOf(p.children);
+  const meta = (images: "both" | "none" | "only") => ({
+    fileName: "f",
+    pluginVersion: "0",
+    exportedAt: "t",
+    scope: "s",
+    screenshotScale: 2,
+    images,
+    warnings: [],
+  });
+  const pngs = new Set(allFrames(plan).map((f) => f.png));
+  const assets = new Map([["abc", "assets/abc.png"]]);
+  const components = new Map([
+    ["m:2", { componentName: "Property 1=Default", componentSetName: "Card" }],
+    ["m:4", { componentName: "Button" }],
+  ]);
+  return { plan, meta, pngs, assets, components };
+}
+
+/** 画面フレームの由来のコンポーネントは、どのモードでも同じに読める */
+function assertComponentsKept(home: Record<string, unknown>, loose: Record<string, unknown>) {
+  assert.deepEqual(
+    [home, loose].map((f) => [f.componentName, f.componentSetName]),
+    [
+      ["Property 1=Default", "Card"],
+      ["Button", undefined],
+    ]
+  );
+}
+
+test("index.json (images: only): 画面フレームは id・name・png・大きさが読め、json と sectionJson は指さない", () => {
+  const { plan, meta, pngs, assets, components } = modeFixture();
+  const index = buildIndex(plan, meta("only"), pngs, assets, components);
+  assert.equal((index.meta as { images: string }).images, "only");
+  const [flow] = index.sections as Record<string, unknown>[];
+  assert.equal("sectionJson" in flow, false, "only なのに _section.json を指した");
+  const [home] = flow.frames as Record<string, unknown>[];
+  const [loose] = index.frames as Record<string, unknown>[];
+  for (const entry of [home, loose]) {
+    assert.equal("json" in entry, false, "only なのに画面フレームの json を指した");
+  }
+  assert.deepEqual(
+    [home, loose].map((f) => [f.id, f.name, f.png, f.width, f.height]),
+    [
+      ["m:2", "Home", "Flow.m-1/Home.m-2.png", 390, 844],
+      ["m:4", "Loose", "Loose.m-4.png", 100, 50],
+    ]
+  );
+  assert.deepEqual(index.assets, { abc: "assets/abc.png" });
+  assertComponentsKept(home, loose);
+});
+
+test("index.json (images: none): json と sectionJson は指し、png と assets は書き出し済みの集合があっても指さない", () => {
+  const { plan, meta, pngs, assets, components } = modeFixture();
+  const index = buildIndex(plan, meta("none"), pngs, assets, components);
+  assert.equal((index.meta as { images: string }).images, "none");
+  const [flow] = index.sections as Record<string, unknown>[];
+  assert.equal(flow.sectionJson, "Flow.m-1/_section.json");
+  const [home] = flow.frames as Record<string, unknown>[];
+  const [loose] = index.frames as Record<string, unknown>[];
+  assert.deepEqual([home.json, loose.json], ["Flow.m-1/Home.m-2.json", "Loose.m-4.json"]);
+  for (const entry of [home, loose]) {
+    assert.equal("png" in entry, false, "none なのに png を指した");
+  }
+  assert.deepEqual(index.assets, {});
+  assertComponentsKept(home, loose);
+});
+
+test("index.json (images: both): meta.images は both で、png と json を両方指す", () => {
+  const { plan, meta, pngs, assets, components } = modeFixture();
+  const index = buildIndex(plan, meta("both"), pngs, assets, components);
+  assert.equal((index.meta as { images: string }).images, "both");
+  const [flow] = index.sections as Record<string, unknown>[];
+  const [home] = flow.frames as Record<string, unknown>[];
+  const [loose] = index.frames as Record<string, unknown>[];
+  assert.deepEqual([loose.png, loose.json], ["Loose.m-4.png", "Loose.m-4.json"]);
+  assert.deepEqual(index.assets, { abc: "assets/abc.png" });
+  assertComponentsKept(home, loose);
+});
+
+test("longPaths: 出さないファイルのパスは数えない (only は json、none は png)", () => {
+  const longName = "い".repeat(40);
+  const top = section("n:1", longName, {
+    w: 1000,
+    h: 1000,
+    children: [frame("n:2", longName, { w: 390, h: 844 }), node("TEXT", "n:3", "memo", { w: 10, h: 10 })],
+  });
+  const p = page([top]);
+  const plan = planOf(p.children);
+  const dir = `${longName}.n-1`;
+  const paths = (images: "both" | "none" | "only") =>
+    longPaths(plan, 40, dumpContents(images)).map((l) => l.path);
+  assert.deepEqual(paths("both"), [
+    dir,
+    `${dir}/${longName}.n-2.png`,
+    `${dir}/${longName}.n-2.json`,
+    `${dir}/_section.json`,
+  ]);
+  assert.deepEqual(paths("only"), [dir, `${dir}/${longName}.n-2.png`]);
+  assert.deepEqual(paths("none"), [dir, `${dir}/${longName}.n-2.json`, `${dir}/_section.json`]);
 });
