@@ -181,9 +181,12 @@ async function devSendRun(request, body) {
   try {
     await devPost("run-result", request, body);
   } catch (e) {
-    // 本体はもう script を実行し終えている。依頼側が送り直して書き換えを二重にかけないよう、実行したことを書く
+    // 本体の結果が示す「実行したかどうか」を残して送り直す (依頼側はそれで送り直してよいかを決める)
     if (e.httpStatus === undefined) {
-      const error = `script は実行したが、結果の送信に失敗 (書き換えは残っている): ${failureDetail(e)}`;
+      const result = JSON.parse(body);
+      const error = result.ok
+        ? `script は実行したが、結果の送信に失敗 (書き換えは残っている): ${failureDetail(e)}`
+        : `${result.error} (結果の送信にも一度失敗した: ${failureDetail(e)})`;
       await devPost("run-result", request, JSON.stringify({ ok: false, error }));
     }
     throw e;

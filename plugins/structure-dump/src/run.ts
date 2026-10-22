@@ -25,7 +25,11 @@ type AsyncFunctionConstructor = new (...args: string[]) => (...args: unknown[]) 
 const AsyncFunction = Object.getPrototypeOf(async function () {}).constructor as AsyncFunctionConstructor;
 
 function errorText(e: unknown): string {
-  return e instanceof Error ? `${e.name}: ${e.message}` : String(e);
+  try {
+    return e instanceof Error ? `${e.name}: ${e.message}` : String(e);
+  } catch {
+    return "(投げた値を文字列にできない)";
+  }
 }
 
 function failure(error: string): string {

@@ -47,6 +47,8 @@ test("負例: 合言葉が違う・まだ無いときは、コードを実行せ
 test("負例: 例外と構文エラーは、理由つきの失敗にする", async () => {
   assert.match(errorOf(await run("throw new Error('boom');")), /途中で例外.*書き換えは残っている.*boom/);
   assert.match(errorOf(await run("return {")), /読めない.*実行していない.*SyntaxError/);
+  // 文字列にできない値 (toString を持たないオブジェクト) を投げても、結果を返す (返さないとプラグインの待ちが止まる)
+  assert.match(errorOf(await run("throw Object.create(null);")), /途中で例外/);
 });
 
 test("負例: JSON にできない返り値と、大きすぎる返り値は失敗にする", async () => {
