@@ -34,7 +34,6 @@ const {
   frameComponentOf,
   overflowsBounds,
   SCREENSHOT_SCALE_BY_COMMAND,
-  DEV_LOOP_COMMAND,
   screenshotScaleFor,
 } = planDist as unknown as typeof import("../plugins/structure-dump/src/plan.ts");
 
@@ -747,14 +746,14 @@ test("スクリーンショットの倍率はメニューのコマンドで決�
   assert.equal(screenshotScaleFor(""), 2);
 });
 
-test("manifest のメニューのコマンドは、倍率の対応表と開発ループのコマンドを合わせた集合", () => {
+test("manifest のメニューのコマンドは、倍率の対応表と同じ集合", () => {
   const root = path.resolve(path.dirname(fileURLToPath(import.meta.url)), "..");
   const manifest = JSON.parse(
     readFileSync(path.join(root, "plugins/structure-dump/manifest.json"), "utf8")
   ) as { menu?: { command: string }[] };
   assert.deepEqual(
     (manifest.menu ?? []).map((m) => m.command).sort(),
-    [...Object.keys(SCREENSHOT_SCALE_BY_COMMAND), DEV_LOOP_COMMAND].sort()
+    Object.keys(SCREENSHOT_SCALE_BY_COMMAND).sort()
   );
 });
 

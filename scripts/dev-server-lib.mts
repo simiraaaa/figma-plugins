@@ -1,13 +1,12 @@
 /**
- * Structure Dump の開発用サーバー (dev:server) の本体。
+ * 開発ループの dev サーバー (dev:server) の本体。
  *
- * AI (curl) から書き出しと script の実行の依頼を受け、開いている開発プラグインの UI がそれを long-poll で取り、
- * 書き出した ZIP や script の返り値をこのサーバーへ POST する。受けた ZIP は outDir の下へ展開する。
- * プラグインはメニューの「開発: dev サーバーとつなぐ」で起動したときだけつなぐ。
+ * AI (curl) から書き出しと script の実行の依頼を受け、開いている開発用プラグイン Dev Loop (plugins/dev-loop) の UI が
+ * それを long-poll で取り、書き出した ZIP や script の返り値をこのサーバーへ POST する。受けた ZIP は outDir の下へ展開する。
  * ホットリロードで走り直したプラグインは、まだ渡していない最後の依頼を受け取る (無ければ最後の書き出しの依頼をもう一度書き出す)。
  *
- * 候補のポートと dev サーバーの印は、プラグインの manifest の devAllowedDomains と ui.html が同じ値を持つ
- * (tests/structure-dump-dev-server.test.mts が一致を見る)。
+ * 候補のポートと dev サーバーの印は、Dev Loop の manifest の devAllowedDomains と ui.html が同じ値を持つ
+ * (tests/dev-server.test.mts が一致を見る)。
  */
 import { randomUUID } from "node:crypto";
 import {
@@ -398,7 +397,7 @@ export function notStartedMessage(outcome: Exclude<CandidateOutcome, { kind: "li
   return (
     `候補のポート ${outcome.ports.join("・")} がどれも、dev サーバーとして答えない相手 (別のアプリか、答えられなくなった dev サーバー) に使われている。` +
     "どれかを空けるか、候補を変える " +
-    "(scripts/dev-server-lib.mts の DEV_PORTS・manifest の devAllowedDomains・ui.html の DEV_PORTS をそろえて変え、プラグインを起動し直す)"
+    "(scripts/dev-server-lib.mts の DEV_PORTS・plugins/dev-loop/manifest.json の devAllowedDomains・plugins/dev-loop/src/ui.html の DEV_PORTS をそろえて変え、Dev Loop を起動し直す)"
   );
 }
 
@@ -697,7 +696,7 @@ export function createDevServer(options: DevServerOptions): http.RequestListener
   function refuseUnlessConnected(res: http.ServerResponse): boolean {
     if (pluginConnected()) return false;
     send(res, 503, {
-      error: "プラグインが繋がっていない (Figma で「開発: dev サーバーとつなぐ」を開いたままにする)",
+      error: "プラグインが繋がっていない (Figma で Dev Loop を開いたままにする)",
       plugin: pluginState(),
     });
     return true;
@@ -752,7 +751,7 @@ export function createDevServer(options: DevServerOptions): http.RequestListener
         // 処理の途中でプラグインを閉じても処理中は残るので、「処理中」とは断定しない
         const hint =
           plugin.processing === undefined
-            ? "Figma で「開発: dev サーバーとつなぐ」を開いているか確かめる"
+            ? "Figma で Dev Loop を開いているか確かめる"
             : `プラグインへ渡した #${plugin.processing.seq} の結果がまだ来ていない`;
         send(res, 504, {
           error: `${seconds} 秒待ってもプラグインから結果が来ない (${hint})`,

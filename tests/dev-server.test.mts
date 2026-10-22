@@ -1,9 +1,10 @@
 /**
- * structure-dump の開発ループ (dev サーバー) の検査
+ * 開発ループの dev サーバーの検査
  *
  * 実行: npm test
- * AI (curl) とプラグインの UI の役を fetch で演じ、依頼 → long-poll → 結果の展開の往復を見る。
- * ポートの値がサーバー・manifest・ui.html でそろっていること、配る manifest から開発用の設定が外れることも見る。
+ * AI (curl) と Dev Loop の UI の役を fetch で演じ、依頼 → long-poll → 結果の展開の往復を見る。
+ * ポートの値がサーバー・Dev Loop の manifest・ui.html でそろっていること、
+ * 配るプラグインが通信の設定を持たず、紛れ込んでも配る manifest から外れることも見る。
  */
 import { test } from "node:test";
 import assert from "node:assert/strict";
@@ -668,7 +669,7 @@ test("プラグインが繋がっていなければ、依頼を積まずにす�
     const res = await fetch(`${base}/export?timeout=5`, { method: "POST", body: "" });
     assert.equal(res.status, 503);
     const body = await json<{ error: string; plugin: PluginState }>(res);
-    assert.match(body.error, /開発: dev サーバーとつなぐ/);
+    assert.match(body.error, /Dev Loop を開いたままにする/);
     // 起動してからプラグインが一度も来ていない
     assert.deepEqual(body.plugin, {});
     // 積んでいないので、あとから繋いだプラグインには何も渡らない
@@ -999,16 +1000,16 @@ test("負例: ブラウザのサイトからの送信と、AI 側の口への Or
   }
 });
 
-test("候補のポートと dev サーバーの印は、サーバー・manifest の devAllowedDomains・ui.html でそろっている", () => {
+test("候補のポートと dev サーバーの印は、サーバー・Dev Loop の devAllowedDomains・ui.html でそろっている", () => {
   const manifest = JSON.parse(
-    readFileSync(path.join(root, "plugins/structure-dump/manifest.json"), "utf8")
+    readFileSync(path.join(root, "plugins/dev-loop/manifest.json"), "utf8")
   ) as { networkAccess: { allowedDomains: string[]; devAllowedDomains?: string[] } };
   assert.deepEqual(manifest.networkAccess.allowedDomains, ["none"]);
   assert.deepEqual(
     manifest.networkAccess.devAllowedDomains,
     DEV_PORTS.map((port) => `http://localhost:${port}/`)
   );
-  const ui = readFileSync(path.join(root, "plugins/structure-dump/src/ui.html"), "utf8");
+  const ui = readFileSync(path.join(root, "plugins/dev-loop/src/ui.html"), "utf8");
   assert.ok(
     ui.includes(`const DEV_PORTS = [${DEV_PORTS.join(", ")}];`),
     "ui.html の DEV_PORTS がサーバーの DEV_PORTS と違う"
@@ -1016,10 +1017,46 @@ test("候補のポートと dev サーバーの印は、サーバー・manifest 
   assert.ok(ui.includes(`const DEV_SERVER_APP = "${DEV_SERVER_APP}";`), "ui.html の DEV_SERVER_APP が違う");
 });
 
-test("配る manifest からは devAllowedDomains と dev- のコマンドが外れ、ほかは残る", () => {
-  const source = JSON.parse(
-    readFileSync(path.join(root, "plugins/structure-dump/manifest.json"), "utf8")
-  ) as Record<string, unknown>;
+test("Dev Loop の manifest は、書き出しに効く実行条件が Structure Dump と同じ", () => {
+  const read = (name: string) =>
+    JSON.parse(readFileSync(path.join(root, `plugins/${name}/manifest.json`), "utf8")) as Record<string, unknown>;
+  const dump = read("structure-dump");
+  const devLoop = read("dev-loop");
+  for (const key of ["api", "editorType", "documentAccess", "permissions", "enableProposedApi"]) {
+    assert.deepEqual(devLoop[key], dump[key], `manifest の ${key} が違う`);
+  }
+});
+
+test("Structure Dump の build は Dev Loop も作り直す (Dev Loop は書き出しを build で取り込む)", () => {
+  const pkg = JSON.parse(readFileSync(path.join(root, "package.json"), "utf8")) as {
+    scripts: Record<string, string>;
+  };
+  assert.match(pkg.scripts["build:dump"], /npm run build:dev-loop/);
+});
+
+test("配るプラグインの manifest は通信の設定と開発用のコマンドを持たない", () => {
+  for (const name of ["structure-dump", "component-spec"]) {
+    const manifest = JSON.parse(
+      readFileSync(path.join(root, `plugins/${name}/manifest.json`), "utf8")
+    ) as { menu?: { command: string }[]; networkAccess: Record<string, unknown> };
+    assert.deepEqual(manifest.networkAccess, { allowedDomains: ["none"] }, `${name} の networkAccess`);
+    assert.ok(
+      (manifest.menu ?? []).every((m) => !m.command.startsWith("dev-")),
+      `${name} のメニューに開発用のコマンドがある`
+    );
+  }
+});
+
+test("配る manifest に開発用の設定が紛れ込んでも、devAllowedDomains と dev- のコマンドは外れ、ほかは残る", () => {
+  const source = {
+    name: "Example",
+    main: "dist/code.js",
+    menu: [
+      { name: "書き出し", command: "export-2x" },
+      { name: "開発", command: "dev-loop" },
+    ],
+    networkAccess: { allowedDomains: ["none"], devAllowedDomains: ["http://localhost:47717/"] },
+  };
   const released = releaseManifest(source) as {
     menu: { command: string }[];
     networkAccess: Record<string, unknown>;
@@ -1028,10 +1065,7 @@ test("配る manifest からは devAllowedDomains と dev- のコマンドが外
   assert.deepEqual(released.networkAccess, { allowedDomains: ["none"] });
   assert.deepEqual(
     released.menu.map((m) => m.command),
-    ["export-2x", "export-1x"]
+    ["export-2x"]
   );
   assert.equal(released.main, "dist/code.js");
-  // 元の manifest には開発用の設定がある (外す処理が素通りでも通る検査にしない)
-  assert.ok(JSON.stringify(source).includes("devAllowedDomains"));
-  assert.ok(JSON.stringify(source).includes('"dev-loop"'));
 });

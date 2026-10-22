@@ -23,19 +23,13 @@ const SVG_DIR = "assets/svg";
 
 /**
  * プラグインのメニューのコマンド → スクリーンショットの倍率。
- * manifest.json の menu は、これと DEV_LOOP_COMMAND を合わせた集合にする
+ * manifest.json の menu は、これと同じ集合にする
  */
 export const SCREENSHOT_SCALE_BY_COMMAND: Readonly<Record<string, number>> = {
   "export-2x": 2,
   "export-1x": 1,
 };
 export const DEFAULT_SCREENSHOT_SCALE = 2;
-
-/**
- * 開発ループ (dev サーバーから依頼を受けて書き出し、結果を送る) のコマンド。
- * 配布する zip の manifest からは、"dev-" で始まるコマンドを外す (scripts/release-lib.mts)
- */
-export const DEV_LOOP_COMMAND = "dev-loop";
 
 export function screenshotScaleFor(command: string): number {
   return Object.prototype.hasOwnProperty.call(SCREENSHOT_SCALE_BY_COMMAND, command)

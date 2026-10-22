@@ -1,0 +1,301 @@
+<!doctype html>
+<html>
+<head>
+<meta charset="utf-8" />
+<style>
+  body { font: 12px/1.6 -apple-system, "Hiragino Sans", sans-serif; margin: 0; padding: 12px; color: #1a1a1a; }
+  h2 { font-size: 13px; margin: 12px 0 4px; }
+  .meta { color: #777; font-size: 11px; }
+  button { font-size: 12px; padding: 6px 12px; border-radius: 6px; border: 1px solid #ccc; background: #fff; cursor: pointer; margin-right: 6px; }
+  button:hover { background: #f0f0f0; }
+  #status { color: #777; }
+  #error { color: #c62828; white-space: pre-wrap; }
+  #dev-log { white-space: pre-wrap; margin: 4px 0 0; max-height: 300px; overflow: auto; }
+  #dev-token { font: 11px/1.5 "SF Mono", Menlo, monospace; background: #f5f5f5; border-radius: 4px; padding: 2px 6px; word-break: break-all; }
+  .dev-run-actions { margin: 6px 0 0; }
+</style>
+</head>
+<body>
+  <div id="status">始めている…</div>
+  <div id="error"></div>
+  <div id="dev" hidden>
+    <h2>開発ループ (dev サーバー: <span id="dev-server">探している</span>)</h2>
+    <div class="meta">dev サーバーの依頼を待ち、Structure Dump と同じ書き出しをして ZIP を送る。プラグインのコードを build し直すと、最後の書き出しの依頼をもう一度書き出す。</div>
+    <h2>script の実行</h2>
+    <div class="meta">合言葉を渡した AI は、Plugin API の script でこのファイルを読み書きできる。渡すのは、実行を任せる AI のセッションだけにする。</div>
+    <div>合言葉: <span id="dev-token"></span></div>
+    <div class="dev-run-actions">
+      <button id="copy-run">AI に渡す文をコピー</button>
+      <button id="renew-token">合言葉を作り直す</button>
+    </div>
+    <h2>記録</h2>
+    <div id="dev-log"></div>
+  </div>
+
+<script>
+function setStatus(text) {
+  document.getElementById("status").textContent = text;
+}
+
+function failureDetail(e) {
+  return e instanceof Error ? e.message : String(e);
+}
+
+// 候補のポートと印は manifest の devAllowedDomains と scripts/dev-server-lib.mts の DEV_PORTS・DEV_SERVER_APP と同じ値にする
+const DEV_PORTS = [47717, 47718, 47719, 47720, 47721];
+const DEV_SERVER_APP = "structure-dump-dev-server";
+const DEV_PROBE_TIMEOUT_MS = 2000;
+const DEV_RETRY_MS = 2000;
+const DEV_LOG_LINES = 50;
+/** つないでいる dev サーバー (http://localhost:<ポート>)。見つかっていなければ null */
+let devServer = null;
+/** プラグインの本体が照合に使う合言葉。本体が clientStorage に残す */
+let runToken = null;
+/** 本体へ渡した依頼の結果 (dev-result / dev-error / run-result) を受け取る */
+let devResolve = null;
+
+function devLog(text) {
+  const log = document.getElementById("dev-log");
+  const lines = log.textContent === "" ? [] : log.textContent.split("\n");
+  lines.unshift(`${new Date().toLocaleTimeString()} ${text}`);
+  log.textContent = lines.slice(0, DEV_LOG_LINES).join("\n");
+}
+
+function devTargets(request) {
+  return request.nodeIds ? request.nodeIds.join(", ") : "開いているページの選択 (未選択ならページ直下)";
+}
+
+function scriptHead(code) {
+  const line = code.trim().split("\n")[0];
+  return line.length > 60 ? `${line.slice(0, 60)}…` : line;
+}
+
+function askPlugin(message) {
+  return new Promise((resolve) => {
+    devResolve = resolve;
+    parent.postMessage({ pluginMessage: message }, "*");
+  });
+}
+
+/** 候補のポートに順に聞き、dev サーバーの印を返した最初のポートを返す。見つからなければ null */
+async function findDevServer() {
+  for (const port of DEV_PORTS) {
+    const base = `http://localhost:${port}`;
+    try {
+      const res = await fetch(`${base}/hello`, { signal: AbortSignal.timeout(DEV_PROBE_TIMEOUT_MS) });
+      const body = await res.json();
+      if (body.app === DEV_SERVER_APP) return base;
+    } catch {
+      // 待ち受けていない・dev サーバーでない相手 (JSON を返さない)
+    }
+  }
+  return null;
+}
+
+/** 16 バイトの乱数の hex */
+function newRunToken() {
+  const bytes = crypto.getRandomValues(new Uint8Array(16));
+  return Array.from(bytes, (b) => b.toString(16).padStart(2, "0")).join("");
+}
+
+function setRunToken(token) {
+  runToken = token;
+  document.getElementById("dev-token").textContent = token;
+  parent.postMessage({ pluginMessage: { type: "dev-token", token } }, "*");
+}
+
+function runInstructions() {
+  const host = devServer.replace("http://", "");
+  return [
+    `Figma の Dev Loop (開発ループ) の script 実行の口: ${devServer}/run`,
+    `合言葉 (X-Run-Token ヘッダ): ${runToken}`,
+    `例: curl -s -X POST ${host}/run -H 'X-Run-Token: ${runToken}' --data-binary 'return figma.currentPage.name;'`,
+    "使い方は figma-plugins リポジトリの plugins/dev-loop/README.md を読む",
+  ].join("\n");
+}
+
+/** fetch の本文は Content-Type を付けない形 (Uint8Array・文字列) にし、CORS の preflight を起こさない */
+async function devPost(route, request, body) {
+  const res = await fetch(`${devServer}/${route}?seq=${request.seq}&server=${request.server}`, {
+    method: "POST",
+    body,
+  });
+  if (!res.ok) {
+    const error = new Error(`HTTP ${res.status}: ${await res.text()}`);
+    error.httpStatus = res.status;
+    throw error;
+  }
+}
+
+async function devSend(request, outcome) {
+  if (outcome.type === "dev-result") {
+    const zip = outcome.payload.zip;
+    // postMessage 越しに Uint8Array が別形に落ちた場合に備えて包み直す
+    const bytes = zip instanceof Uint8Array ? zip : new Uint8Array(zip);
+    try {
+      await devPost("result", request, bytes);
+    } catch (e) {
+      // 届かなかったことを依頼側に伝えないと、依頼側は時間切れまで待つ。
+      // HTTP のエラーで返ったときは、サーバーが受け取って理由を記録済み
+      if (e.httpStatus === undefined) {
+        await devPost("error", request, `結果の送信に失敗: ${failureDetail(e)}`);
+      }
+      throw e;
+    }
+    const m = outcome.payload.meta;
+    devLog(
+      `#${request.seq} を送った: 画面フレーム ${m.frameCount} 枚・ZIP ${(m.zipBytes / 1024).toFixed(0)} KB・警告 ${m.warnings.length} 件`
+    );
+    return;
+  }
+  await devPost("error", request, outcome.message);
+  devLog(`#${request.seq} は書き出せなかった (dev サーバーへ伝えた): ${outcome.message}`);
+}
+
+/** 本体が作った POST /run-result の本文 (JSON) を送る */
+async function devSendRun(request, body) {
+  try {
+    await devPost("run-result", request, body);
+  } catch (e) {
+    // 本体の結果が示す「実行したかどうか」を残して送り直す (依頼側はそれで送り直してよいかを決める)
+    if (e.httpStatus === undefined) {
+      const result = JSON.parse(body);
+      const error = result.ok
+        ? `script は実行したが、結果の送信に失敗 (書き換えは残っている): ${failureDetail(e)}`
+        : `${result.error} (結果の送信にも一度失敗した: ${failureDetail(e)})`;
+      await devPost("run-result", request, JSON.stringify({ ok: false, error }));
+    }
+    throw e;
+  }
+  const result = JSON.parse(body);
+  devLog(result.ok ? `#${request.seq} の script を実行した` : `#${request.seq} の script は失敗: ${result.error}`);
+}
+
+async function devLoop() {
+  const startedAt = Date.now();
+  let server = null;
+  let after = null;
+  let offline = false;
+  for (;;) {
+    let request;
+    try {
+      if (devServer === null) {
+        devServer = await findDevServer();
+        if (devServer === null) throw new Error(`候補のポート ${DEV_PORTS.join("・")} に dev サーバーがいない`);
+        document.getElementById("dev-server").textContent = devServer;
+        devLog(`dev サーバーにつないだ: ${devServer}`);
+      }
+      const query = server === null ? "" : `?server=${server}&after=${after}`;
+      const res = await fetch(`${devServer}/next${query}`);
+      if (res.status === 204) continue;
+      if (!res.ok) throw new Error(`HTTP ${res.status}: ${await res.text()}`);
+      request = await res.json();
+    } catch (e) {
+      // 起動し直した dev サーバーは別の候補のポートにいるかもしれないので、探し直す
+      devServer = null;
+      document.getElementById("dev-server").textContent = "探している";
+      if (!offline) {
+        devLog(`dev サーバーにつながらない (${failureDetail(e)})。npm run dev:server を起動すると自動でつながる`);
+        setStatus("dev サーバーを待っている");
+      }
+      offline = true;
+      await new Promise((resolve) => setTimeout(resolve, DEV_RETRY_MS));
+      continue;
+    }
+    offline = false;
+    server = request.server;
+    after = request.seq;
+    const reason =
+      Date.parse(request.requestedAt) < startedAt
+        ? "起動 (build で走り直したときを含む) より前に積まれていた依頼"
+        : "新しい依頼";
+    try {
+      if (request.kind === "run") {
+        devLog(`#${request.seq} の script を実行する (${reason}): ${scriptHead(request.code)}`);
+        const outcome = await askPlugin({
+          type: "run-request",
+          request: { seq: request.seq, code: request.code, token: request.token },
+        });
+        await devSendRun(request, outcome.body);
+      } else {
+        devLog(`#${request.seq} を書き出す (${reason}): ${devTargets(request)}`);
+        await devSend(request, await askPlugin({ type: "dev-request", request }));
+      }
+    } catch (e) {
+      devLog(`#${request.seq} の送信に失敗: ${failureDetail(e)}`);
+    }
+    setStatus("依頼を待っている");
+  }
+}
+
+onmessage = (event) => {
+  const msg = event.data.pluginMessage;
+  if (!msg) return;
+
+  if (msg.type === "progress") {
+    const count = `${msg.done}/${msg.total}`;
+    if (msg.phase === "frames") setStatus(`書き出し中… 画面 ${count} ${msg.name}`);
+    else if (msg.phase === "sections") setStatus(`書き出し中… セクション ${count}`);
+    else if (msg.phase === "assets") setStatus(`書き出し中… 画像 ${count}`);
+    return;
+  }
+  setStatus("");
+
+  if (msg.type === "dev-start") {
+    document.getElementById("dev").hidden = false;
+    if (typeof msg.token === "string") {
+      runToken = msg.token;
+      document.getElementById("dev-token").textContent = msg.token;
+    } else {
+      setRunToken(newRunToken());
+    }
+    setStatus("依頼を待っている");
+    devLoop();
+    return;
+  }
+  if (msg.type === "dev-result" || msg.type === "dev-error" || msg.type === "run-result") {
+    const resolve = devResolve;
+    devResolve = null;
+    if (resolve) resolve(msg);
+    return;
+  }
+  if (msg.type === "error") {
+    document.getElementById("error").textContent = msg.message;
+  }
+};
+
+function copyText(text, label) {
+  const ta = document.createElement("textarea");
+  try {
+    ta.value = text;
+    document.body.appendChild(ta);
+    ta.select();
+    const copied = document.execCommand("copy");
+    setStatus(
+      copied
+        ? `${label}をコピーしました`
+        : `${label}のコピーに失敗しました (ブラウザがコピーを拒否しました)`
+    );
+  } catch (e) {
+    setStatus(`${label}のコピーに失敗しました: ${failureDetail(e)}`);
+  } finally {
+    if (ta.parentNode) ta.parentNode.removeChild(ta);
+  }
+}
+
+document.getElementById("copy-run").onclick = () => {
+  // 渡す文にはつないでいる dev サーバーのポートを書くので、つながるまではコピーしない
+  if (devServer === null) {
+    setStatus("dev サーバーにつながってからコピーする");
+    return;
+  }
+  copyText(runInstructions(), "AI に渡す文");
+};
+
+document.getElementById("renew-token").onclick = () => {
+  setRunToken(newRunToken());
+  devLog("合言葉を作り直した。前の合言葉の付いた script は実行しない");
+};
+</script>
+</body>
+</html>

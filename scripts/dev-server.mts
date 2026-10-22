@@ -1,5 +1,5 @@
 /**
- * Structure Dump の開発用サーバー。使い方は plugins/structure-dump/README.md の「開発ループ」。
+ * 開発ループの dev サーバー。使い方は plugins/dev-loop/README.md。
  *
  *   npm run dev:server                       # 受けた結果は .dev-dump/ に置く
  *   npm run dev:server -- --out <ディレクトリ>
