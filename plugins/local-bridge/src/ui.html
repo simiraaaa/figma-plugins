@@ -169,10 +169,11 @@ async function devSend(request, outcome) {
     devLog(
       `#${request.seq} を送った: 画面フレーム ${m.frameCount} 枚・ZIP ${(m.zipBytes / 1024).toFixed(0)} KB・警告 ${m.warnings.length} 件`
     );
-    return;
+    return true;
   }
   await devPost("error", request, outcome.message);
   devLog(`#${request.seq} は書き出せなかった (dev サーバーへ伝えた): ${outcome.message}`);
+  return false;
 }
 
 /** 本体が作った POST /run-result の本文 (JSON) を送る */
@@ -192,6 +193,7 @@ async function devSendRun(request, body) {
   }
   const result = JSON.parse(body);
   devLog(result.ok ? `#${request.seq} の script を実行した` : `#${request.seq} の script は失敗: ${result.error}`);
+  return result.ok;
 }
 
 async function localBridge() {
@@ -232,6 +234,7 @@ async function localBridge() {
       Date.parse(request.requestedAt) < startedAt
         ? "起動 (build で走り直したときを含む) より前に積まれていた依頼"
         : "新しい依頼";
+    let ok = false;
     try {
       if (request.kind === "run") {
         devLog(`#${request.seq} の script を実行する (${reason}): ${scriptHead(request.code)}`);
@@ -239,15 +242,16 @@ async function localBridge() {
           type: "run-request",
           request: { seq: request.seq, code: request.code, token: request.token },
         });
-        await devSendRun(request, outcome.body);
+        ok = await devSendRun(request, outcome.body);
       } else {
         devLog(`#${request.seq} を書き出す (${reason}・${devImages(request)}): ${devTargets(request)}`);
-        await devSend(request, await askPlugin({ type: "dev-request", request }));
+        ok = await devSend(request, await askPlugin({ type: "dev-request", request }));
       }
     } catch (e) {
       devLog(`#${request.seq} の送信に失敗: ${failureDetail(e)}`);
     }
-    setStatus("依頼を待っている");
+    // 小さい窓では記録が隠れるので、失敗したことは状態の行に残す (理由は広げた記録にある)
+    setStatus(ok ? "依頼を待っている" : `#${request.seq} は失敗した (理由は記録に)`);
   }
 }
 
