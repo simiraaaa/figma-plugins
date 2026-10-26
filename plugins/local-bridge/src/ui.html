@@ -293,6 +293,7 @@ onmessage = (event) => {
     return;
   }
   if (msg.type === "error") {
+    setStatus("始められなかった");
     document.getElementById("error").textContent = msg.message;
     // 小さくしていても、エラーの理由が見えるよう広げる
     setCompact(false);
