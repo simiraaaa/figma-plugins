@@ -1,6 +1,7 @@
 /**
  * Local Bridge の書き出し (/export の展開先) を 2 つ比べ、変わったところを文字の差分と画像の差分にする。
  * Figma を書き換える前後の確かめに使う。手順は .claude/skills/figma-safe-edit/SKILL.md。
+ * 人が見る report.html の組み立ては compare-report.mts。
  */
 import { spawnSync } from "node:child_process";
 import {
@@ -18,6 +19,7 @@ import {
 import path from "node:path";
 import pixelmatch from "pixelmatch";
 import { PNG } from "pngjs";
+import { CHANGES_DIFF_FILE, cropFile, NODE_ID_LINE, reportHtml, TEXT_EXTENSIONS } from "./compare-report.mts";
 
 export interface Region {
   x: number;
@@ -29,12 +31,14 @@ export interface Region {
 export interface ImageChange {
   /** 書き出しの中のパス (名前が変わったものは after 側のパス) */
   file: string;
-  /** 色が 1 つでも違う画素の数。大きさが違えば、広げた側の画素も数える。片方にしか無い画像は全画素 */
+  /** 色が 1 つでも違う画素の数。大きさが違えば広げた側も比べる (透明どうしは同じと見る)。片方にしか無い画像は全画素 */
   changedPixels: number;
   width: number;
   height: number;
-  /** 違う画素を囲む範囲。片方にしか無い画像は null */
+  /** 違う画素を全部囲む範囲。片方にしか無い画像と、違う画素が無い (大きさだけ違う) 画像は null */
   region: Region | null;
+  /** 離れた変化ごとに分けた範囲 (上から順)。crop/<side>/<パス>.<番号>.png に、この順で切り出す */
+  regions: Region[];
 }
 
 export interface Rename {
@@ -56,10 +60,8 @@ export interface CompareSummary {
   report: string;
 }
 
-const TEXT_EXTENSIONS: ReadonlySet<string> = new Set([".json", ".md", ".svg", ".txt"]);
 /** 比べ終えた置き場所の印。--out に既にある置き場所を消してよいかは、これがあるかで決める */
 const SUMMARY_FILE = "summary.json";
-const CHANGES_DIFF_FILE = "changes.diff";
 const REPORT_FILE = "report.html";
 /** 比べた結果の置き場所に作るもの。これ以外があれば、人の置いたものとみて消さない */
 const OUT_ENTRIES: ReadonlySet<string> = new Set([
@@ -71,20 +73,22 @@ const OUT_ENTRIES: ReadonlySet<string> = new Set([
   REPORT_FILE,
   SUMMARY_FILE,
 ]);
-/** 違う画素を囲む範囲の外に足す余白 (画素) */
-const CROP_MARGIN = 24;
-/** 切り出しが全体のこの割合より小さいときだけ、切り出した画像を作る */
+/** 違う画素の範囲を分けるときのます目の大きさ (画素) */
+const REGION_CELL = 8;
+/** この数のます目 (REGION_CELL × この数の画素) より近い変化は、1 箇所にまとめる */
+const REGION_GAP_CELLS = 12;
+/** 範囲の外に足す余白 (画素) */
+const CROP_MARGIN = 64;
+/** 切り出しが全体のこの割合より小さい範囲だけ切り出す */
 const CROP_MAX_AREA_RATIO = 0.5;
-/** report に載せる文字の差分の上限。超えたら changes.diff を開いてもらう */
-const REPORT_TEXT_DIFF_MAX = 2 * 1024 * 1024;
-/** これより行の多いファイルの差分は、report で閉じておく */
-const OPEN_DIFF_MAX_LINES = 300;
-/** 構造の json でノードの始まりを示す行 (diff -F に渡す) */
-const NODE_ID_LINE = '"id": "';
+/** 切り出す範囲の数の上限。超えた分は全体の画像で見る */
+export const MAX_CROPS = 30;
 
+/** 隠しファイル (.DS_Store など) は書き出しの中身でないので比べない */
 function listFiles(root: string, dir = ""): string[] {
   const files: string[] = [];
   for (const entry of readdirSync(path.join(root, dir), { withFileTypes: true })) {
+    if (entry.name.startsWith(".")) continue;
     const rel = path.posix.join(dir, entry.name);
     if (entry.isDirectory()) files.push(...listFiles(root, rel));
     else if (entry.isFile()) files.push(rel);
@@ -150,22 +154,62 @@ function padded(png: PNG, width: number, height: number): PNG {
 }
 
 /** pixelmatch の差分画像で、違う画素は赤 (diffColor の既定) に、同じ画素は灰色に塗られる */
-function changedRegion(diff: PNG): Region | null {
-  let minX = Infinity;
-  let minY = Infinity;
-  let maxX = -1;
-  let maxY = -1;
+function isChanged(diff: PNG, i: number): boolean {
+  return diff.data[i] === 255 && diff.data[i + 1] === 0 && diff.data[i + 2] === 0;
+}
+
+function union(a: Region | null, b: Region): Region {
+  if (a === null) return b;
+  const x = Math.min(a.x, b.x);
+  const y = Math.min(a.y, b.y);
+  return {
+    x,
+    y,
+    width: Math.max(a.x + a.width, b.x + b.width) - x,
+    height: Math.max(a.y + a.height, b.y + b.height) - y,
+  };
+}
+
+/**
+ * 違う画素を、離れた変化ごとの範囲に分ける。
+ * 画像を REGION_CELL のます目に分け、違う画素のあるます目どうしが REGION_GAP_CELLS 以内なら同じ変化とみてつなぐ
+ */
+function changedRegions(diff: PNG): Region[] {
+  const cols = Math.ceil(diff.width / REGION_CELL);
+  const rows = Math.ceil(diff.height / REGION_CELL);
+  const cells = new Map<number, Region>();
   for (let y = 0; y < diff.height; y++) {
     for (let x = 0; x < diff.width; x++) {
-      const i = (y * diff.width + x) * 4;
-      if (diff.data[i] !== 255 || diff.data[i + 1] !== 0 || diff.data[i + 2] !== 0) continue;
-      minX = Math.min(minX, x);
-      minY = Math.min(minY, y);
-      maxX = Math.max(maxX, x);
-      maxY = Math.max(maxY, y);
+      if (!isChanged(diff, (y * diff.width + x) * 4)) continue;
+      const cell = Math.floor(y / REGION_CELL) * cols + Math.floor(x / REGION_CELL);
+      cells.set(cell, union(cells.get(cell) ?? null, { x, y, width: 1, height: 1 }));
     }
   }
-  return maxX === -1 ? null : { x: minX, y: minY, width: maxX - minX + 1, height: maxY - minY + 1 };
+  const regions: Region[] = [];
+  const seen = new Set<number>();
+  for (const start of cells.keys()) {
+    if (seen.has(start)) continue;
+    seen.add(start);
+    let region: Region | null = null;
+    const stack = [start];
+    while (stack.length > 0) {
+      const cell = stack.pop()!;
+      region = union(region, cells.get(cell)!);
+      const cx = cell % cols;
+      const cy = Math.floor(cell / cols);
+      for (let ny = Math.max(0, cy - REGION_GAP_CELLS); ny <= Math.min(rows - 1, cy + REGION_GAP_CELLS); ny++) {
+        for (let nx = Math.max(0, cx - REGION_GAP_CELLS); nx <= Math.min(cols - 1, cx + REGION_GAP_CELLS); nx++) {
+          const next = ny * cols + nx;
+          if (cells.has(next) && !seen.has(next)) {
+            seen.add(next);
+            stack.push(next);
+          }
+        }
+      }
+    }
+    regions.push(region!);
+  }
+  return regions.sort((a, b) => a.y - b.y || a.x - b.x);
 }
 
 /** 範囲に余白を足す。全体の大きさに対して小さくないなら、切り出さない (null) */
@@ -200,18 +244,18 @@ function isInside(child: string, parent: string): boolean {
 /** 前の比べた結果だけを消す。比べた結果の置き場所でなければ断る */
 function prepareOutDir(outDir: string, inputs: readonly string[]): void {
   for (const dir of inputs) {
-    if (isInside(path.resolve(dir), path.resolve(outDir))) {
-      throw new Error(`比べる書き出しが --out の中にある: ${dir}`);
-    }
+    if (isInside(path.resolve(dir), path.resolve(outDir))) throw new Error(`比べる書き出しが --out の中にある: ${dir}`);
+    if (isInside(path.resolve(outDir), path.resolve(dir))) throw new Error(`--out が比べる書き出しの中にある: ${outDir}`);
   }
   if (existsSync(outDir)) {
     const entries = readdirSync(outDir);
     const unknown = entries.filter((e) => !OUT_ENTRIES.has(e));
-    if (!entries.includes(SUMMARY_FILE) || unknown.length > 0) {
-      const detail = unknown.length > 0 ? ` (比べた結果が作らないもの: ${unknown.join(", ")})` : "";
+    if (entries.length > 0 && (!entries.includes(SUMMARY_FILE) || unknown.length > 0)) {
+      const detail = unknown.length > 0 ? ` (比べた結果が作らないもの: ${unknown.join(", ")})` : " (summary.json が無い)";
       throw new Error(`比べた結果の置き場所でないものがすでにある: ${outDir}${detail}`);
     }
-    for (const entry of entries) rmSync(path.join(outDir, entry), { recursive: true });
+    // 途中で止まっても印が残り、次の実行が置き換えられるよう、印は最後に消す
+    for (const entry of entries.filter((e) => e !== SUMMARY_FILE)) rmSync(path.join(outDir, entry), { recursive: true });
   }
   mkdirSync(outDir, { recursive: true });
   // 途中で失敗しても、次の実行がこの置き場所を比べた結果のものと見て置き換えられるよう、先に印を置く
@@ -228,7 +272,7 @@ function compareImage(
 ): ImageChange | null {
   if (before === undefined || after === undefined) {
     const png = readPng((before ?? after)!, before === undefined ? labels.after : labels.before);
-    return { file: rel, changedPixels: png.width * png.height, width: png.width, height: png.height, region: null };
+    return { file: rel, changedPixels: png.width * png.height, width: png.width, height: png.height, region: null, regions: [] };
   }
   const a = readPng(before, labels.before);
   const b = readPng(after, labels.after);
@@ -240,14 +284,16 @@ function compareImage(
   const changedPixels = pixelmatch(pa.data, pb.data, diff.data, width, height, { threshold: 0, includeAA: true });
   if (changedPixels === 0 && a.width === b.width && a.height === b.height) return null;
   writeFile(path.join(outDir, "diff", rel), PNG.sync.write(diff));
-  const region = changedRegion(diff);
-  const crop = region === null ? null : cropRegion(region, width, height);
-  if (crop !== null) {
-    writeFile(path.join(outDir, "crop", "before", rel), cropped(pa, crop));
-    writeFile(path.join(outDir, "crop", "after", rel), cropped(pb, crop));
-    writeFile(path.join(outDir, "crop", "diff", rel), cropped(diff, crop));
-  }
-  return { file: rel, changedPixels, width, height, region };
+  const regions = changedRegions(diff);
+  regions.slice(0, MAX_CROPS).forEach((region, i) => {
+    const crop = cropRegion(region, width, height);
+    if (crop === null) return;
+    writeFile(path.join(outDir, cropFile("before", rel, i)), cropped(pa, crop));
+    writeFile(path.join(outDir, cropFile("after", rel, i)), cropped(pb, crop));
+    writeFile(path.join(outDir, cropFile("diff", rel, i)), cropped(diff, crop));
+  });
+  const region = regions.reduce<Region | null>(union, null);
+  return { file: rel, changedPixels, width, height, region, regions };
 }
 
 /** before/ と after/ の写しを diff -ruN で比べ、changes.diff に書く (大きくても書き切れるよう、ファイルへ直に出す) */
@@ -339,276 +385,4 @@ export function defaultCompareDir(beforeDir: string, afterDir: string): string {
 
 export function isDirectory(p: string): boolean {
   return existsSync(p) && statSync(p).isDirectory();
-}
-
-// ---------------------------------------------------------------------------
-// report.html
-// ---------------------------------------------------------------------------
-
-function escapeHtml(text: string): string {
-  return text.replace(/&/g, "&amp;").replace(/</g, "&lt;").replace(/>/g, "&gt;").replace(/"/g, "&quot;");
-}
-
-/** img の src に使えるよう、パスの区切りごとに符号化する (ノード名に # や空白が入りうる) */
-function src(...parts: string[]): string {
-  return escapeHtml(path.posix.join(...parts).split("/").map(encodeURIComponent).join("/"));
-}
-
-function percent(image: ImageChange): string {
-  const ratio = (image.changedPixels / (image.width * image.height)) * 100;
-  return ratio < 0.1 ? "0.1% 未満" : `${ratio.toFixed(1)}%`;
-}
-
-function figure(caption: string, url: string): string {
-  return `<figure><figcaption>${caption}</figcaption><a href="${url}" target="_blank"><img src="${url}" loading="lazy" alt=""></a></figure>`;
-}
-
-function imageArticle(image: ImageChange, index: number, summary: CompareSummary, hasCrop: boolean): string {
-  const id = `img-${index + 1}`;
-  const title = `<h3><code>${escapeHtml(image.file)}</code></h3>`;
-  if (summary.added.includes(image.file) || summary.removed.includes(image.file)) {
-    const side = summary.added.includes(image.file) ? "after" : "before";
-    const label = side === "after" ? "足された" : "消えた";
-    return `<article id="${id}">${title}<p class="meta"><span class="tag">${label}</span> ${image.width}×${image.height}</p>
-<div class="row single">${figure(side, src(side, image.file))}</div></article>`;
-  }
-  const r = image.region;
-  const meta = `<p class="meta">違う画素 ${image.changedPixels.toLocaleString("en-US")} (${percent(image)}) ・ ${image.width}×${image.height}${
-    r === null ? "" : ` ・ 変わった範囲 x ${r.x} y ${r.y} から ${r.width}×${r.height}`
-  }</p>`;
-  const full = `<div class="row">${figure("before", src("before", image.file))}${figure("after", src("after", image.file))}${figure(
-    "差分 (赤が違う画素)",
-    src("diff", image.file)
-  )}</div>`;
-  if (!hasCrop) return `<article id="${id}">${title}${meta}${full}</article>`;
-  const crop = `<div class="row">${figure("before (変わった範囲)", src("crop/before", image.file))}${figure(
-    "after (変わった範囲)",
-    src("crop/after", image.file)
-  )}${figure("差分 (変わった範囲)", src("crop/diff", image.file))}</div>`;
-  return `<article id="${id}">${title}${meta}${crop}<details><summary>全体を見る</summary>${full}</details></article>`;
-}
-
-interface FileDiff {
-  file: string;
-  lines: string[];
-  added: number;
-  removed: number;
-}
-
-/** diff -ruN の出力をファイルごとに分ける。ファイル名は +++ after/<パス> の行から取る */
-function splitDiff(text: string): FileDiff[] {
-  const files: FileDiff[] = [];
-  let current: FileDiff | null = null;
-  for (const line of text.split("\n")) {
-    if (line.startsWith("diff ")) {
-      current = { file: "", lines: [], added: 0, removed: 0 };
-      files.push(current);
-      continue;
-    }
-    if (current === null) continue;
-    if (line.startsWith("+++ ")) {
-      current.file = line.slice(4).split("\t")[0].replace(/^after\//, "");
-      continue;
-    }
-    if (line.startsWith("--- ")) continue;
-    if (line.startsWith("+")) current.added++;
-    else if (line.startsWith("-")) current.removed++;
-    current.lines.push(line);
-  }
-  return files.filter((f) => f.file !== "");
-}
-
-/** 構造の json の写しから、ノード ID と名前の対応を集める (差分の区切りの行にノードの名前を出すため) */
-function nodeNames(outDir: string, file: string): Map<string, string> {
-  const names = new Map<string, string>();
-  const walk = (value: unknown): void => {
-    if (Array.isArray(value)) value.forEach(walk);
-    else if (typeof value === "object" && value !== null) {
-      const record = value as Record<string, unknown>;
-      if (typeof record.id === "string" && typeof record.name === "string") names.set(record.id, record.name);
-      Object.values(record).forEach(walk);
-    }
-  };
-  for (const side of ["before", "after"]) {
-    const copy = path.join(outDir, side, file);
-    if (!file.endsWith(".json") || !existsSync(copy)) continue;
-    try {
-      walk(JSON.parse(readFileSync(copy, "utf8")));
-    } catch {
-      // 名前を出せないだけで、差分はそのまま載せられる
-    }
-  }
-  return names;
-}
-
-function diffLine(line: string, names: Map<string, string>): string {
-  if (line.startsWith("@@")) {
-    const end = line.indexOf("@@", 2) + 2;
-    const id = /"id": "([^"]+)"/.exec(line.slice(end))?.[1];
-    const node =
-      id === undefined ? "" : ` <span class="node">${escapeHtml(names.get(id) ?? "")} <code>${escapeHtml(id)}</code></span>`;
-    return `<span class="hunk">${escapeHtml(line.slice(0, end))}${node}</span>`;
-  }
-  const cls = line.startsWith("+") ? "add" : line.startsWith("-") ? "del" : "ctx";
-  return `<span class="${cls}">${escapeHtml(line)}</span>`;
-}
-
-function fileDiffBlock(diff: FileDiff, outDir: string): string {
-  const names = nodeNames(outDir, diff.file);
-  const isSvg = diff.file.toLowerCase().endsWith(".svg");
-  const long = diff.lines.length > OPEN_DIFF_MAX_LINES;
-  const note = isSvg ? "SVG のコード" : long ? `${diff.lines.length} 行あるので閉じている` : "";
-  return `<details class="file"${isSvg || long ? "" : " open"}><summary><code>${escapeHtml(diff.file)}</code> <span class="add">+${
-    diff.added
-  }</span> <span class="del">-${diff.removed}</span>${note === "" ? "" : ` <span class="note">${note}</span>`}</summary>
-<pre>${diff.lines.map((line) => diffLine(line, names)).join("")}</pre></details>`;
-}
-
-function fileList(label: string, files: readonly string[]): string {
-  if (files.length === 0) return "";
-  return `<details><summary>${label} (${files.length})</summary><ul>${files
-    .map((f) => `<li><code>${escapeHtml(f)}</code></li>`)
-    .join("")}</ul></details>`;
-}
-
-function reportHtml(summary: CompareSummary, beforeDir: string, afterDir: string): string {
-  const images = [...summary.images].sort((a, b) => b.changedPixels - a.changedPixels);
-  const hasCrop = (image: ImageChange) => existsSync(path.join(summary.outDir, "crop", "diff", image.file));
-  const thumb = (image: ImageChange) =>
-    summary.added.includes(image.file)
-      ? src("after", image.file)
-      : summary.removed.includes(image.file)
-        ? src("before", image.file)
-        : src(hasCrop(image) ? "crop/diff" : "diff", image.file);
-  const cards = images
-    .map(
-      (image, i) =>
-        `<a class="card" href="#img-${i + 1}"><img src="${thumb(image)}" loading="lazy" alt=""><span class="name">${escapeHtml(
-          path.posix.basename(image.file)
-        )}</span><span class="meta">${
-          summary.added.includes(image.file) ? "足された" : summary.removed.includes(image.file) ? "消えた" : percent(image)
-        }</span></a>`
-    )
-    .join("");
-
-  let textSection = "";
-  if (summary.changesDiff !== null) {
-    const size = statSync(summary.changesDiff).size;
-    const body =
-      size > REPORT_TEXT_DIFF_MAX
-        ? `<p>差分が大きい (${Math.round(size / 1024)} KB) ので載せていない。<a href="${CHANGES_DIFF_FILE}">${CHANGES_DIFF_FILE}</a> を開く。</p>`
-        : splitDiff(readFileSync(summary.changesDiff, "utf8"))
-            .map((diff) => fileDiffBlock(diff, summary.outDir))
-            .join("\n");
-    textSection = `<section id="text"><h2>構造の差分</h2>
-<p class="hint">SVG のコードと長い差分は閉じてある。見出しを押すと開く。全部は <a href="${CHANGES_DIFF_FILE}">${CHANGES_DIFF_FILE}</a></p>
-${body}</section>`;
-  }
-  const textFiles = [...summary.changed, ...summary.added, ...summary.removed].filter((f) =>
-    TEXT_EXTENSIONS.has(path.extname(f).toLowerCase())
-  ).length;
-  const count = (label: string, n: number, href = "") =>
-    n === 0 ? "" : `<li>${href === "" ? label : `<a href="${href}">${label}</a>`} <b>${n}</b></li>`;
-
-  return `<!doctype html>
-<html lang="ja">
-<head>
-<meta charset="utf-8">
-<meta name="viewport" content="width=device-width, initial-scale=1">
-<title>書き出しの比較</title>
-<style>
-  :root { --fg: #1a1a1a; --muted: #6b6b6b; --line: #e3e3e3; --bg: #fff; --panel: #f6f6f6; --add: #1a7f37; --add-bg: #e6f4ea; --del: #b42318; --del-bg: #fde8e7; --hunk: #6b6b6b; }
-  @media (prefers-color-scheme: dark) {
-    :root { --fg: #e8e8e8; --muted: #a0a0a0; --line: #3a3a3a; --bg: #1c1c1c; --panel: #262626; --add: #6fd08c; --add-bg: #1f3326; --del: #ff8b80; --del-bg: #3d2220; --hunk: #a0a0a0; }
-  }
-  * { box-sizing: border-box; }
-  body { font: 13px/1.6 -apple-system, "Hiragino Sans", sans-serif; margin: 0; color: var(--fg); background: var(--bg); }
-  header { position: sticky; top: 0; z-index: 1; background: var(--bg); border-bottom: 1px solid var(--line); padding: 10px 16px; }
-  h1 { font-size: 15px; margin: 0 0 4px; }
-  .counts { display: flex; flex-wrap: wrap; gap: 4px 16px; list-style: none; margin: 0; padding: 0; color: var(--muted); }
-  .counts b { color: var(--fg); }
-  main { padding: 0 16px 32px; }
-  h2 { font-size: 14px; margin: 24px 0 8px; }
-  h3 { font-size: 13px; margin: 0 0 4px; }
-  a { color: inherit; }
-  .hint, .meta, figcaption, .note { color: var(--muted); }
-  .grid { display: grid; grid-template-columns: repeat(auto-fill, minmax(160px, 1fr)); gap: 8px; }
-  .card { display: flex; flex-direction: column; gap: 2px; padding: 6px; border: 1px solid var(--line); border-radius: 6px; text-decoration: none; }
-  .card img { height: 96px; object-fit: contain; }
-  .card .name { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
-  article { border-top: 1px solid var(--line); padding: 16px 0; scroll-margin-top: 80px; }
-  .row { display: flex; gap: 12px; align-items: flex-start; margin-top: 8px; }
-  .row.single figure { flex: 0 1 50%; }
-  figure { flex: 1; min-width: 0; margin: 0; }
-  img { display: block; max-width: 100%; border: 1px solid var(--line); background: repeating-conic-gradient(#c8c8c8 0 25%, #e8e8e8 0 50%) 0 0 / 16px 16px; }
-  body[data-bg="white"] img { background: #fff; }
-  body[data-bg="black"] img { background: #000; }
-  .bg { display: inline-flex; gap: 4px; margin-left: 16px; }
-  .bg button { font: inherit; color: inherit; background: none; border: 1px solid var(--line); border-radius: 4px; padding: 0 6px; cursor: pointer; }
-  .bg button[aria-pressed="true"] { background: var(--panel); border-color: var(--muted); }
-  .tag { border: 1px solid var(--line); border-radius: 4px; padding: 0 6px; }
-  details { margin: 8px 0; }
-  summary { cursor: pointer; }
-  details.file { border: 1px solid var(--line); border-radius: 6px; }
-  details.file > summary { padding: 6px 10px; background: var(--panel); border-radius: 6px; }
-  pre { margin: 0; padding: 8px 0; overflow: auto; font: 12px/1.5 ui-monospace, Menlo, monospace; }
-  pre > span { display: block; padding: 0 10px; white-space: pre; }
-  span.add { color: var(--add); }
-  span.del { color: var(--del); }
-  pre .add { background: var(--add-bg); }
-  pre .del { background: var(--del-bg); }
-  pre .hunk { color: var(--hunk); background: var(--panel); margin-top: 4px; }
-  pre .node { color: var(--fg); font-weight: 600; }
-  pre .node code { color: var(--muted); font-weight: normal; }
-  footer { color: var(--muted); padding: 16px; border-top: 1px solid var(--line); }
-  @media (max-width: 640px) { .row { flex-direction: column; } .row.single figure { flex-basis: auto; } }
-</style>
-</head>
-<body>
-<header>
-<h1>${summary.same ? "変わったところは無い" : "変わったところがある"}</h1>
-<ul class="counts">
-${
-  images.length === 0
-    ? ""
-    : `<li class="bg">画像の背景 <button type="button" data-bg="checker" aria-pressed="true">市松</button><button type="button" data-bg="white" aria-pressed="false">白</button><button type="button" data-bg="black" aria-pressed="false">黒</button></li>`
-}
-${count("見た目が変わった画像", images.length, "#images")}
-${count("構造の差分があるファイル", textFiles, "#text")}
-${count("足された", summary.added.length, "#files")}
-${count("消えた", summary.removed.length, "#files")}
-${count("名前が変わった", summary.renamed.length, "#files")}
-</ul>
-</header>
-<main>
-${
-  images.length === 0
-    ? ""
-    : `<section id="images"><h2>見た目が変わった画像 (違う画素の多い順)</h2>
-<p class="hint">変わった範囲が小さい画像は、その範囲を切り出して大きく見せる。画像を押すと原寸で開く。</p>
-<div class="grid">${cards}</div>
-${images.map((image, i) => imageArticle(image, i, summary, hasCrop(image))).join("\n")}
-</section>`
-}
-${textSection}
-<section id="files"><h2>ファイルの一覧</h2>
-${fileList("変わった", summary.changed)}
-${fileList("足された", summary.added)}
-${fileList("消えた", summary.removed)}
-${fileList("名前が変わった", summary.renamed.map((r) => `${r.before} → ${r.after}`))}
-</section>
-</main>
-<footer>before: <code>${escapeHtml(beforeDir)}</code><br>after: <code>${escapeHtml(afterDir)}</code></footer>
-<script>
-  // 白や黒の図形は市松の背景に溶けるので、背景を切り替えられるようにする
-  for (const button of document.querySelectorAll(".bg button")) {
-    button.addEventListener("click", () => {
-      document.body.dataset.bg = button.dataset.bg;
-      for (const b of document.querySelectorAll(".bg button")) b.setAttribute("aria-pressed", String(b === button));
-    });
-  }
-</script>
-</body>
-</html>
-`;
 }

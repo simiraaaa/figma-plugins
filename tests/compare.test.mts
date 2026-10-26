@@ -23,6 +23,8 @@ interface ExportSpec {
   /** png の代わりにそのまま書くバイト列 (壊れた PNG を作る) */
   pngBytes?: Buffer;
   svg?: string;
+  /** そのほかに書くファイル (書き出しの中のパス → 中身) */
+  files?: Record<string, string>;
 }
 
 function writeExport(dir: string, spec: ExportSpec): string {
@@ -46,6 +48,10 @@ function writeExport(dir: string, spec: ExportSpec): string {
   if (spec.svg !== undefined) {
     mkdirSync(path.join(dir, "assets", "svg"), { recursive: true });
     writeFileSync(path.join(dir, "assets", "svg", "1-2.svg"), spec.svg);
+  }
+  for (const [rel, text] of Object.entries(spec.files ?? {})) {
+    mkdirSync(path.dirname(path.join(dir, rel)), { recursive: true });
+    writeFileSync(path.join(dir, rel), text);
   }
   return dir;
 }
@@ -74,7 +80,14 @@ test("負例: 1 画素だけ色を変えると、その画素を数え、差分�
   assert.equal(summary.same, false);
   assert.deepEqual(summary.changed, ["node.1-2.png"]);
   assert.deepEqual(summary.images, [
-    { file: "node.1-2.png", changedPixels: 1, width: 4, height: 3, region: { x: 2, y: 1, width: 1, height: 1 } },
+    {
+      file: "node.1-2.png",
+      changedPixels: 1,
+      width: 4,
+      height: 3,
+      region: { x: 2, y: 1, width: 1, height: 1 },
+      regions: [{ x: 2, y: 1, width: 1, height: 1 }],
+    },
   ]);
   const diff = PNG.sync.read(readFileSync(path.join(summary.outDir, "diff", "node.1-2.png")));
   const i = (1 * 4 + 2) * 4;
@@ -107,7 +120,14 @@ test("書き出しの時刻だけが違う書き出しは、変わったとこ�
 test("画面の大きさが変わると、広げた側の画素も違う画素に数える", () => {
   const summary = compare({ png: PLAIN }, { png: { width: 5, height: 3, dots: [] } });
   assert.deepEqual(summary.images, [
-    { file: "node.1-2.png", changedPixels: 3, width: 5, height: 3, region: { x: 4, y: 0, width: 1, height: 3 } },
+    {
+      file: "node.1-2.png",
+      changedPixels: 3,
+      width: 5,
+      height: 3,
+      region: { x: 4, y: 0, width: 1, height: 3 },
+      regions: [{ x: 4, y: 0, width: 1, height: 3 }],
+    },
   ]);
 });
 
@@ -125,17 +145,34 @@ test("負例: 足された画像は report に after だけを載せ、無い be
   assert.match(report, /src="after\/node\.1-2\.png"/);
   assert.doesNotMatch(report, /src="before\/node\.1-2\.png"/);
   assert.doesNotMatch(report, /src="diff\/node\.1-2\.png"/);
+  // before の欄は空けておき、before と after の並びをそろえる
+  assert.match(report, /class="missing"/);
 });
 
 test("負例: 大きい画面の一部だけが変わると、違う画素を囲む範囲を求め、その範囲を切り出した画像を作る", () => {
   const big = { width: 400, height: 300, dots: [] as [number, number, number, number, number][] };
   const summary = compare({ png: big }, { png: { ...big, dots: [[300, 200, 0, 0, 0], [310, 205, 0, 0, 0]] } });
   assert.deepEqual(summary.images[0].region, { x: 300, y: 200, width: 11, height: 6 });
+  assert.deepEqual(summary.images[0].regions, [{ x: 300, y: 200, width: 11, height: 6 }]);
   for (const side of ["before", "after", "diff"]) {
-    const crop = PNG.sync.read(readFileSync(path.join(summary.outDir, "crop", side, "node.1-2.png")));
+    const crop = PNG.sync.read(readFileSync(path.join(summary.outDir, "crop", side, "node.1-2.1.png")));
     assert.ok(crop.width < big.width && crop.height < big.height, `${side} の切り出しが全体より小さくない`);
   }
-  assert.match(readFileSync(summary.report, "utf8"), /src="crop\/diff\/node\.1-2\.png"/);
+  assert.match(readFileSync(summary.report, "utf8"), /src="crop\/diff\/node\.1-2\.1\.png"/);
+});
+
+test("負例: 1 枚の中で離れた所が変わると、変わった箇所ごとに範囲を分けて切り出し、全体図に番号つきの枠を出す", () => {
+  const big = { width: 600, height: 400, dots: [] as [number, number, number, number, number][] };
+  const summary = compare({ png: big }, { png: { ...big, dots: [[50, 40, 0, 0, 0], [52, 41, 0, 0, 0], [500, 350, 0, 0, 0]] } });
+  assert.deepEqual(summary.images[0].regions, [
+    { x: 50, y: 40, width: 3, height: 2 },
+    { x: 500, y: 350, width: 1, height: 1 },
+  ]);
+  for (const n of [1, 2]) {
+    assert.ok(existsSync(path.join(summary.outDir, "crop", "after", `node.1-2.${n}.png`)), `${n} 箇所目の切り出しが無い`);
+  }
+  const report = readFileSync(summary.report, "utf8");
+  assert.equal(report.match(/class="box"/g)?.length, 2);
 });
 
 test("負例: ノードの名前を変えても、ノード ID で前後を組にして、変わったファイルとして比べる", () => {
@@ -178,6 +215,34 @@ test("負例: 構造の差分の区切りに、変わった箇所を含むノー
   assert.match(readFileSync(summary.report, "utf8"), /class="node">Checked icon <code>3:4<\/code>/);
 });
 
+test("負例: 同じ中身の変化が何箇所にもあると、まとめて箇所の数とノードを出す", () => {
+  const child = (id: string, name: string, color: string) => ({ id, name, rows: Array.from({ length: 8 }, (_, i) => i), fills: [{ color }] });
+  const node = (color: string) => ({ node: { id: "1:2", name: "frame", children: [child("3:4", "A", color), child("5:6", "B", color)] } });
+  const summary = compare({ node: node("#2563eb") }, { node: node("#ff8c1a") });
+  const report = readFileSync(summary.report, "utf8");
+  assert.match(report, /同じ変化が 2 箇所/);
+  assert.match(report, /A <code>3:4<\/code>[\s\S]*B <code>5:6<\/code>/);
+});
+
+test("負例: 構造の差分のファイルが多いときは、最初は全部閉じておく", () => {
+  const files = (v: string) => Object.fromEntries(Array.from({ length: 12 }, (_, i) => [`f${i}.${i + 10}-1.json`, `{"v": "${v}"}\n`]));
+  const summary = compare({ files: files("a") }, { files: files("b") });
+  const report = readFileSync(summary.report, "utf8");
+  assert.doesNotMatch(detailsTagFor(report, "f0.10-1.json"), /\bopen\b/);
+});
+
+test("負例: 内容の行が -- や ++ で始まっても、ファイルの見出しと読み違えない", () => {
+  const summary = compare({ files: { "notes.txt": "-- a\n" } }, { files: { "notes.txt": "-- b\n" } });
+  const report = readFileSync(summary.report, "utf8");
+  assert.match(report, /<span class="del">--- a<\/span>/);
+  assert.match(report, /<span class="add">\+-- b<\/span>/);
+});
+
+test("負例: 隠しファイル (.DS_Store など) は比べない", () => {
+  const summary = compare({ files: { ".DS_Store": "a" } }, { files: { ".DS_Store": "b" } });
+  assert.equal(summary.same, true);
+});
+
 test("文字の差分が 1 MiB を超えても、changes.diff に書き切る", () => {
   const long = (c: string) => ({ rows: Array.from({ length: 20000 }, (_, i) => `${c}${i}`.padEnd(60, c)) });
   const summary = compare({ node: long("a") }, { node: long("b") });
@@ -207,6 +272,16 @@ test("負例: 比べた結果の置き場所でも、比べた結果が作らな
   writeFileSync(path.join(first.outDir, "notes.txt"), "x");
   assert.throws(() => compareExports(before, after, first.outDir), /比べた結果の置き場所でない/);
   assert.ok(existsSync(path.join(first.outDir, "notes.txt")));
+});
+
+test("負例: --out が比べる書き出しの中にあれば断り、空のディレクトリなら使う", () => {
+  const root = mkdtempSync(path.join(tmpdir(), "compare-"));
+  const before = writeExport(path.join(root, "before"), {});
+  const after = writeExport(path.join(root, "after"), {});
+  assert.throws(() => compareExports(before, after, path.join(before, "out")), /--out が比べる書き出しの中にある/);
+  const empty = path.join(root, "empty");
+  mkdirSync(empty);
+  assert.equal(compareExports(before, after, empty).same, true);
 });
 
 test("負例: 壊れた PNG はそのファイルを挙げて断り、直せば同じ --out で比べ直せる", () => {
