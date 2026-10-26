@@ -39,7 +39,7 @@ export function screenshotScaleFor(command: string): number {
 
 /**
  * 画像の有無 (index.json の meta.images)。both は構造と画像、none は構造だけ、only は画像だけ。
- * Structure Dump のメニューからは常に both。none / only は Dev Loop への依頼でだけ出る
+ * Structure Dump のメニューからは常に both。none / only は Local Bridge への依頼でだけ出る
  */
 export type ImagesMode = "both" | "none" | "only";
 
@@ -503,7 +503,7 @@ export function buildSectionJson<T extends PlanNode, N>(
 // 書き出し前後の判定と記録 (Figma API の呼び出しは code.ts に残す)
 // ---------------------------------------------------------------------------
 
-/** 書き出すノードをどこから取ったか。selection は選択、page はページ直下、nodes は開発ループの依頼で id を指定した */
+/** 書き出すノードをどこから取ったか。selection は選択、page はページ直下、nodes は Local Bridge の依頼で id を指定した */
 export type RootSource = "selection" | "page" | "nodes";
 
 const HIDDEN_ROOTS_MESSAGE: Readonly<Record<RootSource, string>> = {

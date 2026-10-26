@@ -23,7 +23,7 @@ const DEV_COMMAND_PREFIX = "dev-";
 
 /**
  * 配る manifest から開発用の設定 (devAllowedDomains と "dev-" で始まるメニュー) を外す。
- * 配るプラグインは開発用の設定を持たない (開発ループは配らない plugins/dev-loop にある) が、紛れ込んでも配らない。
+ * 配るプラグインは開発用の設定を持たない (Local Bridge は配らない plugins/local-bridge にある) が、紛れ込んでも配らない。
  * 配った zip もマニフェストから取り込む開発プラグインとして動くので、残すと devAllowedDomains が効く
  */
 export function releaseManifest(manifest: Record<string, unknown>): Record<string, unknown> {

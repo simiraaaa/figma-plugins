@@ -19,7 +19,7 @@
   <div id="status">始めている…</div>
   <div id="error"></div>
   <div id="dev" hidden>
-    <h2>開発ループ (dev サーバー: <span id="dev-server">探している</span>)</h2>
+    <h2>Local Bridge (dev サーバー: <span id="dev-server">探している</span>)</h2>
     <div class="meta">dev サーバーの依頼を待ち、Structure Dump と同じ書き出しをして ZIP を送る。プラグインのコードを build し直すと、最後の書き出しの依頼をもう一度書き出す。</div>
     <h2>script の実行</h2>
     <div class="meta">合言葉を渡した AI は、Plugin API の script でこのファイルを読み書きできる。渡すのは、実行を任せる AI のセッションだけにする。</div>
@@ -114,10 +114,10 @@ function setRunToken(token) {
 function runInstructions() {
   const host = devServer.replace("http://", "");
   return [
-    `Figma の Dev Loop (開発ループ) の script 実行の口: ${devServer}/run`,
+    `Figma の Local Bridge の script 実行の口: ${devServer}/run`,
     `合言葉 (X-Run-Token ヘッダ): ${runToken}`,
     `例: curl -s -X POST ${host}/run -H 'X-Run-Token: ${runToken}' --data-binary 'return figma.currentPage.name;'`,
-    "使い方は figma-plugins リポジトリの plugins/dev-loop/README.md を読む",
+    "使い方は figma-plugins リポジトリの plugins/local-bridge/README.md を読む",
   ].join("\n");
 }
 
@@ -178,7 +178,7 @@ async function devSendRun(request, body) {
   devLog(result.ok ? `#${request.seq} の script を実行した` : `#${request.seq} の script は失敗: ${result.error}`);
 }
 
-async function devLoop() {
+async function localBridge() {
   const startedAt = Date.now();
   let server = null;
   let after = null;
@@ -257,7 +257,7 @@ onmessage = (event) => {
       setRunToken(newRunToken());
     }
     setStatus("依頼を待っている");
-    devLoop();
+    localBridge();
     return;
   }
   if (msg.type === "dev-result" || msg.type === "dev-error" || msg.type === "run-result") {

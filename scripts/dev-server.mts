@@ -1,5 +1,5 @@
 /**
- * 開発ループの dev サーバー。使い方は plugins/dev-loop/README.md。
+ * Local Bridge の dev サーバー。使い方は plugins/local-bridge/README.md。
  *
  *   npm run dev:server                       # 受けた結果は .dev-dump/ に置く
  *   npm run dev:server -- --out <ディレクトリ>
