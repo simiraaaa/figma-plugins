@@ -59,7 +59,7 @@ Figma のログインや MCP の認証は要らない (script の実行だけ合
    改名前の Dev Loop (`plugins/dev-loop/manifest.json`) を取り込んでいたら、その項目を**開発**の一覧から削除してから取り込む。
 5. 対象のファイルを開き、Local Bridge を起動して開いたままにする。
 6. Local Bridge の画面の「AI に渡す文をコピー」を押し、AI のセッションに貼る。
-   渡す文には、dev サーバーの URL・合言葉・この README のファイルパスが入る。
+   渡す文には、dev サーバーの URL・合言葉と、この README と[書き換えの手順](../../.claude/skills/figma-safe-edit/SKILL.md)の絶対パスが入る。
    合言葉は、script の実行を許す鍵で、Local Bridge が自動で作る (詳しくは [script の実行](#script-の実行))。
 
 注意:
@@ -173,6 +173,8 @@ Local Bridge の画面には、いつ・なぜ (新しい依頼か、起動よ�
 
 Plugin API のコードを送ると、Local Bridge が実行して返り値を JSON で返す (Figma MCP の use_figma と同じことを、回数の上限なしに手元で行う)。
 読み取りだけでなく、ファイルの書き換えや削除もできる。
+書き換える script は、[書き換えの手順](../../.claude/skills/figma-safe-edit/SKILL.md)に従って送る。
+書き換える前と後を書き出して `npm run compare` で比べ (構造の差分と、before・after・色が違う画素を赤くした差分の画像)、問題があれば Figma の取り消しで戻す。
 
 1. 人が Local Bridge の画面の「AI に渡す文をコピー」を押し、実行を任せる AI のセッションに貼る。
    渡す文には、dev サーバーの URL と合言葉 (`X-Run-Token`) が入る。
@@ -239,7 +241,7 @@ Plugin API のコードを送ると、Local Bridge が実行して返り値を J
   複数のファイルで開くと、依頼はどれか 1 つの Local Bridge に渡り、どのファイルで処理するかは選べない (書き出しは `fileName` で分かる)。
   処理中の依頼を取り違え、script の `state` を `abandoned` と答えることもある。
 - ポートは、候補の 47717〜47721 (manifest の `devAllowedDomains` と同じ値) のうち、空いている最初のポート。dev サーバーは同時に 1 つしか動かせない。
-  ポートが分からないときは、候補に順に `curl -s localhost:<ポート>/hello` を聞き、`{"app": "structure-dump-dev-server"}` を返したポートを使う。
+  ポートが分からないときは、候補に順に `curl -s localhost:<ポート>/hello` を聞き、`app` に `structure-dump-dev-server` を返したポートを使う (`root` は dev サーバーを起動したリポの場所)。
   `npm run dev:server` が「dev サーバーはもう http://localhost:<ポート> で動いている」と出して終わったら、ほかのセッションが起動した dev サーバーが動いている。
   止めずに、そのまま依頼する。結果はそのサーバーの置き場所に入る。
   置き場所は表示され、`GET /status` の `outDir` でも分かる。
@@ -265,4 +267,3 @@ Plugin API のコードを送ると、Local Bridge が実行して返り値を J
 ## 未確認の前提 (Figma 実機での動作確認推奨)
 
 - 終わらない script (同期の無限ループ) を送ったとき、Local Bridge を閉じて止められること
-- 1 回の script の書き換えを、Figma の取り消し (Cmd+Z) で何回で戻せるか

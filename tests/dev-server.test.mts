@@ -1084,6 +1084,16 @@ test("GET /hello はプラグインの口で、dev サーバーの印を返す",
   }
 });
 
+test("GET /hello は、起動したリポの場所を渡されていれば root で返す (Local Bridge が AI に渡す文を絶対パスで書くため)", async () => {
+  const { base, close } = await startServer(undefined, { root: "/work/figma-plugins" });
+  try {
+    const res = await fetch(`${base}/hello`, { headers: PLUGIN });
+    assert.deepEqual(await json(res), { app: DEV_SERVER_APP, root: "/work/figma-plugins" });
+  } finally {
+    close();
+  }
+});
+
 test("負例: GET /hello を聞いただけでは、プラグインが繋がっているとは見ない", async () => {
   const { base, close } = await startServer();
   try {
