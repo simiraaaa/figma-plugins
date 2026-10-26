@@ -8,7 +8,13 @@
   .meta { color: #777; font-size: 11px; }
   button { font-size: 12px; padding: 6px 12px; border-radius: 6px; border: 1px solid #ccc; background: #fff; cursor: pointer; margin-right: 6px; }
   button:hover { background: #f0f0f0; }
-  #status { color: #777; }
+  .bar { display: flex; align-items: center; gap: 8px; }
+  #status { flex: 1; min-width: 0; color: #777; }
+  #toggle-size { flex: none; margin-right: 0; }
+  body.compact { padding: 4px 6px; }
+  body.compact #status { white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
+  body.compact #toggle-size { font-size: 11px; padding: 1px 8px; }
+  body.compact #error, body.compact #dev { display: none; }
   #error { color: #c62828; white-space: pre-wrap; }
   #dev-log { white-space: pre-wrap; margin: 4px 0 0; max-height: 300px; overflow: auto; }
   #dev-token { font: 11px/1.5 "SF Mono", Menlo, monospace; background: #f5f5f5; border-radius: 4px; padding: 2px 6px; word-break: break-all; }
@@ -16,7 +22,10 @@
 </style>
 </head>
 <body>
-  <div id="status">始めている…</div>
+  <div class="bar">
+    <div id="status">始めている…</div>
+    <button id="toggle-size">小さくする</button>
+  </div>
   <div id="error"></div>
   <div id="dev" hidden>
     <h2>Local Bridge (dev サーバー: <span id="dev-server">探している</span>)</h2>
@@ -39,6 +48,13 @@ function setStatus(text) {
 
 function failureDetail(e) {
   return e instanceof Error ? e.message : String(e);
+}
+
+/** 小さい画面では、状態の 1 行と広げるボタンだけを出す。窓の大きさは本体が変える */
+function setCompact(compact) {
+  document.body.classList.toggle("compact", compact);
+  document.getElementById("toggle-size").textContent = compact ? "広げる" : "小さくする";
+  parent.postMessage({ pluginMessage: { type: "ui-compact", compact } }, "*");
 }
 
 // 候補のポートと印は manifest の devAllowedDomains と scripts/dev-server-lib.mts の DEV_PORTS・DEV_SERVER_APP と同じ値にする
@@ -268,7 +284,13 @@ onmessage = (event) => {
   }
   if (msg.type === "error") {
     document.getElementById("error").textContent = msg.message;
+    // 小さくしていても、エラーの理由が見えるよう広げる
+    setCompact(false);
   }
+};
+
+document.getElementById("toggle-size").onclick = () => {
+  setCompact(!document.body.classList.contains("compact"));
 };
 
 function copyText(text, label) {
