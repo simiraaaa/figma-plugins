@@ -43,6 +43,8 @@ clone 直後や pull 直後は必ずビルドしてから Figma に読み込む�
 
 インポートは初回のみ。以降はどのデザインファイルでも Plugins → Development 配下から実行でき、
 コードを更新したときは再ビルドすれば次の実行から反映される (再インポート不要)。
+例外は、プラグインのディレクトリ名が変わったとき (Dev Loop → Local Bridge の改名など)。
+Figma は取り込んだときの場所の manifest.json を読み直す (上の 2) ので、Development 配下の古い項目を削除し、新しい manifest を取り込み直す。
 
 使い方は各プラグインの README を参照。
 

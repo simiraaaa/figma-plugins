@@ -5,7 +5,7 @@
  * それを long-poll で取り、書き出した ZIP や script の返り値をこのサーバーへ POST する。受けた ZIP は outDir の下へ展開する。
  * ホットリロードで走り直したプラグインは、まだ渡していない最後の依頼を受け取る (無ければ最後の書き出しの依頼をもう一度書き出す)。
  *
- * 候補のポートと dev サーバーの印は、 Local Bridge の manifest の devAllowedDomains と ui.html が同じ値を持つ
+ * 候補のポートと dev サーバーの印は、Local Bridge の manifest の devAllowedDomains と ui.html が同じ値を持つ
  * (tests/dev-server.test.mts が一致を見る)。
  */
 import { randomUUID } from "node:crypto";
@@ -418,7 +418,7 @@ export function notStartedMessage(outcome: Exclude<CandidateOutcome, { kind: "li
   return (
     `候補のポート ${outcome.ports.join("・")} がどれも、dev サーバーとして答えない相手 (別のアプリか、答えられなくなった dev サーバー) に使われている。` +
     "どれかを空けるか、候補を変える " +
-    "(scripts/dev-server-lib.mts の DEV_PORTS・plugins/local-bridge/manifest.json の devAllowedDomains・plugins/local-bridge/src/ui.html の DEV_PORTS をそろえて変え、 Local Bridge を起動し直す)"
+    "(scripts/dev-server-lib.mts の DEV_PORTS・plugins/local-bridge/manifest.json の devAllowedDomains・plugins/local-bridge/src/ui.html の DEV_PORTS をそろえて変え、Local Bridge を起動し直す)"
   );
 }
 

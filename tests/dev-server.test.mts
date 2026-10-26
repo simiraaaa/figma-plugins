@@ -3,7 +3,7 @@
  *
  * 実行: npm test
  * AI (curl) と Local Bridge の UI の役を fetch で演じ、依頼 → long-poll → 結果の展開の往復を見る。
- * ポートの値がサーバー・ Local Bridge の manifest・ui.html でそろっていること、
+ * ポートの値がサーバー・Local Bridge の manifest・ui.html でそろっていること、
  * 配るプラグインが通信の設定を持たず、紛れ込んでも配る manifest から外れることも見る。
  */
 import { test } from "node:test";
@@ -1162,7 +1162,7 @@ test("負例: ブラウザのサイトからの送信と、AI 側の口への Or
   }
 });
 
-test("候補のポートと dev サーバーの印は、サーバー・ Local Bridge の devAllowedDomains・ui.html でそろっている", () => {
+test("候補のポートと dev サーバーの印は、サーバー・Local Bridge の devAllowedDomains・ui.html でそろっている", () => {
   const manifest = JSON.parse(
     readFileSync(path.join(root, "plugins/local-bridge/manifest.json"), "utf8")
   ) as { networkAccess: { allowedDomains: string[]; devAllowedDomains?: string[] } };
