@@ -94,6 +94,8 @@ const CROP_MARGIN = 64;
 const CROP_MAX_AREA_RATIO = 0.5;
 /** 切り出す範囲の数の上限。超えた分は全体の画像で見る */
 export const MAX_CROPS = 30;
+/** 違う画素のあるます目がこれより多い (全面が変わったなど) ときは、分けずに 1 つの範囲にする (分ける計算が重くなるため) */
+const MAX_REGION_CELLS = 20000;
 
 /** 隠しファイル (.DS_Store など) は書き出しの中身でないので比べない */
 function listFiles(root: string, dir = ""): string[] {
@@ -196,6 +198,7 @@ function changedRegions(diff: PNG): Region[] {
       cells.set(cell, union(cells.get(cell) ?? null, { x, y, width: 1, height: 1 }));
     }
   }
+  if (cells.size > MAX_REGION_CELLS) return [[...cells.values()].reduce<Region | null>(union, null)!];
   const regions: Region[] = [];
   const seen = new Set<number>();
   for (const start of cells.keys()) {
@@ -259,7 +262,8 @@ function prepareOutDir(outDir: string, inputs: readonly string[]): void {
     if (isInside(path.resolve(outDir), path.resolve(dir))) throw new Error(`--out が比べる書き出しの中にある: ${outDir}`);
   }
   if (existsSync(outDir)) {
-    const entries = readdirSync(outDir);
+    // 隠しファイル (Finder が作る .DS_Store など) は、比べた結果の中身でないので数えず、消さずに残す
+    const entries = readdirSync(outDir).filter((e) => !e.startsWith("."));
     const unknown = entries.filter((e) => !OUT_ENTRIES.has(e));
     if (entries.length > 0 && (!entries.includes(SUMMARY_FILE) || unknown.length > 0)) {
       const detail = unknown.length > 0 ? ` (比べた結果が作らないもの: ${unknown.join(", ")})` : " (summary.json が無い)";

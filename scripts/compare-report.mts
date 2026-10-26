@@ -75,8 +75,9 @@ function regionMap(image: ImageChange): string {
         )};height:${pct(r.height, image.height)}"><b>${i + 1}</b></span>`
     )
     .join("");
+  // 枠の座標は前後の大きい方にそろえた画像のものなので、同じ大きさの差分の画像に重ねる (after に重ねると、小さくなったときにずれる)
   return `<figure class="map"><figcaption>変わった箇所 (番号は下の切り出しと同じ)</figcaption><div class="map-inner"><img src="${src(
-    "after",
+    "diff",
     image.file
   )}" loading="lazy" alt="">${boxes}</div></figure>`;
 }
@@ -214,7 +215,8 @@ function hunkBlock(hunk: Hunk, names: Map<string, string>): string {
 /** 足した・消した行の中身 (字下げを除く) が同じ区切りを、同じ変化としてまとめる。2 箇所以上のものだけ、多い順に返す */
 function groupSameChanges(files: readonly FileDiff[], names: ReadonlyMap<string, Map<string, string>>): SameChange[] {
   const groups = new Map<string, SameChange>();
-  for (const file of files) {
+  // SVG のコードは閉じておく約束なので、まとめにも出さない (同じ変化は構造の json の側に出る)
+  for (const file of files.filter((f) => !f.file.toLowerCase().endsWith(".svg"))) {
     for (const hunk of file.hunks) {
       const changes = hunk.lines.filter((l) => l.startsWith("+") || l.startsWith("-"));
       if (changes.length === 0) continue;
@@ -229,12 +231,22 @@ function groupSameChanges(files: readonly FileDiff[], names: ReadonlyMap<string,
   return [...groups.values()].filter((g) => g.count >= 2).sort((a, b) => b.count - a.count);
 }
 
-/** changes.diff から同じ変化のまとめを作る (summary.json と report の両方で使う)。大きすぎる差分は読まない */
+/** changes.diff から同じ変化のまとめを作る (summary.json と report の両方で使う)。report に載せきれない大きな差分でも作る */
 export function sameChangesOf(outDir: string, changesDiff: string): SameChange[] {
-  if (statSync(changesDiff).size > REPORT_TEXT_DIFF_MAX) return [];
   const files = splitDiff(readFileSync(changesDiff, "utf8"));
   const names = new Map(files.map((f) => [f.file, nodeNames(outDir, f.file)]));
-  return groupSameChanges(files, names).slice(0, MAX_GROUPS);
+  return groupSameChanges(files, names);
+}
+
+function groupSection(groups: readonly SameChange[]): string {
+  if (groups.length === 0) return "";
+  return `<h3>同じ変化のまとめ</h3>
+<p class="hint">同じ中身の変化 (足した・消した行が同じもの) をまとめ、多い順に並べる。場所を開くと、どのノードかが分かる。</p>
+${groups.slice(0, MAX_GROUPS).map(groupBlock).join("\n")}${
+    groups.length > MAX_GROUPS
+      ? `<p class="hint">ほかに ${groups.length - MAX_GROUPS} 種類ある (全部は summary.json の sameChanges)。</p>`
+      : ""
+  }`;
 }
 
 function groupBlock(group: SameChange): string {
@@ -273,27 +285,21 @@ function textSection(summary: CompareSummary): string {
   if (summary.changesDiff === null) return "";
   const size = statSync(summary.changesDiff).size;
   if (size > REPORT_TEXT_DIFF_MAX) {
-    return `<section id="text"><h2>構造の差分</h2><p>差分が大きい (${Math.round(size / 1024)} KB) ので載せていない。<a href="${CHANGES_DIFF_FILE}">${CHANGES_DIFF_FILE}</a> を開く。</p></section>`;
+    return `<section id="text"><h2>構造の差分</h2>
+${groupSection(summary.sameChanges)}
+<p>ファイルごとの差分は大きい (${Math.round(size / 1024)} KB) ので載せていない。<a href="${CHANGES_DIFF_FILE}">${CHANGES_DIFF_FILE}</a> を開く。</p></section>`;
   }
   const files = splitDiff(readFileSync(summary.changesDiff, "utf8"));
   const names = new Map(files.map((f) => [f.file, nodeNames(summary.outDir, f.file)]));
   const groups = summary.sameChanges;
   const totalLines = files.reduce((n, f) => n + f.lineCount, 0);
   const openAll = files.length <= OPEN_FILES_MAX && totalLines <= OPEN_TOTAL_LINES_MAX;
-  const groupSection =
-    groups.length === 0
-      ? ""
-      : `<h3>同じ変化のまとめ</h3>
-<p class="hint">同じ中身の変化 (足した・消した行が同じもの) をまとめ、多い順に並べる。場所を開くと、どのノードかが分かる。</p>
-${groups.map(groupBlock).join("\n")}${
-          groups.length === MAX_GROUPS ? `<p class="hint">多い順に ${MAX_GROUPS} 種類まで載せている。</p>` : ""
-        }
-<h3>ファイルごとの差分</h3>`;
+  const groupsHtml = groups.length === 0 ? "" : `${groupSection(groups)}\n<h3>ファイルごとの差分</h3>`;
   return `<section id="text"><h2>構造の差分</h2>
 <p class="hint">${
     openAll ? "SVG のコードと長い差分は閉じてある。" : "ファイルや行が多いので、全部閉じてある。"
   }見出しを押すと開く。区切りの行には、変わった箇所の直前に始まるノードの名前と ID が出る。全部は <a href="${CHANGES_DIFF_FILE}">${CHANGES_DIFF_FILE}</a></p>
-${groupSection}
+${groupsHtml}
 ${files.map((f) => fileDiffBlock(f, names.get(f.file)!, openAll)).join("\n")}</section>`;
 }
 

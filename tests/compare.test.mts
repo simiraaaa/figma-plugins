@@ -248,6 +248,32 @@ test("負例: 隠しファイル (.DS_Store など) は比べない", () => {
   assert.equal(summary.same, true);
 });
 
+test("負例: 文字のファイルが足されただけでも、比べて差分に出す", () => {
+  const summary = compare({}, { files: { "Note.9-9.json": '{"name": "note"}\n' } });
+  assert.deepEqual(summary.added, ["Note.9-9.json"]);
+  assert.ok(summary.changesDiff !== null);
+  assert.match(readFileSync(summary.changesDiff, "utf8"), /^\+\{"name": "note"\}$/m);
+});
+
+test("負例: SVG のコードは、同じ変化のまとめにも出さない", () => {
+  const svg = (fill: string) => `<svg><path d="M0 0" fill="${fill}"/></svg>\n`;
+  const files = (fill: string) => ({ "assets/svg/a.svg": svg(fill), "assets/svg/b.svg": svg(fill) });
+  const summary = compare({ files: files("white") }, { files: files("#FF8C1A") });
+  assert.deepEqual(summary.sameChanges, []);
+});
+
+test("負例: 全体図の枠は、前後の大きい方にそろえた差分の画像に重ねる (after が小さくなってもずれない)", () => {
+  const summary = compare({ png: { width: 400, height: 300, dots: [[390, 10, 0, 0, 0]] } }, { png: { width: 350, height: 300, dots: [] } });
+  assert.match(readFileSync(summary.report, "utf8"), /class="map-inner"><img src="diff\/node\.1-2\.png"/);
+});
+
+test("負例: 差分が大きくても、同じ変化のまとめを出す", () => {
+  const long = (c: string) => JSON.stringify({ rows: Array.from({ length: 20000 }, (_, i) => `${c}${i}`.padEnd(60, c)) }, null, 2) + "\n";
+  const summary = compare({ files: { "f.1-1.json": long("a"), "g.2-2.json": long("a") } }, { files: { "f.1-1.json": long("b"), "g.2-2.json": long("b") } });
+  assert.ok(statSync(summary.changesDiff!).size > 2 * 1024 * 1024);
+  assert.equal(summary.sameChanges[0]?.count, 2);
+});
+
 test("文字の差分が 1 MiB を超えても、changes.diff に書き切る", () => {
   const long = (c: string) => ({ rows: Array.from({ length: 20000 }, (_, i) => `${c}${i}`.padEnd(60, c)) });
   const summary = compare({ node: long("a") }, { node: long("b") });
@@ -287,6 +313,15 @@ test("負例: --out が比べる書き出しの中にあれば断り、空のデ
   const empty = path.join(root, "empty");
   mkdirSync(empty);
   assert.equal(compareExports(before, after, empty).same, true);
+});
+
+test("負例: 比べた結果の置き場所に隠しファイル (.DS_Store など) があっても、置き換えて比べ直す", () => {
+  const root = mkdtempSync(path.join(tmpdir(), "compare-"));
+  const before = writeExport(path.join(root, "before"), {});
+  const after = writeExport(path.join(root, "after"), {});
+  const first = compareExports(before, after, path.join(root, "out"));
+  writeFileSync(path.join(first.outDir, ".DS_Store"), "x");
+  assert.equal(compareExports(before, after, first.outDir).same, true);
 });
 
 test("負例: 壊れた PNG はそのファイルを挙げて断り、直せば同じ --out で比べ直せる", () => {
