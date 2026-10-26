@@ -37,7 +37,7 @@ export interface ImageChange {
   height: number;
   /** 違う画素を全部囲む範囲。片方にしか無い画像と、違う画素が無い (大きさだけ違う) 画像は null */
   region: Region | null;
-  /** 離れた変化ごとに分けた範囲 (上から順)。crop/<side>/<パス>.<番号>.png に、この順で切り出す */
+  /** 離れた変化ごとに分けた範囲 (上から順。変わった所が多すぎるときは 1 つにまとめる)。crop/<side>/<パス>.<番号>.png に、この順で切り出す */
   regions: Region[];
 }
 

@@ -64,7 +64,7 @@ function croppedIndexes(image: ImageChange, outDir: string): number[] {
     .filter((i) => existsSync(path.join(outDir, cropFile("diff", image.file, i))));
 }
 
-/** after の画像に、変わった箇所の枠と番号を重ねる */
+/** 差分の画像に、変わった箇所の枠と番号を重ねる */
 function regionMap(image: ImageChange): string {
   const boxes = image.regions
     .map(
@@ -215,7 +215,7 @@ function hunkBlock(hunk: Hunk, names: Map<string, string>): string {
 /** 足した・消した行の中身 (字下げを除く) が同じ区切りを、同じ変化としてまとめる。2 箇所以上のものだけ、多い順に返す */
 function groupSameChanges(files: readonly FileDiff[], names: ReadonlyMap<string, Map<string, string>>): SameChange[] {
   const groups = new Map<string, SameChange>();
-  // SVG のコードは閉じておく約束なので、まとめにも出さない (同じ変化は構造の json の側に出る)
+  // SVG のコードは閉じておく約束なので、まとめにも出さない
   for (const file of files.filter((f) => !f.file.toLowerCase().endsWith(".svg"))) {
     for (const hunk of file.hunks) {
       const changes = hunk.lines.filter((l) => l.startsWith("+") || l.startsWith("-"));
