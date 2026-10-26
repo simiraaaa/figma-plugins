@@ -43,7 +43,10 @@
 
 <script>
 function setStatus(text) {
-  document.getElementById("status").textContent = text;
+  const status = document.getElementById("status");
+  status.textContent = text;
+  // 小さい窓では状態の行が途中で切れるので、指を置くと全文が出るようにする
+  status.title = text;
 }
 
 function failureDetail(e) {
@@ -254,7 +257,7 @@ async function localBridge() {
     }
     // 小さい窓では記録が隠れるので、問題があったことだけを状態の行に残す。
     // 実行したか・結果を送れたかなどの中身は記録に書いてある (状態の行では言い分けない)
-    setStatus(ok ? "依頼を待っている" : `#${request.seq} で問題があった (広げて記録を見る)`);
+    setStatus(ok ? "依頼を待っている" : `#${request.seq} で問題あり (広げて記録を見る)`);
   }
 }
 
