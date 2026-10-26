@@ -222,6 +222,11 @@ test("負例: 同じ中身の変化が何箇所にもあると、まとめて箇
   const report = readFileSync(summary.report, "utf8");
   assert.match(report, /同じ変化が 2 箇所/);
   assert.match(report, /A <code>3:4<\/code>[\s\S]*B <code>5:6<\/code>/);
+  // AI も長い差分を同じ変化ごとに分けられるよう、summary にも出す
+  assert.deepEqual(
+    summary.sameChanges.map((g) => [g.count, g.places.map((p) => `${p.name} ${p.nodeId}`)]),
+    [[2, ["A 3:4", "B 5:6"]]]
+  );
 });
 
 test("負例: 構造の差分のファイルが多いときは、最初は全部閉じておく", () => {

@@ -4,7 +4,7 @@
  */
 import { existsSync, readFileSync, statSync } from "node:fs";
 import path from "node:path";
-import type { CompareSummary, ImageChange } from "./compare-lib.mts";
+import type { CompareSummary, ImageChange, SameChange } from "./compare-lib.mts";
 
 export const TEXT_EXTENSIONS: ReadonlySet<string> = new Set([".json", ".md", ".svg", ".txt"]);
 export const CHANGES_DIFF_FILE = "changes.diff";
@@ -211,30 +211,40 @@ function hunkBlock(hunk: Hunk, names: Map<string, string>): string {
   return `<span class="hunk">${escapeHtml(hunk.header)}${node}</span>${hunk.lines.map(changeLine).join("")}`;
 }
 
-interface Group {
-  lines: string[];
-  places: { file: string; label: string }[];
-}
-
-/** 足した・消した行の中身 (字下げを除く) が同じ区切りを、同じ変化としてまとめる。2 箇所以上のものだけ返す */
-function sameChanges(files: readonly FileDiff[], names: ReadonlyMap<string, Map<string, string>>): Group[] {
-  const groups = new Map<string, Group>();
+/** 足した・消した行の中身 (字下げを除く) が同じ区切りを、同じ変化としてまとめる。2 箇所以上のものだけ、多い順に返す */
+function groupSameChanges(files: readonly FileDiff[], names: ReadonlyMap<string, Map<string, string>>): SameChange[] {
+  const groups = new Map<string, SameChange>();
   for (const file of files) {
     for (const hunk of file.hunks) {
       const changes = hunk.lines.filter((l) => l.startsWith("+") || l.startsWith("-"));
       if (changes.length === 0) continue;
       const key = changes.map((l) => l[0] + l.slice(1).trim()).join("\n");
-      const group = groups.get(key) ?? { lines: changes, places: [] };
-      group.places.push({ file: file.file, label: nodeLabel(hunk.nodeId, names.get(file.file)!) || "(ノード不明)" });
+      const group = groups.get(key) ?? { count: 0, lines: changes, places: [] };
+      group.count++;
+      const name = hunk.nodeId === null ? null : (names.get(file.file)!.get(hunk.nodeId) ?? null);
+      group.places.push({ file: file.file, nodeId: hunk.nodeId, name });
       groups.set(key, group);
     }
   }
-  return [...groups.values()].filter((g) => g.places.length >= 2).sort((a, b) => b.places.length - a.places.length);
+  return [...groups.values()].filter((g) => g.count >= 2).sort((a, b) => b.count - a.count);
 }
 
-function groupBlock(group: Group): string {
+/** changes.diff から同じ変化のまとめを作る (summary.json と report の両方で使う)。大きすぎる差分は読まない */
+export function sameChangesOf(outDir: string, changesDiff: string): SameChange[] {
+  if (statSync(changesDiff).size > REPORT_TEXT_DIFF_MAX) return [];
+  const files = splitDiff(readFileSync(changesDiff, "utf8"));
+  const names = new Map(files.map((f) => [f.file, nodeNames(outDir, f.file)]));
+  return groupSameChanges(files, names).slice(0, MAX_GROUPS);
+}
+
+function groupBlock(group: SameChange): string {
   const places = group.places
-    .map((p) => `<li>${p.label} <span class="file">${escapeHtml(p.file)}</span></li>`)
+    .map(
+      (p) =>
+        `<li>${p.nodeId === null ? "(ノード不明)" : `${escapeHtml(p.name ?? "")} <code>${escapeHtml(p.nodeId)}</code>`} <span class="file">${escapeHtml(
+          p.file
+        )}</span></li>`
+    )
     .join("");
   const head = group.lines.slice(0, GROUP_PREVIEW_LINES).map(changeLine).join("");
   const rest =
@@ -244,7 +254,7 @@ function groupBlock(group: Group): string {
           .map(changeLine)
           .join("")}</pre></details>`
       : "";
-  return `<div class="group"><p><b>同じ変化が ${group.places.length} 箇所</b></p><pre>${head}</pre>${rest}
+  return `<div class="group"><p><b>同じ変化が ${group.count} 箇所</b></p><pre>${head}</pre>${rest}
 <details><summary>場所</summary><ul>${places}</ul></details></div>`;
 }
 
@@ -267,7 +277,7 @@ function textSection(summary: CompareSummary): string {
   }
   const files = splitDiff(readFileSync(summary.changesDiff, "utf8"));
   const names = new Map(files.map((f) => [f.file, nodeNames(summary.outDir, f.file)]));
-  const groups = sameChanges(files, names);
+  const groups = summary.sameChanges;
   const totalLines = files.reduce((n, f) => n + f.lineCount, 0);
   const openAll = files.length <= OPEN_FILES_MAX && totalLines <= OPEN_TOTAL_LINES_MAX;
   const groupSection =
@@ -275,8 +285,8 @@ function textSection(summary: CompareSummary): string {
       ? ""
       : `<h3>同じ変化のまとめ</h3>
 <p class="hint">同じ中身の変化 (足した・消した行が同じもの) をまとめ、多い順に並べる。場所を開くと、どのノードかが分かる。</p>
-${groups.slice(0, MAX_GROUPS).map(groupBlock).join("\n")}${
-          groups.length > MAX_GROUPS ? `<p class="hint">ほかに ${groups.length - MAX_GROUPS} 種類ある。</p>` : ""
+${groups.map(groupBlock).join("\n")}${
+          groups.length === MAX_GROUPS ? `<p class="hint">多い順に ${MAX_GROUPS} 種類まで載せている。</p>` : ""
         }
 <h3>ファイルごとの差分</h3>`;
   return `<section id="text"><h2>構造の差分</h2>

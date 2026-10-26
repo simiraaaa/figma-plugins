@@ -19,7 +19,7 @@ import {
 import path from "node:path";
 import pixelmatch from "pixelmatch";
 import { PNG } from "pngjs";
-import { CHANGES_DIFF_FILE, cropFile, NODE_ID_LINE, reportHtml, TEXT_EXTENSIONS } from "./compare-report.mts";
+import { CHANGES_DIFF_FILE, cropFile, NODE_ID_LINE, reportHtml, sameChangesOf, TEXT_EXTENSIONS } from "./compare-report.mts";
 
 export interface Region {
   x: number;
@@ -46,6 +46,15 @@ export interface Rename {
   after: string;
 }
 
+export interface SameChange {
+  /** この変化がある箇所の数 */
+  count: number;
+  /** 足した・消した行 (diff -u の + と - の行) */
+  lines: string[];
+  /** 箇所ごとのファイルと、変わった箇所の直前に始まるノード (diff -F で分かったもの) */
+  places: { file: string; nodeId: string | null; name: string | null }[];
+}
+
 export interface CompareSummary {
   same: boolean;
   added: string[];
@@ -57,6 +66,8 @@ export interface CompareSummary {
   outDir: string;
   /** 文字のファイルの差分 (diff -u) を書いたファイル。変わった文字のファイルが無ければ null */
   changesDiff: string | null;
+  /** 構造の差分のうち、同じ中身の変化が 2 箇所以上あるもの (多い順) */
+  sameChanges: SameChange[];
   report: string;
 }
 
@@ -370,7 +381,8 @@ export function compareExports(beforeDir: string, afterDir: string, outDir: stri
   const changesDiff = textChanged ? writeTextDiff(outDir) : null;
   const same = added.length === 0 && removed.length === 0 && renamed.length === 0 && changed.length === 0;
   const report = path.join(outDir, REPORT_FILE);
-  const summary: CompareSummary = { same, added, removed, renamed, changed, images, outDir, changesDiff, report };
+  const sameChanges = changesDiff === null ? [] : sameChangesOf(outDir, changesDiff);
+  const summary: CompareSummary = { same, added, removed, renamed, changed, images, outDir, changesDiff, sameChanges, report };
   writeFile(report, reportHtml(summary, beforeDir, afterDir));
   writeFile(path.join(outDir, SUMMARY_FILE), JSON.stringify(summary, null, 2) + "\n");
   return summary;
