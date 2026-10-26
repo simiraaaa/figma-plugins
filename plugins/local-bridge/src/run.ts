@@ -1,5 +1,5 @@
 /**
- * 開発ループの script 実行 (dev サーバーの POST /run で AI が送ったコードを、プラグインの本体で実行する)
+ * Local Bridge の script 実行 (dev サーバーの POST /run で AI が送ったコードを、プラグインの本体で実行する)
  *
  * figma は引数で受け取る (node --test で素のオブジェクトを渡して検証できるようにする)。
  */

@@ -1,6 +1,6 @@
 {
-  "name": "Dev Loop",
-  "id": "figma-plugins-dev-loop",
+  "name": "Local Bridge",
+  "id": "figma-plugins-local-bridge",
   "api": "1.0.0",
   "main": "dist/code.js",
   "ui": "src/ui.html",

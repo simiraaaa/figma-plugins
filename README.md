@@ -3,23 +3,23 @@
 汎用の Figma プラグイン集。特定の UI ライブラリやプロジェクトには依存しない。
 配るのは Structure Dump と Component Spec で、どちらも「Figma のデザインを AI (Claude 等) に渡せる形に書き出す」ためのプラグイン。
 コード生成はしない (解釈とコード化は AI 側の仕事)。
-Dev Loop は、AI が自分で書き出しや script の実行を頼むためのプラグインで、リリースの zip には入れない。
-使う人 (開発者もデザイナーも) は、リポジトリを clone して、Figma に取り込む ([導入手順](plugins/dev-loop/README.md#導入手順-デザイナー向け))。
+Local Bridge は、AI が自分で書き出しや script の実行を頼むためのプラグインで、リリースの zip には入れない。
+使う人 (開発者もデザイナーも) は、リポジトリを clone して、Figma に取り込む ([導入手順](plugins/local-bridge/README.md#導入手順-デザイナー向け))。
 
 | プラグイン | 用途 |
 |---|---|
 | [Structure Dump](plugins/structure-dump/) | 選択範囲をセクション・画面フレームごとの構造 JSON + スクリーンショットに分け、1 つの ZIP で書き出す |
 | [Component Spec](plugins/component-spec/) | 選択中のコンポーネント群から variant / props の仕様 JSON を書き出す |
-| [Dev Loop](plugins/dev-loop/) | リリースの zip に入れない (clone して、Figma に取り込む)。手元の dev サーバー経由で、AI が Structure Dump と同じ書き出しと Plugin API の script の実行を頼める |
+| [Local Bridge](plugins/local-bridge/) | リリースの zip に入れない (clone して、Figma に取り込む)。手元の dev サーバー経由で、AI が Structure Dump と同じ書き出しと Plugin API の script の実行を頼める |
 
 ## セットアップ
 
 ```sh
 npm install
-npm run build        # 全部ビルド (個別: build:dump / build:spec / build:dev-loop)
+npm run build        # 全部ビルド (個別: build:dump / build:spec / build:local-bridge)
 ```
 
-`build:dump` は Dev Loop も作り直す (Dev Loop は Structure Dump の書き出しを取り込むので、片方だけ古いままにしない)。
+`build:dump` は Local Bridge も作り直す (Local Bridge は Structure Dump の書き出しを取り込むので、片方だけ古いままにしない)。
 
 ビルドすると各プラグインの `dist/code.js` が生成される。生成物はコミットしないので、
 clone 直後や pull 直後は必ずビルドしてから Figma に読み込む。
@@ -39,7 +39,7 @@ clone 直後や pull 直後は必ずビルドしてから Figma に読み込む�
 5. 読み込みたいプラグインの `manifest.json` を選択する
    - Structure Dump: `plugins/structure-dump/manifest.json`
    - Component Spec: `plugins/component-spec/manifest.json`
-   - Dev Loop: `plugins/dev-loop/manifest.json` (AI に書き出しや script を頼ませるときだけ)
+   - Local Bridge: `plugins/local-bridge/manifest.json` (AI に書き出しや script を頼ませるときだけ)
 
 インポートは初回のみ。以降はどのデザインファイルでも Plugins → Development 配下から実行でき、
 コードを更新したときは再ビルドすれば次の実行から反映される (再インポート不要)。
@@ -51,14 +51,14 @@ clone 直後や pull 直後は必ずビルドしてから Figma に読み込む�
 ```
 plugins/structure-dump/   構造 JSON + スクリーンショットの ZIP 書き出し
 plugins/component-spec/   variant / props の仕様書き出し
-plugins/dev-loop/         dev サーバー (scripts/dev-server.mts) につなぎ、AI の依頼を実行する
+plugins/local-bridge/     dev サーバー (scripts/dev-server.mts) につなぎ、AI の依頼を実行する
 shared/nodeOrder.ts       複数ノードを選択したときの出力順を、選択順でなく
                           document 上の並び順に固定する (Structure Dump と Component Spec で共有)
 ```
 
 - Structure Dump と Component Spec は `networkAccess: none` (外部送信なし)。
-  dev サーバーにつなぐのは、リリースの zip に入れない Dev Loop だけで、`devAllowedDomains` で localhost を許す。
-  Dev Loop は Structure Dump の書き出し (`plugins/structure-dump/src/dump.ts`) を build で取り込むので、
+  dev サーバーにつなぐのは、リリースの zip に入れない Local Bridge だけで、`devAllowedDomains` で localhost を許す。
+  Local Bridge は Structure Dump の書き出し (`plugins/structure-dump/src/dump.ts`) を build で取り込むので、
   どちらから書き出しても同じ ZIP になる
 - ZIP は圧縮なし (stored) の ZIP 形式で、外部ライブラリを使わない自前実装 (`plugins/structure-dump/src/zip.ts`) で生成する
 - JSON の組み立ては Figma API 非依存の純関数に分離してある

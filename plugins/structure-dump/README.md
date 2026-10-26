@@ -12,7 +12,7 @@ Figma の構造をまるごと書き出すプラグイン。特定の UI ライ�
 
 ```sh
 npm install        # リポルートで (未実施なら)
-npm run build:dump # Dev Loop も作り直す
+npm run build:dump # Local Bridge も作り直す
 ```
 
 Figma への取り込みは[リポルート README の共通手順](../../README.md#figma-への取り込み-共通手順)を参照
@@ -47,10 +47,10 @@ assets/svg/<id>.svg                  ベクターだけのノード (アイコ�
   正本は [`src/zip-readme.md`](src/zip-readme.md) で、ビルド時に code.js へ埋め込まれる
   (esbuild の `--loader:.md=text`)
 
-## 開発ループ (AI が自分で読み取る)
+## Local Bridge (AI が自分で読み取る)
 
-AI から dev サーバー経由で書き出しを頼む仕組みは、リリースの zip に入れないプラグイン [Dev Loop](../dev-loop/) にある。
-Dev Loop はこのプラグインの書き出し (`src/dump.ts`) を build で取り込むので、どちらから書き出しても同じ ZIP になる。
+AI から dev サーバー経由で書き出しを頼む仕組みは、リリースの zip に入れないプラグイン [Local Bridge](../local-bridge/) にある。
+Local Bridge はこのプラグインの書き出し (`src/dump.ts`) を build で取り込むので、どちらから書き出しても同じ ZIP になる。
 Structure Dump 自体は通信しない。
 
 ## AI への渡し方のヒント

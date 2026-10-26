@@ -1,9 +1,9 @@
 /**
- * 開発ループの dev サーバーの検査
+ * Local Bridge の dev サーバーの検査
  *
  * 実行: npm test
- * AI (curl) と Dev Loop の UI の役を fetch で演じ、依頼 → long-poll → 結果の展開の往復を見る。
- * ポートの値がサーバー・Dev Loop の manifest・ui.html でそろっていること、
+ * AI (curl) と Local Bridge の UI の役を fetch で演じ、依頼 → long-poll → 結果の展開の往復を見る。
+ * ポートの値がサーバー・ Local Bridge の manifest・ui.html でそろっていること、
  * 配るプラグインが通信の設定を持たず、紛れ込んでも配る manifest から外れることも見る。
  */
 import { test } from "node:test";
@@ -831,7 +831,7 @@ test("プラグインが繋がっていなければ、依頼を積まずにす�
     const res = await fetch(`${base}/export?timeout=5`, { method: "POST", body: "" });
     assert.equal(res.status, 503);
     const body = await json<{ error: string; plugin: PluginState }>(res);
-    assert.match(body.error, /Dev Loop を開いたままにする/);
+    assert.match(body.error, /Local Bridge を開いたままにする/);
     // 起動してからプラグインが一度も来ていない
     assert.deepEqual(body.plugin, {});
     // 積んでいないので、あとから繋いだプラグインには何も渡らない
@@ -1162,16 +1162,16 @@ test("負例: ブラウザのサイトからの送信と、AI 側の口への Or
   }
 });
 
-test("候補のポートと dev サーバーの印は、サーバー・Dev Loop の devAllowedDomains・ui.html でそろっている", () => {
+test("候補のポートと dev サーバーの印は、サーバー・ Local Bridge の devAllowedDomains・ui.html でそろっている", () => {
   const manifest = JSON.parse(
-    readFileSync(path.join(root, "plugins/dev-loop/manifest.json"), "utf8")
+    readFileSync(path.join(root, "plugins/local-bridge/manifest.json"), "utf8")
   ) as { networkAccess: { allowedDomains: string[]; devAllowedDomains?: string[] } };
   assert.deepEqual(manifest.networkAccess.allowedDomains, ["none"]);
   assert.deepEqual(
     manifest.networkAccess.devAllowedDomains,
     DEV_PORTS.map((port) => `http://localhost:${port}/`)
   );
-  const ui = readFileSync(path.join(root, "plugins/dev-loop/src/ui.html"), "utf8");
+  const ui = readFileSync(path.join(root, "plugins/local-bridge/src/ui.html"), "utf8");
   assert.ok(
     ui.includes(`const DEV_PORTS = [${DEV_PORTS.join(", ")}];`),
     "ui.html の DEV_PORTS がサーバーの DEV_PORTS と違う"
@@ -1179,21 +1179,21 @@ test("候補のポートと dev サーバーの印は、サーバー・Dev Loop 
   assert.ok(ui.includes(`const DEV_SERVER_APP = "${DEV_SERVER_APP}";`), "ui.html の DEV_SERVER_APP が違う");
 });
 
-test("Dev Loop の manifest は、書き出しに効く実行条件が Structure Dump と同じ", () => {
+test("Local Bridge の manifest は、書き出しに効く実行条件が Structure Dump と同じ", () => {
   const read = (name: string) =>
     JSON.parse(readFileSync(path.join(root, `plugins/${name}/manifest.json`), "utf8")) as Record<string, unknown>;
   const dump = read("structure-dump");
-  const devLoop = read("dev-loop");
+  const localBridge = read("local-bridge");
   for (const key of ["api", "editorType", "documentAccess", "permissions", "enableProposedApi"]) {
-    assert.deepEqual(devLoop[key], dump[key], `manifest の ${key} が違う`);
+    assert.deepEqual(localBridge[key], dump[key], `manifest の ${key} が違う`);
   }
 });
 
-test("Structure Dump の build は Dev Loop も作り直す (Dev Loop は書き出しを build で取り込む)", () => {
+test("Structure Dump の build は Local Bridge も作り直す (Local Bridge は書き出しを build で取り込む)", () => {
   const pkg = JSON.parse(readFileSync(path.join(root, "package.json"), "utf8")) as {
     scripts: Record<string, string>;
   };
-  assert.match(pkg.scripts["build:dump"], /npm run build:dev-loop/);
+  assert.match(pkg.scripts["build:dump"], /npm run build:local-bridge/);
 });
 
 test("配るプラグインの manifest は通信の設定と開発用のコマンドを持たない", () => {
@@ -1215,7 +1215,7 @@ test("配る manifest に開発用の設定が紛れ込んでも、devAllowedDom
     main: "dist/code.js",
     menu: [
       { name: "書き出し", command: "export-2x" },
-      { name: "開発", command: "dev-loop" },
+      { name: "開発", command: "dev-example" },
     ],
     networkAccess: { allowedDomains: ["none"], devAllowedDomains: ["http://localhost:47717/"] },
   };

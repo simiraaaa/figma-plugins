@@ -1,5 +1,5 @@
 /**
- * dev-loop (開発用プラグイン) の script 実行 (プラグイン側) の検査
+ * local-bridge (開発用プラグイン) の script 実行 (プラグイン側) の検査
  *
  * 実行: npm test
  * figma の代わりに素のオブジェクトを渡し、合言葉の照合・実行・返り値の JSON 化を見る。
@@ -7,11 +7,11 @@
 import { test } from "node:test";
 import assert from "node:assert/strict";
 // 実行するのは esbuild 産物、型は同じソースから取る(産物側は型を持たない)
-import * as runDist from "../plugins/dev-loop/dist/run.mjs";
-import type { RunResultBody } from "../plugins/dev-loop/src/run.ts";
+import * as runDist from "../plugins/local-bridge/dist/run.mjs";
+import type { RunResultBody } from "../plugins/local-bridge/src/run.ts";
 
 const { MAX_RUN_RESULT_CHARS, runScript } =
-  runDist as unknown as typeof import("../plugins/dev-loop/src/run.ts");
+  runDist as unknown as typeof import("../plugins/local-bridge/src/run.ts");
 
 async function run(code: string, api: unknown = {}, token = "t1", options: { expectedToken?: string } = { expectedToken: "t1" }) {
   const body = await runScript({ code, token, expectedToken: options.expectedToken, api });

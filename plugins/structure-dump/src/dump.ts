@@ -1,6 +1,6 @@
 /**
  * Structure Dump の書き出しの本体。
- * Structure Dump のメニューと開発用プラグイン (plugins/dev-loop) の両方が build でこれを取り込むので、
+ * Structure Dump のメニューと開発用プラグイン (plugins/local-bridge) の両方が build でこれを取り込むので、
  * どちらから書き出しても同じ出力になる。書き出しの中身はここだけに置く
  */
 
