@@ -175,6 +175,13 @@ Plugin API のコードを送ると、Local Bridge が実行して返り値を J
 読み取りだけでなく、ファイルの書き換えや削除もできる。
 書き換える script は、[書き換えの手順](../../.claude/skills/figma-safe-edit/SKILL.md)に従って送る。
 書き換える前と後を書き出して `npm run compare` で比べ (構造の差分と、before・after・色が違う画素を赤くした差分の画像)、問題があれば Figma の取り消しで戻す。
+手順が頼る取り消しの挙動は、2026-10-26・27 に Figma デスクトップ 126.10.11 で実測した。
+
+- script の頭と終わりで `figma.commitUndo()` を呼ぶと、その script の書き換えが取り消しの 1 手になる (`figma.triggerUndo()` でも Cmd+Z でも 1 回で戻る)。
+  呼ばないと、続けて送った script の書き換えが 1 手にまとまる。
+- `figma.triggerUndo()` は、そのタブの取り消しの履歴のいちばん新しい 1 手を戻す。
+  script のあとに人が手で書き換えていれば、そちらが先に戻る。
+- 書き出し (`/export`) は取り消しの履歴に手を積まない (書き換えと取り消しのあいだに書き出しを挟んでも、取り消しは script の 1 手を戻した)。
 
 1. 人が Local Bridge の画面の「AI に渡す文をコピー」を押し、実行を任せる AI のセッションに貼る。
    渡す文には、dev サーバーの URL と合言葉 (`X-Run-Token`) が入る。

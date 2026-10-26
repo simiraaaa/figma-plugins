@@ -49,7 +49,7 @@ const DEV_RETRY_MS = 2000;
 const DEV_LOG_LINES = 50;
 /** つないでいる dev サーバー (http://localhost:<ポート>)。見つかっていなければ null */
 let devServer = null;
-/** dev サーバーを起動したリポの場所 (絶対パス)。root を返さない古い dev サーバーなら null */
+/** dev サーバーを起動したリポの場所 (絶対パス)。root を返さない古い dev サーバーなら null。渡す文に埋めるので、改行などの制御文字を含む root も null にする */
 let devRoot = null;
 /** プラグインの本体が照合に使う合言葉。本体が clientStorage に残す */
 let runToken = null;
@@ -94,7 +94,7 @@ async function findDevServer() {
       const res = await fetch(`${base}/hello`, { signal: AbortSignal.timeout(DEV_PROBE_TIMEOUT_MS) });
       const body = await res.json();
       if (body.app === DEV_SERVER_APP) {
-        devRoot = typeof body.root === "string" ? body.root : null;
+        devRoot = typeof body.root === "string" && /^\/[^\u0000-\u001f\u007f]*$/.test(body.root) ? body.root : null;
         return base;
       }
     } catch {
