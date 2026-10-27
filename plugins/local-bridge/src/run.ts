@@ -1,8 +1,8 @@
 /**
  * Local Bridge の script 実行 (dev サーバーの POST /run で AI が送ったコードを、プラグインの本体で実行する) と、
- * 依頼の行き先のファイルの照合 (書き出しの依頼にも使う)
+ * 依頼の行き先のファイルの照合 (書き出しの依頼にも使う)・ファイルごとの合言葉の読み書き
  *
- * figma は引数で受け取る (node --test で素のオブジェクトを渡して検証できるようにする)。
+ * figma と figma.clientStorage は引数で受け取る (node --test で素のオブジェクトを渡して検証できるようにする)。
  */
 
 /** POST /run-result の本文の上限 (文字数)。AI が読み切れる大きさに抑える */
@@ -11,12 +11,56 @@ export const MAX_RUN_RESULT_CHARS = 1_000_000;
 /** プラグインから dev サーバーの POST /run-result へ送る本文 (JSON) の形 */
 export type RunResultBody = { ok: true; value?: unknown } | { ok: false; error: string };
 
+/** figma.clientStorage のうち、合言葉の読み書きに使うもの (検査では素のオブジェクトで差し替える) */
+export interface TokenStore {
+  getAsync(key: string): Promise<unknown>;
+  setAsync(key: string, value: unknown): Promise<void>;
+  deleteAsync(key: string): Promise<void>;
+  keysAsync(): Promise<string[]>;
+}
+
+/**
+ * 合言葉はファイルごとに、このキーで 1 つずつ持つ。
+ * 1 つのキーに全ファイル分をまとめると、複数のタブが同時に初めて作ったとき、読み直して書くあいだに片方が消える
+ */
+const RUN_TOKEN_PREFIX = "devRunToken:";
+/** 前の版が全ファイル共通で使っていたキー。読まない (作り直すときに消す) */
+const LEGACY_RUN_TOKEN_KEY = "devRunToken";
+
+export function runTokenKey(fileKey: string): string {
+  return `${RUN_TOKEN_PREFIX}${fileKey}`;
+}
+
+/** このファイルの合言葉。無ければ candidate (UI が作った乱数) を合言葉にする */
+export async function ensureRunToken(store: TokenStore, fileKey: string, candidate: string): Promise<string> {
+  const stored = await store.getAsync(runTokenKey(fileKey));
+  if (typeof stored === "string" && stored !== "") return stored;
+  await store.setAsync(runTokenKey(fileKey), candidate);
+  return candidate;
+}
+
+/**
+ * 全ファイルの合言葉を消してから、このファイルの合言葉を candidate で作り直す。
+ * 開いたままの別のタブは、次の script の照合でキーが無いので実行しない
+ */
+export async function renewRunTokens(store: TokenStore, fileKey: string, candidate: string): Promise<string> {
+  for (const key of await store.keysAsync()) {
+    if (key.startsWith(RUN_TOKEN_PREFIX) || key === LEGACY_RUN_TOKEN_KEY) await store.deleteAsync(key);
+  }
+  await store.setAsync(runTokenKey(fileKey), candidate);
+  return candidate;
+}
+
 export interface RunInput {
   code: string;
   /** 依頼に付いてきた合言葉 (X-Run-Token) */
   token: string;
-  /** プラグインの画面に出している合言葉 */
-  expectedToken: string | undefined;
+  /** 依頼の行き先のファイル */
+  fileKey: unknown;
+  /** この Local Bridge のファイル (figma.fileKey) */
+  ownFileKey: string;
+  /** 合言葉の保存場所。別のタブで作り直されたら、次の依頼からその値で照合するよう、依頼ごとに読む */
+  store: TokenStore;
   /** コードに figma として渡すもの */
   api: unknown;
 }
@@ -50,13 +94,28 @@ export function wrongFileReason(requested: unknown, own: string): string | undef
 }
 
 /**
- * 合言葉が合えば、code を async 関数の本体として figma を渡して実行し、POST /run-result の本文を返す。
+ * 行き先がこのファイルで、合言葉がこのファイルの最新の合言葉と合えば、code を async 関数の本体として figma を渡して実行し、
+ * POST /run-result の本文を返す。
  * 失敗の理由には実行したかどうかを書く (途中で投げた script の書き換えは残るので、依頼した側が送り直してよいかを決められるように)
  */
 export async function runScript(input: RunInput): Promise<string> {
-  if (input.expectedToken === undefined) return failure("合言葉がまだ無いので実行していない (プラグインを開き直す)");
-  if (input.token !== input.expectedToken) {
-    return failure("合言葉が違うので実行していない (プラグインの画面に出ている合言葉を X-Run-Token に付ける)");
+  const wrongFile = wrongFileReason(input.fileKey, input.ownFileKey);
+  if (wrongFile !== undefined) return failure(wrongFile);
+  let expectedToken: unknown;
+  try {
+    expectedToken = await input.store.getAsync(runTokenKey(input.ownFileKey));
+  } catch (e) {
+    return failure(`合言葉を読めないので実行していない: ${errorText(e)}`);
+  }
+  if (typeof expectedToken !== "string" || expectedToken === "") {
+    return failure(
+      "このファイルの合言葉がまだ無いので実行していない (別のタブで作り直されたときを含む。Local Bridge の「AI に渡す文をコピー」で新しい合言葉の文を作って渡してもらう)"
+    );
+  }
+  if (input.token !== expectedToken) {
+    return failure(
+      "合言葉が違うので実行していない (合言葉はファイルごと。このファイルの Local Bridge の「AI に渡す文」にある合言葉を X-Run-Token に付ける)"
+    );
   }
   let fn: (figma: unknown) => Promise<unknown>;
   try {

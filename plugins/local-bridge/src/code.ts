@@ -14,7 +14,7 @@ import {
   failureText,
 } from "../../structure-dump/src/dump";
 import { DEFAULT_SCREENSHOT_SCALE, ImagesMode, parseImagesMode } from "../../structure-dump/src/plan";
-import { RunResultBody, runScript, wrongFileReason } from "./run";
+import { ensureRunToken, renewRunTokens, runScript, wrongFileReason } from "./run";
 
 interface DevRequest {
   seq: number;
@@ -54,11 +54,10 @@ interface DevRunRequest {
 type DevMessage =
   | { type: "dev-request"; request: DevRequest }
   | { type: "run-request"; request: DevRunRequest }
-  | { type: "dev-token"; token: string }
+  /** このファイルの合言葉を読む (無ければ candidate で作る)。renew なら全ファイルの合言葉を消して作り直す */
+  | { type: "token-get" | "token-renew"; candidate: string }
   | { type: "ui-compact"; compact: boolean };
 
-/** script の実行の合言葉。ホットリロードやファイルをまたいで同じ値を使えるよう、clientStorage に残す */
-const RUN_TOKEN_KEY = "devRunToken";
 /** 小さくしたかは残さず、開くたびに広げた大きさで始める */
 const UI_SIZE = { width: 480, height: 600 };
 const UI_COMPACT_SIZE = { width: 200, height: 32 };
@@ -81,26 +80,32 @@ async function runLocalBridge(): Promise<void> {
     });
     return;
   }
-  const stored: unknown = await figma.clientStorage.getAsync(RUN_TOKEN_KEY);
-  let runToken = typeof stored === "string" ? stored : undefined;
+  // 合言葉はファイルごとに clientStorage に残す (ホットリロードや開き直しでも同じ値が効く)。
+  // 乱数は UI が作る (crypto.getRandomValues は UI の iframe で使う)
   figma.ui.onmessage = async (msg: DevMessage) => {
     if (msg.type === "ui-compact") {
       const size = msg.compact ? UI_COMPACT_SIZE : UI_SIZE;
       figma.ui.resize(size.width, size.height);
       return;
     }
-    if (msg.type === "dev-token") {
-      runToken = msg.token;
-      await figma.clientStorage.setAsync(RUN_TOKEN_KEY, msg.token);
+    if (msg.type === "token-get" || msg.type === "token-renew") {
+      const token =
+        msg.type === "token-renew"
+          ? await renewRunTokens(figma.clientStorage, fileKey, msg.candidate)
+          : await ensureRunToken(figma.clientStorage, fileKey, msg.candidate);
+      figma.ui.postMessage({ type: "token", token });
       return;
     }
     if (msg.type === "run-request") {
       const { seq, code, token } = msg.request;
-      const wrongFile = wrongFileReason(msg.request.fileKey, fileKey);
-      const body =
-        wrongFile === undefined
-          ? await runScript({ code, token, expectedToken: runToken, api: figma })
-          : JSON.stringify({ ok: false, error: wrongFile } satisfies RunResultBody);
+      const body = await runScript({
+        code,
+        token,
+        fileKey: msg.request.fileKey,
+        ownFileKey: fileKey,
+        store: figma.clientStorage,
+        api: figma,
+      });
       figma.ui.postMessage({ type: "run-result", seq, body });
       return;
     }
@@ -135,8 +140,7 @@ async function runLocalBridge(): Promise<void> {
       figma.ui.postMessage({ type: "dev-error", seq: request.seq, message: failureText(err) });
     }
   };
-  // 合言葉がまだ無ければ、UI が作って dev-token で送り返す
-  figma.ui.postMessage({ type: "dev-start", token: runToken, fileKey, fileName: figma.root.name });
+  figma.ui.postMessage({ type: "dev-start", fileKey, fileName: figma.root.name });
 }
 
 runLocalBridge().catch((err: unknown) => {

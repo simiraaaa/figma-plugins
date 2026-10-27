@@ -19,6 +19,7 @@ import {
   DEV_PORTS,
   DEV_SERVER_APP,
   DEV_SERVER_PROTOCOL,
+  type DevServerHandler,
   type DevServerOptions,
   type DevStatus,
   type DumpRequest,
@@ -66,14 +67,16 @@ function sampleZip(): Uint8Array {
 async function startServer(
   outDir = mkdtempSync(path.join(tmpdir(), "structure-dump-dev-")),
   options: Partial<DevServerOptions> = {}
-): Promise<{ base: string; port: number; outDir: string; close: () => void }> {
-  const server = http.createServer(createDevServer({ outDir, ...options }));
+): Promise<{ base: string; port: number; outDir: string; handler: DevServerHandler; close: () => void }> {
+  const handler = createDevServer({ outDir, ...options });
+  const server = http.createServer(handler);
   await new Promise<void>((resolve) => server.listen(0, "127.0.0.1", resolve));
   const { port } = server.address() as AddressInfo;
   return {
     base: `http://127.0.0.1:${port}`,
     port,
     outDir,
+    handler,
     close: () => {
       server.closeAllConnections();
       server.close();
@@ -84,21 +87,23 @@ async function startServer(
 /** プラグインの UI の iframe と同じく Origin: null で送る */
 const PLUGIN = { Origin: "null" };
 
-/** Local Bridge を開いている Figma のファイル */
+/** Local Bridge を開いている Figma のファイル。launch はその Local Bridge の起動 id (省けばファイルごとに 1 つの起動) */
 interface FigmaFile {
   key: string;
   name: string;
+  launch?: string;
 }
 
 const FILE_A: FigmaFile = { key: "fileKeyA", name: "Rabee UI" };
 const FILE_B: FigmaFile = { key: "fileKeyB", name: "Rabee UI のコピー" };
 const FILE = FILE_A.key;
 
-/** query は `?server=...&after=...` の形。Local Bridge と同じく自分のファイルを付けて聞く */
+/** query は `?server=...&after=...` の形。Local Bridge と同じく自分のファイルと起動 id を付けて聞く */
 function pluginNext(base: string, query = "", signal?: AbortSignal, file: FigmaFile = FILE_A): Promise<Response> {
   const params = new URLSearchParams(query.replace(/^\?/, ""));
   params.set("file", file.key);
   params.set("name", file.name);
+  params.set("launch", file.launch ?? `launch-${file.key}`);
   return fetch(`${base}/next?${params}`, { headers: PLUGIN, signal });
 }
 
@@ -1288,6 +1293,219 @@ test("負例: 自分のファイルを付けずに /next に来た古い版の L
   }
 });
 
+function sleep(ms: number): Promise<void> {
+  return new Promise((resolve) => setTimeout(resolve, ms));
+}
+
+test("同じファイルで後から開いた Local Bridge だけが依頼を受け取り、前の起動の Local Bridge には 409 で止まるよう返す", async () => {
+  const { base, close } = await startServer();
+  try {
+    const first = { ...FILE_A, launch: "L1" };
+    const second = { ...FILE_A, launch: "L2" };
+    const oldPoll = pluginNext(base, "", undefined, first);
+    oldPoll.catch(() => {});
+    await sleep(50);
+    const newPoll = pluginNext(base, "", undefined, second);
+    // 前の起動が待っていた /next は、後の起動が来た時点で 409 で返る
+    const stopped = await settleWithin(oldPoll, 300);
+    assert.notEqual(stopped, "pending", "前の起動の Local Bridge が待ち続けた");
+    assert.equal((stopped as Response).status, 409);
+    assert.match((await json<{ error: string }>(stopped as Response)).error, /別の Local Bridge が開いた/);
+
+    // 交互に渡らず、続けて来た依頼はどれも後の起動が受け取る
+    let poll = newPoll;
+    for (const nodeIds of [["1:1"], ["2:2"]]) {
+      const exported = fetch(`${base}/export?file=${FILE}&timeout=5`, { method: "POST", body: JSON.stringify({ nodeIds }) });
+      const next = await json<Next>(poll);
+      assert.deepEqual(next.nodeIds, nodeIds);
+      await pluginPost(base, "result", next, sampleZip());
+      assert.equal((await exported).status, 200);
+      // 前の起動がまた聞きに来ても、依頼を渡さずに 409
+      const again = await settleWithin(pluginNext(base, "", undefined, first), 300);
+      assert.notEqual(again, "pending", "前の起動の Local Bridge が待ち続けた");
+      assert.equal((again as Response).status, 409);
+      poll = pluginNext(base, `?server=${next.server}&after=${next.seq}`, undefined, second);
+    }
+    poll.catch(() => {});
+  } finally {
+    close();
+  }
+});
+
+test("負例: 前の起動の Local Bridge が /next に来ても、後の起動が処理中の script を abandoned にしない", async () => {
+  const { base, close } = await startServer();
+  try {
+    const first = { ...FILE_A, launch: "L1" };
+    const second = { ...FILE_A, launch: "L2" };
+    const aborted = new AbortController();
+    pluginNext(base, "", aborted.signal, first).catch(() => {});
+    await sleep(50);
+    aborted.abort();
+    const newPoll = pluginNext(base, "", undefined, second);
+    const ran = runRequest(base, "figma.currentPage.selection[0].remove();", "?timeout=5");
+    ran.catch(() => {});
+    assert.equal((await json<RunNext>(newPoll)).seq, 1);
+
+    const late = new AbortController();
+    const oldAgain = pluginNext(base, "", late.signal, first);
+    oldAgain.catch(() => {});
+    await settleWithin(oldAgain, 200);
+    late.abort();
+    const still = await fetch(`${base}/status?seq=1&timeout=0.2`);
+    assert.equal(still.status, 504);
+    assert.equal((await json<RequestReply>(still)).state, "processing");
+  } finally {
+    close();
+  }
+});
+
+test("負例: 起動 id (launch) を付けずに /next に来た Local Bridge には、依頼を渡さず build し直すよう 400 で返す", async () => {
+  const { base, close } = await startServer();
+  try {
+    const res = await fetch(`${base}/next?file=${FILE}&name=x`, { headers: PLUGIN, signal: AbortSignal.timeout(1000) });
+    assert.equal(res.status, 400);
+    assert.match((await json<{ error: string }>(res)).error, /build/);
+  } finally {
+    close();
+  }
+});
+
+test("GET /status?file はそのファイルの最後の結果を返し、status?after に file を付けるとそのファイルの新しい結果だけを待つ", async () => {
+  const { base, close } = await startServer();
+  try {
+    // ファイルごとの待ち位置 (Local Bridge が覚える server と after)
+    const positions = new Map<string, string>();
+    const exportOn = async (file: FigmaFile): Promise<DevStatus> => {
+      const polled = pluginNext(base, positions.get(file.key) ?? "", undefined, file);
+      const exported = fetch(`${base}/export?file=${file.key}&timeout=5`, { method: "POST", body: "" });
+      const next = await json<Next>(polled);
+      positions.set(file.key, `?server=${next.server}&after=${next.seq}`);
+      await pluginPost(base, "result", next, sampleZip());
+      return json<DevStatus>(exported);
+    };
+    const firstA = await exportOn(FILE_A);
+    const firstB = await exportOn(FILE_B);
+    assert.deepEqual([firstA.version, firstB.version], [1, 2]);
+
+    const ofA = await json<StatusReply>(fetch(`${base}/status?file=${FILE_A.key}`));
+    assert.deepEqual([ofA.version, ofA.fileKey, ofA.dir], [1, FILE_A.key, firstA.dir]);
+    assert.equal((await json<StatusReply>(fetch(`${base}/status`))).fileKey, FILE_B.key);
+    // そのファイルの結果がまだ無ければ version は 0
+    const none = await json<StatusReply>(fetch(`${base}/status?file=unknownKey`));
+    assert.deepEqual([none.version, none.dir], [0, undefined]);
+
+    const waiting = fetch(`${base}/status?file=${FILE_A.key}&after=1&timeout=5`);
+    await exportOn(FILE_B);
+    assert.equal(await settleWithin(waiting, 200), "pending", "別のファイルの結果で返った");
+    const secondA = await exportOn(FILE_A);
+    const res = await waiting;
+    assert.equal(res.status, 200);
+    assert.deepEqual(
+      [(await json<StatusReply>(res)).version, secondA.fileKey],
+      [secondA.version, FILE_A.key]
+    );
+  } finally {
+    close();
+  }
+});
+
+test("起動し直した直後の status?file は、前回の最後の結果がそのファイルのものならそれを返す", async () => {
+  const outDir = mkdtempSync(path.join(tmpdir(), "structure-dump-dev-"));
+  writeFileSync(path.join(outDir, "status.json"), JSON.stringify({ version: 7, seq: 3, fileKey: FILE_A.key, dir: "/x/7" }));
+  const { base, close } = await startServer(outDir);
+  try {
+    assert.equal((await json<StatusReply>(fetch(`${base}/status?file=${FILE_A.key}`))).version, 7);
+    assert.equal((await json<StatusReply>(fetch(`${base}/status?file=${FILE_B.key}`))).version, 0);
+  } finally {
+    close();
+  }
+});
+
+test("負例: ほかのファイルの依頼が保持の上限を超えても、処理中の依頼とそのファイルの最後の書き出しは落とさない", async () => {
+  const { base, close } = await startServer();
+  try {
+    const pollB = pluginNext(base, "", undefined, FILE_B);
+    const exportedB = fetch(`${base}/export?file=${FILE_B.key}&timeout=30`, { method: "POST", body: "" });
+    const takenB = await json<Next>(pollB);
+    let query = "";
+    for (let i = 0; i < 110; i += 1) {
+      const polled = pluginNext(base, query, undefined, FILE_A);
+      const ran = runRequest(base, "return 1;", "?timeout=5");
+      const next = await json<RunNext>(polled);
+      await pluginRunResult(base, next, { ok: true, value: 1 });
+      assert.equal((await ran).status, 200);
+      query = `?server=${next.server}&after=${next.seq}`;
+    }
+    // B の処理中の依頼は落ちていないので、結果を受け、どのファイルの結果かも分かる
+    await pluginPost(base, "result", takenB, sampleZip());
+    const status = await json<DevStatus>(exportedB);
+    assert.equal(status.fileKey, FILE_B.key);
+    assert.equal((await json<RequestReply>(fetch(`${base}/status?seq=${takenB.seq}`))).state, "done");
+    assert.equal(stateOf((await json<StatusReply>(fetch(`${base}/status`))).plugin, FILE_B.key)?.processing, undefined);
+    // B を開き直すと、B の最後の書き出しをやり直す
+    const fresh = await json<Next>(pluginNext(base, "", undefined, { ...FILE_B, launch: "B2" }));
+    assert.deepEqual([fresh.seq, fresh.fileKey], [takenB.seq, FILE_B.key]);
+  } finally {
+    close();
+  }
+});
+
+test("負例: 知らない fileKey の /next を大量に送っても、繋がっていないファイルは忘れ、処理中のファイルは覚えている", async () => {
+  const { base, handler, close } = await startServer(undefined, { pluginStaleMs: 50 });
+  try {
+    const pollB = pluginNext(base, "", undefined, FILE_B);
+    const exportedB = fetch(`${base}/export?file=${FILE_B.key}&timeout=5`, { method: "POST", body: "" });
+    exportedB.catch(() => {});
+    await json<Next>(pollB);
+    for (let i = 0; i < 30; i += 1) {
+      const aborted = new AbortController();
+      pluginNext(base, "", aborted.signal, { key: `junk${i}`, name: "x" }).catch(() => {});
+      await sleep(5);
+      aborted.abort();
+    }
+    await sleep(100);
+    const aborted = new AbortController();
+    pluginNext(base, "", aborted.signal, FILE_A).catch(() => {});
+    await sleep(20);
+    assert.equal(handler.fileCount(), 2, "繋がっていないファイルを覚え続けた");
+    aborted.abort();
+    assert.equal(stateOf((await json<StatusReply>(fetch(`${base}/status`))).plugin, FILE_B.key)?.processing?.seq, 1);
+  } finally {
+    close();
+  }
+});
+
+test("負例: /next で名乗ったファイル名は、制御文字を除き 200 文字までにして載せる", async () => {
+  const { base, close } = await startServer();
+  try {
+    const aborted = new AbortController();
+    pluginNext(base, "", aborted.signal, { key: FILE, name: `a\u0000b\nc\u007f${"あ".repeat(300)}` }).catch(() => {});
+    await sleep(50);
+    const name = stateOf((await json<StatusReply>(fetch(`${base}/status`))).plugin)?.fileName ?? "";
+    aborted.abort();
+    assert.doesNotMatch(name, /[\u0000-\u001f\u007f]/);
+    assert.equal(Array.from(name).length, 200);
+    assert.ok(name.startsWith("abc"), name.slice(0, 10));
+  } finally {
+    close();
+  }
+});
+
+test("負例: file を名乗らない古い版の Local Bridge が来たばかりなら、503 の理由にそれを添える", async () => {
+  const { base, close } = await startServer(undefined, { pluginStaleMs: 100 });
+  try {
+    assert.equal((await fetch(`${base}/next`, { headers: PLUGIN })).status, 400);
+    const res = await fetch(`${base}/export?file=${FILE}&timeout=1`, { method: "POST", body: "" });
+    assert.equal(res.status, 503);
+    assert.match((await json<{ error: string }>(res)).error, /名乗らない古い版の Local Bridge が \d+ 秒前に来た.*build し直/);
+    await sleep(150);
+    const later = await fetch(`${base}/export?file=${FILE}&timeout=1`, { method: "POST", body: "" });
+    assert.doesNotMatch((await json<{ error: string }>(later)).error, /古い版の Local Bridge/);
+  } finally {
+    close();
+  }
+});
+
 test("GET /hello はプラグインの口で、dev サーバーの印を返す", async () => {
   const { base, close } = await startServer();
   try {
@@ -1388,7 +1606,7 @@ test("負例: ブラウザのサイトからの送信と、AI 側の口への Or
   }
 });
 
-test("候補のポートと dev サーバーの印は、サーバー・Local Bridge の devAllowedDomains・ui.html でそろっている", () => {
+test("候補のポートと dev サーバーの印と版は、サーバー・Local Bridge の devAllowedDomains・ui.html でそろっている", () => {
   const manifest = JSON.parse(
     readFileSync(path.join(root, "plugins/local-bridge/manifest.json"), "utf8")
   ) as { networkAccess: { allowedDomains: string[]; devAllowedDomains?: string[] } };
@@ -1403,6 +1621,7 @@ test("候補のポートと dev サーバーの印は、サーバー・Local Bri
     "ui.html の DEV_PORTS がサーバーの DEV_PORTS と違う"
   );
   assert.ok(ui.includes(`const DEV_SERVER_APP = "${DEV_SERVER_APP}";`), "ui.html の DEV_SERVER_APP が違う");
+  assert.ok(ui.includes(`const DEV_SERVER_PROTOCOL = ${DEV_SERVER_PROTOCOL};`), "ui.html の DEV_SERVER_PROTOCOL が違う");
 });
 
 test("Local Bridge の manifest は、書き出しに効く実行条件が Structure Dump と同じ", () => {
