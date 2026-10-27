@@ -10,7 +10,16 @@ import assert from "node:assert/strict";
 import * as runDist from "../plugins/local-bridge/dist/run.mjs";
 import type { RunResultBody, TokenStore } from "../plugins/local-bridge/src/run.ts";
 
-const { MAX_RUN_RESULT_CHARS, ensureRunToken, exportRefusal, renewRunTokens, runScript, runTokenKey, wrongFileReason } =
+const {
+  MAX_RUN_RESULT_CHARS,
+  ensureRunToken,
+  exportRefusal,
+  renewRunTokens,
+  runScript,
+  runTokenKey,
+  sessionIdOf,
+  wrongFileReason,
+} =
   runDist as unknown as typeof import("../plugins/local-bridge/src/run.ts");
 
 const OWN = "fileKeyA";
@@ -171,5 +180,19 @@ test("負例: 別のファイル宛て・行き先の無い書き出しの依頼
   assert.match(exportRefusal({ fileKey: "fileKeyB" }, OWN) ?? "", /別のファイル \(fileKeyB\) 宛ての書き出しの依頼なので書き出していない.*fileKeyA/);
   for (const fileKey of [undefined, null, ""]) {
     assert.match(exportRefusal({ fileKey }, OWN) ?? "", /行き先のファイル.*無いので書き出していない/);
+  }
+});
+
+test("負例: 画面の sessionId は数か文字列のときだけ取り、権限が無い (例外)・currentUser が無いときは取れないとする", () => {
+  assert.equal(sessionIdOf({ currentUser: { sessionId: 38648 } }), "38648");
+  assert.equal(sessionIdOf({ currentUser: { sessionId: "38649" } }), "38649");
+  const noPermission = {
+    get currentUser(): unknown {
+      throw new Error("Cannot access currentUser without the currentuser permission");
+    },
+  };
+  assert.equal(sessionIdOf(noPermission), undefined);
+  for (const api of [{ currentUser: null }, {}, { currentUser: { sessionId: "" } }, { currentUser: { sessionId: Number.NaN } }]) {
+    assert.equal(sessionIdOf(api), undefined, JSON.stringify(api));
   }
 });

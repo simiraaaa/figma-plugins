@@ -14,7 +14,7 @@ import {
   failureText,
 } from "../../structure-dump/src/dump";
 import { DEFAULT_SCREENSHOT_SCALE, ImagesMode, parseImagesMode } from "../../structure-dump/src/plan";
-import { ensureRunToken, exportRefusal, renewRunTokens, runScript } from "./run";
+import { ensureRunToken, exportRefusal, renewRunTokens, runScript, sessionIdOf } from "./run";
 
 interface DevRequest {
   seq: number;
@@ -80,6 +80,18 @@ async function runLocalBridge(): Promise<void> {
     });
     return;
   }
+  // dev サーバーは、同じファイルを別の画面で開いた 2 つ目の Local Bridge を画面の sessionId で見分けて断るので、名乗れなければつながない
+  const session = sessionIdOf(figma);
+  if (session === undefined) {
+    figma.ui.postMessage({
+      type: "error",
+      message:
+        "この画面の sessionId が取れないので、dev サーバーにつながない。\n" +
+        "Local Bridge を閉じて開き直す (manifest の currentuser の権限は、ホットリロードでは効かない)。" +
+        "それでも出るなら、Figma で プラグイン → 開発 → マニフェストからプラグインをインポート… から plugins/local-bridge/manifest.json を取り込み直す",
+    });
+    return;
+  }
   // 合言葉はファイルごとに clientStorage に残す (ホットリロードや開き直しでも同じ値が効く)。
   // 乱数は UI が作る (crypto.getRandomValues は UI の iframe で使う)
   figma.ui.onmessage = async (msg: DevMessage) => {
@@ -140,7 +152,7 @@ async function runLocalBridge(): Promise<void> {
       figma.ui.postMessage({ type: "dev-error", seq: request.seq, message: failureText(err) });
     }
   };
-  figma.ui.postMessage({ type: "dev-start", fileKey, fileName: figma.root.name });
+  figma.ui.postMessage({ type: "dev-start", fileKey, fileName: figma.root.name, session });
 }
 
 runLocalBridge().catch((err: unknown) => {

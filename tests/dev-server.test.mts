@@ -96,11 +96,15 @@ async function startServer(
 /** プラグインの UI の iframe と同じく Origin: null で送る */
 const PLUGIN = { Origin: "null" };
 
-/** Local Bridge を開いている Figma のファイル。launch はその Local Bridge の起動 id (省けばファイルごとに 1 つの起動) */
+/**
+ * Local Bridge を開いている Figma のファイル。launch はその Local Bridge の起動 id (省けばファイルごとに 1 つの起動)、
+ * session は開いている画面 (figma.currentUser.sessionId。省けばファイルごとに 1 つの画面)
+ */
 interface FigmaFile {
   key: string;
   name: string;
   launch?: string;
+  session?: string;
 }
 
 const FILE_A: FigmaFile = { key: "fileKeyA", name: "Rabee UI" };
@@ -113,6 +117,7 @@ function pluginNext(base: string, query = "", signal?: AbortSignal, file: FigmaF
   params.set("file", file.key);
   params.set("name", file.name);
   params.set("launch", file.launch ?? `launch-${file.key}`);
+  params.set("session", file.session ?? "38648");
   return fetch(`${base}/next?${params}`, { headers: PLUGIN, signal });
 }
 
@@ -777,6 +782,48 @@ test("status?seq: この起動で受けていない依頼は 404、seq が数字
   }
 });
 
+test("新しい起動が来て abandoned になった script も、前の起動の結果があとから届けば done に変わる", async () => {
+  const { base, close } = await startServer();
+  try {
+    const polled = pluginNext(base, "", undefined, { ...FILE_A, launch: "L1" });
+    const ran = runRequest(base, "return 1;", "?timeout=5");
+    ran.catch(() => {});
+    const taken = await json<RunNext>(polled);
+    const fresh = pluginNext(base, "", undefined, { ...FILE_A, launch: "L2" });
+    fresh.catch(() => {});
+    await settleWithin(fresh, 100);
+    assert.equal((await json<RequestReply>(fetch(`${base}/status?seq=1`))).state, "abandoned");
+    await pluginRunResult(base, taken, { ok: true, value: 1 });
+    const reply = await json<RequestReply>(fetch(`${base}/status?seq=1`));
+    assert.deepEqual([reply.state, reply.value], ["done", 1]);
+  } finally {
+    close();
+  }
+});
+
+test("負例: status?seq は、この起動で振ったが覚えておく数を超えて忘れた依頼と、受けていない依頼を言い分ける", async () => {
+  const { base, close } = await startServer();
+  try {
+    let query = "";
+    for (let i = 0; i < 105; i += 1) {
+      const polled = pluginNext(base, query);
+      const ran = runRequest(base, "return 1;", "?timeout=5");
+      const next = await json<RunNext>(polled);
+      await pluginRunResult(base, next, { ok: true, value: 1 });
+      assert.equal((await ran).status, 200);
+      query = `?server=${next.server}&after=${next.seq}`;
+    }
+    const forgotten = await fetch(`${base}/status?seq=1`);
+    assert.equal(forgotten.status, 404);
+    assert.match((await json<{ error: string }>(forgotten)).error, /覚えておく数を超えて忘れた依頼.*結果があったかは分からない/);
+    const unknown = await fetch(`${base}/status?seq=999`);
+    assert.equal(unknown.status, 404);
+    assert.match((await json<{ error: string }>(unknown)).error, /受けていない/);
+  } finally {
+    close();
+  }
+});
+
 test("起動し直しても依頼の seq は前回の続きから振り、前回の依頼と取り違えない", async () => {
   const outDir = mkdtempSync(path.join(tmpdir(), "structure-dump-dev-"));
   const first = await startServer(outDir);
@@ -794,9 +841,11 @@ test("起動し直しても依頼の seq は前回の続きから振り、前回
   }
   const second = await startServer(outDir);
   try {
-    // 前回の起動の結果は GET /status に残るが、前回の依頼の seq は引けない
+    // 前回の起動の結果は GET /status に残るが、前回の依頼の seq は引けない (忘れた依頼とは言わない)
     assert.equal((await json<StatusReply>(fetch(`${second.base}/status`))).seq, 1);
-    assert.equal((await fetch(`${second.base}/status?seq=1`)).status, 404);
+    const previous = await fetch(`${second.base}/status?seq=1`);
+    assert.equal(previous.status, 404);
+    assert.match((await json<{ error: string }>(previous)).error, /受けていない/);
     const polled = pluginNext(second.base);
     const exported = fetch(`${second.base}/export?file=${FILE}&timeout=5`, { method: "POST", body: "" });
     exported.catch(() => {});
@@ -1306,7 +1355,7 @@ function sleep(ms: number): Promise<void> {
   return new Promise((resolve) => setTimeout(resolve, ms));
 }
 
-test("同じファイルで後から開いた Local Bridge だけが依頼を受け取り、前の起動の Local Bridge には 409 で止まるよう返す", async () => {
+test("同じ画面で走り直した (後から来た起動の) Local Bridge だけが依頼を受け取り、前の起動の Local Bridge には 409 で止まるよう返す", async () => {
   const { base, close } = await startServer();
   try {
     const first = { ...FILE_A, launch: "L1" };
@@ -1319,7 +1368,9 @@ test("同じファイルで後から開いた Local Bridge だけが依頼を受
     const stopped = await settleWithin(oldPoll, 300);
     assert.notEqual(stopped, "pending", "前の起動の Local Bridge が待ち続けた");
     assert.equal((stopped as Response).status, 409);
-    assert.match((await json<{ error: string }>(stopped as Response)).error, /別の Local Bridge が開いた/);
+    const stoppedBody = await json<{ error: string; reason: string }>(stopped as Response);
+    assert.equal(stoppedBody.reason, "superseded");
+    assert.match(stoppedBody.error, /走り直した/);
 
     // 交互に渡らず、続けて来た依頼はどれも後の起動が受け取る
     let poll = newPoll;
@@ -1659,6 +1710,112 @@ test("負例: 結果を残す数を超えても、各ファイルの最後の結
   }
 });
 
+test("負例: 画面 (session) を名乗らずに /next に来た Local Bridge には、依頼を渡さず build し直すよう 400 で返す", async () => {
+  const { base, close } = await startServer();
+  try {
+    const res = await fetch(`${base}/next?file=${FILE}&name=x&launch=L1`, { headers: PLUGIN, signal: AbortSignal.timeout(1000) });
+    assert.equal(res.status, 400);
+    assert.match((await json<{ error: string }>(res)).error, /build/);
+  } finally {
+    close();
+  }
+});
+
+test("負例: 同じファイルを別の画面で開いた Local Bridge は、先の画面が生きているあいだ 409 で断り、先の画面に依頼を渡し続ける", async () => {
+  const { base, close } = await startServer();
+  try {
+    const owner = { ...FILE_A, launch: "L1", session: "38648" };
+    const other = { ...FILE_A, launch: "L2", session: "38649" };
+    const ownerPoll = pluginNext(base, "", undefined, owner);
+    await sleep(50);
+    const refused = await settleWithin(pluginNext(base, "", undefined, other), 300);
+    assert.notEqual(refused, "pending", "別の画面の Local Bridge が待ちに入った");
+    assert.equal((refused as Response).status, 409);
+    const body = await json<{ error: string; reason: string }>(refused as Response);
+    assert.equal(body.reason, "other-screen");
+    assert.match(body.error, /別の画面/);
+    // 先の画面は止めない
+    const exported = fetch(`${base}/export?file=${FILE}&timeout=5`, { method: "POST", body: "" });
+    const next = await settleWithin(ownerPoll, 300);
+    assert.notEqual(next, "pending", "先の画面の Local Bridge に依頼が渡らない");
+    const taken = await json<Next>(next as Response);
+    assert.equal(taken.launch, "L1");
+    await pluginPost(base, "result", taken, sampleZip());
+    assert.equal((await exported).status, 200);
+    const plugin = stateOf((await json<StatusReply>(fetch(`${base}/status`))).plugin);
+    assert.equal(plugin?.session, "38648");
+    assert.equal(typeof plugin?.otherScreenRefusedAt, "string");
+  } finally {
+    close();
+  }
+});
+
+test("負例: 先の画面が処理中なら、別の画面の Local Bridge が来てもその script を abandoned にしない", async () => {
+  const { base, close } = await startServer();
+  try {
+    const polled = pluginNext(base, "", undefined, { ...FILE_A, launch: "L1", session: "38648" });
+    const ran = runRequest(base, "figma.currentPage.selection[0].remove();", "?timeout=5");
+    ran.catch(() => {});
+    await json<RunNext>(polled);
+    const refused = await settleWithin(pluginNext(base, "", undefined, { ...FILE_A, launch: "L2", session: "38649" }), 300);
+    assert.notEqual(refused, "pending");
+    assert.equal((refused as Response).status, 409);
+    const still = await fetch(`${base}/status?seq=1&timeout=0.2`);
+    assert.equal(still.status, 504);
+    assert.equal((await json<RequestReply>(still)).state, "processing");
+  } finally {
+    close();
+  }
+});
+
+test("先の画面が生きていなければ (待ち手も処理中も無く、最後に届いてから時間が過ぎた)、別の画面が新しい持ち主になり、残っていた依頼を受け取る", async () => {
+  const { base, close } = await startServer(undefined, { pluginStaleMs: 300 });
+  try {
+    const polled = pluginNext(base, "", undefined, { ...FILE_A, launch: "L1", session: "38648" });
+    const first = fetch(`${base}/export?file=${FILE}&timeout=5`, { method: "POST", body: "" });
+    const taken1 = await json<Next>(polled);
+    // 書き出し中に次の依頼が積まれ、先の画面は結果を返したあと閉じられた (/next に来ない)
+    const second = fetch(`${base}/export?file=${FILE}&timeout=5`, { method: "POST", body: '{"nodeIds":["2:2"]}' });
+    await sleep(50);
+    await pluginPost(base, "result", taken1, sampleZip());
+    assert.equal((await first).status, 200);
+    await sleep(350);
+    const taken2 = await json<Next>(pluginNext(base, "", undefined, { ...FILE_A, launch: "L2", session: "38649" }));
+    assert.deepEqual([taken2.seq, taken2.launch], [2, "L2"]);
+    await pluginPost(base, "result", taken2, sampleZip());
+    assert.equal((await second).status, 200);
+    assert.equal(stateOf((await json<StatusReply>(fetch(`${base}/status`))).plugin)?.session, "38649");
+  } finally {
+    close();
+  }
+});
+
+test("負例: 2 つの画面が同時にホットリロードで走り直し、持ち主でない画面の新しい起動が先に来ても断り、持ち主の画面の新しい起動が引き継ぐ", async () => {
+  const { base, close } = await startServer();
+  try {
+    // 走り直す前: 持ち主の画面 38648 の起動 L1 が待っていた
+    const before = new AbortController();
+    pluginNext(base, "", before.signal, { ...FILE_A, launch: "L1", session: "38648" }).catch(() => {});
+    await sleep(20);
+    before.abort();
+    // 走り直した: 持ち主でない画面の新しい起動が先に来る
+    const otherFirst = await settleWithin(pluginNext(base, "", undefined, { ...FILE_A, launch: "L2b", session: "38649" }), 300);
+    assert.notEqual(otherFirst, "pending", "持ち主でない画面が持ち主になった");
+    assert.equal((otherFirst as Response).status, 409);
+    // 持ち主の画面の新しい起動は引き継ぐ
+    const ownerPoll = pluginNext(base, "", undefined, { ...FILE_A, launch: "L1b", session: "38648" });
+    const exported = fetch(`${base}/export?file=${FILE}&timeout=5`, { method: "POST", body: "" });
+    const taken = await json<Next>(ownerPoll);
+    assert.equal(taken.launch, "L1b");
+    await pluginPost(base, "result", taken, sampleZip());
+    assert.equal((await exported).status, 200);
+    // 持ち主の画面の前の起動は止めた
+    assert.equal((await pluginNext(base, "", undefined, { ...FILE_A, launch: "L1", session: "38648" })).status, 409);
+  } finally {
+    close();
+  }
+});
+
 test("GET /hello はプラグインの口で、dev サーバーの印を返す", async () => {
   const { base, close } = await startServer();
   try {
@@ -1782,9 +1939,14 @@ test("Local Bridge の manifest は、書き出しに効く実行条件が Struc
     JSON.parse(readFileSync(path.join(root, `plugins/${name}/manifest.json`), "utf8")) as Record<string, unknown>;
   const dump = read("structure-dump");
   const localBridge = read("local-bridge");
-  for (const key of ["api", "editorType", "documentAccess", "permissions", "enableProposedApi"]) {
+  for (const key of ["api", "editorType", "documentAccess", "enableProposedApi"]) {
     assert.deepEqual(localBridge[key], dump[key], `manifest の ${key} が違う`);
   }
+  // Local Bridge だけが currentuser を持つ (画面ごとの sessionId で、同じファイルの別の画面の 2 つ目を断るため。書き出しには効かない)
+  const others = (permissions: unknown): unknown[] =>
+    Array.isArray(permissions) ? permissions.filter((p) => p !== "currentuser") : [];
+  assert.deepEqual(others(localBridge.permissions), others(dump.permissions), "manifest の permissions が違う");
+  assert.ok((localBridge.permissions as unknown[]).includes("currentuser"), "Local Bridge の manifest に currentuser が無い");
 });
 
 test("Structure Dump の build は Local Bridge も作り直す (Local Bridge は書き出しを build で取り込む)", () => {

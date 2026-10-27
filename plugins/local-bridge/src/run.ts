@@ -98,6 +98,23 @@ export function wrongFileReason(requested: unknown, own: string): string | undef
   return `別のファイル (${requested}) 宛ての依頼なので実行していない (この Local Bridge のファイルは ${own})`;
 }
 
+/**
+ * この画面の sessionId (figma.currentUser.sessionId) を文字列で返す。取れなければ undefined。
+ * dev サーバーは、同じファイルを別の画面 (分割表示・別のタブ) で開いた 2 つ目の Local Bridge を、これで見分けて断る。
+ * manifest の permissions に currentuser が無い (取り込み直していない・ホットリロードでは効かない) と、currentUser を読むと例外を投げる
+ */
+export function sessionIdOf(api: unknown): string | undefined {
+  let sessionId: unknown;
+  try {
+    sessionId = (api as { currentUser?: { sessionId?: unknown } | null }).currentUser?.sessionId;
+  } catch {
+    return undefined;
+  }
+  if (typeof sessionId === "number" && Number.isFinite(sessionId)) return String(sessionId);
+  if (typeof sessionId === "string" && sessionId !== "") return sessionId;
+  return undefined;
+}
+
 /** 書き出しの依頼の行き先がこのファイルでなければ、書き出さない理由を返す (script の wrongFileReason と同じ二重の守り) */
 export function exportRefusal(request: { fileKey?: unknown }, own: string): string | undefined {
   const requested = request.fileKey;

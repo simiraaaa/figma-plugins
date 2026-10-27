@@ -237,6 +237,10 @@ export interface PluginState {
   fileKey: string;
   /** Local Bridge が /next で名乗ったファイル名 */
   fileName: string;
+  /** 依頼を受けている画面 (figma.currentUser.sessionId) */
+  session: string;
+  /** 同じファイルを開いた別の画面の Local Bridge を最後に断った時刻。断っていなければ無い */
+  otherScreenRefusedAt?: string;
   /** そのファイルの Local Bridge から最後に何か届いた時刻 */
   lastSeenAt: string;
   /** そのファイルの Local Bridge へ渡して、まだ結果も失敗も返っていない依頼 */
@@ -503,7 +507,17 @@ export function listenOnHosts(
   });
 }
 
-const SUPERSEDED = "このファイルで別の Local Bridge が開いたので、こちらには依頼を渡さない (こちらは止まる。こちらを使うなら、閉じて開き直す)";
+/** 409 の本文。reason で、止めた理由を Local Bridge の画面が言い分ける */
+const SUPERSEDED = {
+  reason: "superseded",
+  error: "この画面で Local Bridge が走り直した (新しい起動がある) ので、こちらには依頼を渡さない (こちらは止まる)",
+};
+const OTHER_SCREEN = {
+  reason: "other-screen",
+  error:
+    "このファイルは別の画面 (分割表示・別のタブ) で Local Bridge が開いているので、こちらには依頼を渡さない。" +
+    "こちらを使うなら、もう片方を閉じてから、こちらを開き直す",
+};
 
 /** /next で名乗ったファイル名を、制御文字を除いて MAX_FILE_NAME_CHARS 文字までにする */
 function fileNameOf(raw: string | null): string {
@@ -515,8 +529,15 @@ function fileNameOf(raw: string | null): string {
 /** 1 つのファイルで開いている Local Bridge の様子 */
 interface Bridge {
   /**
-   * いま依頼を渡す Local Bridge の起動 id。同じファイルで後から別の Local Bridge が来たら、その起動 id に替わる
-   * (同じファイルを 2 つのタブで開いたとき、依頼が交互に渡らないように。ホットリロード・開き直しも新しい起動 id で来る)
+   * 依頼を受けている画面 (figma.currentUser.sessionId)。同じファイルを分割表示や別のタブで開くと、画面ごとに違う。
+   * この画面が生きている (connected) あいだは、別の画面の Local Bridge を断る
+   */
+  session: string;
+  /** 別の画面の Local Bridge を最後に断った時刻 (ms)。断っていなければ 0 */
+  otherScreenRefusedAt: number;
+  /**
+   * いま依頼を渡す Local Bridge の起動 id。同じ画面の新しい起動 (ホットリロード・開き直し) が来たら、その起動 id に替わる
+   * (前の起動はもう止まっている。ホットリロードで前の起動の処理が止まることは 2026-10-27 に実測)
    */
   launch: string;
   /** /next で名乗ったファイル名 (ファイル名を変えたら、次の /next から新しい名前になる) */
@@ -559,7 +580,7 @@ export function createDevServer(options: DevServerOptions): DevServerHandler {
   const bridges = new Map<string, Bridge>();
   /** 同じファイルで後から別の Local Bridge が来たので止めた起動 id。この起動 id の /next には 409 を返す */
   const retiredLaunches = new Set<string>();
-  /** file か起動 id を名乗らない古い版の Local Bridge が最後に /next に来た時刻 (ms)。503 の理由に添える */
+  /** file・起動 id・画面のどれかを名乗らない古い版の Local Bridge が最後に /next に来た時刻 (ms)。503 の理由に添える */
   let oldPluginSeen = 0;
   /**
    * プラグインへ渡した (handed)・あとの依頼を渡したので飛ばした (skipped)・依頼した側が待つのをやめたので取り消した (cancelled) 依頼。
@@ -580,6 +601,8 @@ export function createDevServer(options: DevServerOptions): DevServerHandler {
   if (status.fileKey !== undefined) fileStatuses.set(status.fileKey, status);
   // seq も前回の続きから振る。振り直すと、依頼側が前回の起動で受け取った seq が別の依頼を指す
   let nextSeq = Math.max(previousLastSeq(), status.seq ?? 0) + 1;
+  /** この起動で最初に振る seq。これより前の seq は起動し直す前の依頼 */
+  const firstSeq = nextSeq;
 
   function previousLastSeq(): number {
     try {
@@ -614,11 +637,19 @@ export function createDevServer(options: DevServerOptions): DevServerHandler {
 
   /**
    * /next で来たファイルの Local Bridge。初めて来たファイルなら作る。
-   * 別の起動 id で来たら、前の起動を止め、待っていた前の起動の /next を起こして 409 を返させる
+   * 別の画面から来て、持ち主の画面が生きていれば undefined (断る。持ち主の画面には何もしない)。
+   * 同じ画面の別の起動 id か、持ち主の画面が生きていないときの別の画面なら、前の起動を止め、
+   * 待っていた前の起動の /next を起こして 409 を返させる
    */
-  function bridgeFor(fileKey: string, fileName: string, launch: string): Bridge {
+  function bridgeFor(fileKey: string, fileName: string, launch: string, session: string): Bridge | undefined {
     forgetIdleBridges();
-    const bridge = bridges.get(fileKey) ?? { launch, fileName, lastSeen: 0, pollers: new Set() };
+    const known = bridges.get(fileKey);
+    if (known !== undefined && known.session !== session && connected(known)) {
+      known.otherScreenRefusedAt = Date.now();
+      return undefined;
+    }
+    const bridge = known ?? { session, otherScreenRefusedAt: 0, launch, fileName, lastSeen: 0, pollers: new Set() };
+    bridge.session = session;
     if (bridge.launch !== launch) {
       retireLaunch(bridge.launch);
       bridge.launch = launch;
@@ -659,6 +690,9 @@ export function createDevServer(options: DevServerOptions): DevServerHandler {
         return {
           fileKey,
           fileName: bridge.fileName,
+          session: bridge.session,
+          otherScreenRefusedAt:
+            bridge.otherScreenRefusedAt === 0 ? undefined : new Date(bridge.otherScreenRefusedAt).toISOString(),
           lastSeenAt: new Date(bridge.lastSeen).toISOString(),
           processing:
             processing === undefined
@@ -908,7 +942,7 @@ export function createDevServer(options: DevServerOptions): DevServerHandler {
           ? "Local Bridge はどのファイルでも繋がっていない"
           : "plugin は Local Bridge がつながっているファイルの一覧。別のファイルに送るなら、一覧を人に見せてどれか聞く (自分で選ばない)") +
         (Date.now() - oldPluginSeen < pluginStaleMs
-          ? `。file か起動 id を名乗らない古い版の Local Bridge が ${oldSeconds} 秒前に来た。npm run build:local-bridge で build し直し、Local Bridge を開き直す`
+          ? `。file・起動 id・画面のどれかを名乗らない古い版の Local Bridge が ${oldSeconds} 秒前に来た。npm run build:local-bridge で build し直し、Local Bridge を開き直す`
           : ""),
       plugin,
     });
@@ -1075,21 +1109,27 @@ export function createDevServer(options: DevServerOptions): DevServerHandler {
     if (route === "GET /next") {
       const fileKey = url.searchParams.get("file");
       const launch = url.searchParams.get("launch");
-      if (fileKey === null || fileKey === "" || launch === null || launch === "") {
-        // どのファイルの Local Bridge か分からないと別のファイル宛ての依頼を、どの起動か分からないと同じファイルの 2 つの Local Bridge に交互に依頼を渡してしまう
+      const session = url.searchParams.get("session");
+      if (!fileKey || !launch || !session) {
+        // どのファイルの Local Bridge か分からないと別のファイル宛ての依頼を渡してしまう。
+        // どの起動・どの画面か分からないと、同じファイルの 2 つの Local Bridge に依頼が並行に渡る
         oldPluginSeen = Date.now();
         send(res, 400, {
           error:
-            "自分のファイル (file) か起動 id (launch) を付けずに来たので、依頼を渡さない。古い版の Local Bridge なので、" +
+            "自分のファイル (file)・起動 id (launch)・画面 (session) のどれかを付けずに来たので、依頼を渡さない。古い版の Local Bridge なので、" +
             "リポジトリで npm run build:local-bridge を実行して build し直し、Local Bridge を開き直す",
         });
         return;
       }
       if (retiredLaunches.has(launch)) {
-        send(res, 409, { error: SUPERSEDED });
+        send(res, 409, SUPERSEDED);
         return;
       }
-      const bridge = bridgeFor(fileKey, fileNameOf(url.searchParams.get("name")), launch);
+      const bridge = bridgeFor(fileKey, fileNameOf(url.searchParams.get("name")), launch, session);
+      if (bridge === undefined) {
+        send(res, 409, OTHER_SCREEN);
+        return;
+      }
       const afterParam = url.searchParams.get("after");
       const sameServer = url.searchParams.get("server") === serverId;
       const after = afterParam !== null && sameServer ? Number(afterParam) : undefined;
@@ -1118,7 +1158,7 @@ export function createDevServer(options: DevServerOptions): DevServerHandler {
           const poller = (): void => {
             if (bridge.launch !== launch) {
               wake();
-              send(res, 409, { error: SUPERSEDED });
+              send(res, 409, SUPERSEDED);
               return;
             }
             const request = nextRequestFor(fileKey, after);
@@ -1209,7 +1249,12 @@ export function createDevServer(options: DevServerOptions): DevServerHandler {
       const settled = (reply: RequestReply): boolean => reply.state !== "queued" && reply.state !== "processing";
       const now = requestReply(seq);
       if (now === undefined) {
-        send(res, 404, { error: `この起動の dev サーバーは #${seq} を受けていない (起動し直す前の依頼か、古い依頼)` });
+        const forgotten = seq >= firstSeq && seq < nextSeq;
+        send(res, 404, {
+          error: forgotten
+            ? `#${seq} はこの起動の dev サーバーが受けたが、覚えておく数を超えて忘れた依頼 (結果があったかは分からない)`
+            : `この起動の dev サーバーは #${seq} を受けていない (起動し直す前の依頼か、まだ振っていない番号)`,
+        });
         return;
       }
       if (settled(now)) {
