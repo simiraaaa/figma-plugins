@@ -45,6 +45,14 @@ const POLL_HOLD_MS = 25_000;
  */
 const DEFAULT_PLUGIN_STALE_MS = POLL_HOLD_MS + 10_000;
 /**
+ * 処理中の依頼があっても、渡してから (か、その画面から最後に何か届いてから) これを過ぎたら、その画面は生きていないと見る。
+ * 処理中のまま画面を閉じると結果が来ないので、上限が無いと別の画面がいつまでも持ち主になれない。
+ * 重い書き出しのあいだは Figma ごと固まって何も届かないので、短くしすぎない
+ */
+const DEFAULT_PROCESSING_STALE_MS = 10 * 60_000;
+/** /next の session (figma.currentUser.sessionId) の形。数なので数字だけ・20 文字まで */
+const SESSION_PATTERN = /^\d{1,20}$/;
+/**
  * localhost 以外の名前で来た送信 (DNS rebinding でブラウザのサイトが自分の名前を 127.0.0.1 に向けたもの) は断る。
  * URL の hostname の形で比べる
  */
@@ -317,6 +325,7 @@ export interface DevServerOptions {
   root?: string;
   keepResults?: number;
   pluginStaleMs?: number;
+  processingStaleMs?: number;
   log?: (line: string) => void;
 }
 
@@ -516,7 +525,7 @@ const OTHER_SCREEN = {
   reason: "other-screen",
   error:
     "このファイルは別の画面 (分割表示・別のタブ) で Local Bridge が開いているので、こちらには依頼を渡さない。" +
-    "こちらを使うなら、もう片方を閉じてから、こちらを開き直す",
+    "こちらを使うなら、もう片方の Local Bridge を閉じ、35 秒ほど待ってから、こちらを閉じて開き直す",
 };
 
 /** /next で名乗ったファイル名を、制御文字を除いて MAX_FILE_NAME_CHARS 文字までにする */
@@ -576,10 +585,14 @@ export function createDevServer(options: DevServerOptions): DevServerHandler {
   /** 依頼の state が変わるたびに呼ぶ (GET /status?seq の待ち) */
   const requestWaiters = new Set<() => void>();
   const pluginStaleMs = options.pluginStaleMs ?? DEFAULT_PLUGIN_STALE_MS;
+  const processingStaleMs = options.processingStaleMs ?? DEFAULT_PROCESSING_STALE_MS;
   /** Local Bridge を開いているファイルごとの様子。キーは fileKey */
   const bridges = new Map<string, Bridge>();
-  /** 同じファイルで後から別の Local Bridge が来たので止めた起動 id。この起動 id の /next には 409 を返す */
-  const retiredLaunches = new Set<string>();
+  /**
+   * 止めた起動 id と、その理由 (409 の本文)。この起動 id の /next には 409 を返す。
+   * 同じ画面の新しい起動が来たなら SUPERSEDED、生きていない持ち主から別の画面に替わったなら OTHER_SCREEN
+   */
+  const retiredLaunches = new Map<string, typeof SUPERSEDED | typeof OTHER_SCREEN>();
   /** file・起動 id・画面のどれかを名乗らない古い版の Local Bridge が最後に /next に来た時刻 (ms)。503 の理由に添える */
   let oldPluginSeen = 0;
   /**
@@ -632,7 +645,10 @@ export function createDevServer(options: DevServerOptions): DevServerHandler {
   // だから処理中かどうかは、届いたかどうかでなく、渡した依頼の結果がまだかで見る
   function connected(bridge: Bridge | undefined): bridge is Bridge {
     if (bridge === undefined) return false;
-    return bridge.processing !== undefined || bridge.pollers.size > 0 || Date.now() - bridge.lastSeen < pluginStaleMs;
+    const now = Date.now();
+    const processing =
+      bridge.processing !== undefined && now - Math.max(bridge.processing.handedAt, bridge.lastSeen) < processingStaleMs;
+    return processing || bridge.pollers.size > 0 || now - bridge.lastSeen < pluginStaleMs;
   }
 
   /**
@@ -649,9 +665,10 @@ export function createDevServer(options: DevServerOptions): DevServerHandler {
       return undefined;
     }
     const bridge = known ?? { session, otherScreenRefusedAt: 0, launch, fileName, lastSeen: 0, pollers: new Set() };
+    const otherScreen = bridge.session !== session;
     bridge.session = session;
     if (bridge.launch !== launch) {
-      retireLaunch(bridge.launch);
+      retireLaunch(bridge.launch, otherScreen ? OTHER_SCREEN : SUPERSEDED);
       bridge.launch = launch;
       bridge.pollers.forEach((wake) => wake());
     }
@@ -661,9 +678,9 @@ export function createDevServer(options: DevServerOptions): DevServerHandler {
     return bridge;
   }
 
-  function retireLaunch(launch: string): void {
-    retiredLaunches.add(launch);
-    if (retiredLaunches.size > MAX_RETIRED_LAUNCHES) retiredLaunches.delete(retiredLaunches.values().next().value as string);
+  function retireLaunch(launch: string, reason: typeof SUPERSEDED | typeof OTHER_SCREEN): void {
+    retiredLaunches.set(launch, reason);
+    if (retiredLaunches.size > MAX_RETIRED_LAUNCHES) retiredLaunches.delete(retiredLaunches.keys().next().value as string);
   }
 
   /** 繋がっていないファイルのうち、そのファイル宛てでまだ渡していない依頼も無いものは忘れる (知らない fileKey の /next で増え続けないように) */
@@ -1121,8 +1138,13 @@ export function createDevServer(options: DevServerOptions): DevServerHandler {
         });
         return;
       }
-      if (retiredLaunches.has(launch)) {
-        send(res, 409, SUPERSEDED);
+      if (!SESSION_PATTERN.test(session)) {
+        send(res, 400, { error: "session は数字だけ・20 文字までにする (figma.currentUser.sessionId)" });
+        return;
+      }
+      const retired = retiredLaunches.get(launch);
+      if (retired !== undefined) {
+        send(res, 409, retired);
         return;
       }
       const bridge = bridgeFor(fileKey, fileNameOf(url.searchParams.get("name")), launch, session);
@@ -1158,7 +1180,7 @@ export function createDevServer(options: DevServerOptions): DevServerHandler {
           const poller = (): void => {
             if (bridge.launch !== launch) {
               wake();
-              send(res, 409, SUPERSEDED);
+              send(res, 409, retiredLaunches.get(launch) ?? SUPERSEDED);
               return;
             }
             const request = nextRequestFor(fileKey, after);

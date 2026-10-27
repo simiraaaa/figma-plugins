@@ -8,6 +8,7 @@
   .meta { color: #777; font-size: 11px; }
   button { font-size: 12px; padding: 6px 12px; border-radius: 6px; border: 1px solid #ccc; background: #fff; cursor: pointer; margin-right: 6px; }
   button:hover { background: #f0f0f0; }
+  button:disabled { color: #aaa; background: #fafafa; cursor: default; }
   .bar { display: flex; align-items: center; gap: 8px; }
   #status { flex: 1; min-width: 0; color: #777; }
   #toggle-size { flex: none; margin-right: 0; }
@@ -259,11 +260,21 @@ const STOP_STATUS = new Map([
   ["superseded", "止まった (この画面で Local Bridge が走り直した)"],
 ]);
 
+/**
+ * dev サーバーに 409 で断られて止まったか。止まった画面からコピーした文の依頼は、依頼を受けている別の画面で実行され、
+ * 「選択しているもの」や開いているページが人の見ている画面と食い違う。作り直した合言葉も、依頼を受けている画面のファイルに効く。
+ * だから止まったら、コピーと合言葉の作り直しをさせない
+ */
+let stopped = false;
+
 /** dev サーバーが 409 で断ったので、この Local Bridge は依頼を受けるのをやめる (人が開き直すまで止まったまま) */
 function stopRefused(reason, detail) {
+  stopped = true;
+  for (const id of ["copy-run", "renew-token"]) document.getElementById(id).disabled = true;
   devLog(`止まった: ${detail}`);
   setStatus(STOP_STATUS.get(reason) ?? "止まった (dev サーバーに断られた)");
-  document.getElementById("error").textContent = detail;
+  document.getElementById("error").textContent =
+    `${detail}\nこの画面からは、AI に渡す文のコピーと合言葉の作り直しはできない (依頼を受けている画面でする)`;
   // 小さくしていても、止まった理由が見えるよう広げる
   setCompact(false);
 }
@@ -416,6 +427,8 @@ function copyText(text, label) {
 }
 
 document.getElementById("copy-run").onclick = async () => {
+  // 止まった表示を上書きしないよう、状態の行には何も出さない (ボタンも押せなくしてある)
+  if (stopped) return;
   // 渡す文にはつないでいる dev サーバーのポートを書くので、つながるまではコピーしない
   if (devServer === null) {
     setStatus("dev サーバーにつながってからコピーする");
@@ -423,11 +436,14 @@ document.getElementById("copy-run").onclick = async () => {
   }
   // 別のタブで作り直されていれば、古い合言葉の文を渡さないよう、最新の合言葉で文を作る
   const token = await askToken(false);
+  // 合言葉を読むあいだに止まったら、コピーしない
+  if (stopped) return;
   showRunToken(token);
   copyText(runInstructions(token), "AI に渡す文");
 };
 
 document.getElementById("renew-token").onclick = async () => {
+  if (stopped) return;
   showRunToken(await askToken(true));
   devLog("合言葉を作り直した。前の合言葉の付いた script は、どのファイルでも実行しない (ほかのタブでは、渡す文をコピーし直すと新しい合言葉ができる)");
 };

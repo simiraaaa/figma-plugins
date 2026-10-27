@@ -1816,6 +1816,79 @@ test("負例: 2 つの画面が同時にホットリロードで走り直し、�
   }
 });
 
+test("負例: 持ち主の画面が処理中のまま閉じられても、渡してから上限を過ぎて何も届かなければ、別の画面が持ち主になれる", async () => {
+  const { base, close } = await startServer(undefined, { pluginStaleMs: 50, processingStaleMs: 300 });
+  try {
+    const owner = { ...FILE_A, launch: "L1", session: "38648" };
+    const other = { ...FILE_A, launch: "L2", session: "38649" };
+    const polled = pluginNext(base, "", undefined, owner);
+    const ran = runRequest(base, "return 1;", "?timeout=5");
+    const taken = await json<RunNext>(polled);
+    // 処理中のあいだは、上限までは生きているとみなして断る
+    await sleep(100);
+    assert.equal((await pluginNext(base, "", undefined, other)).status, 409);
+    await sleep(300);
+    const otherPoll = pluginNext(base, "", undefined, other);
+    otherPoll.catch(() => {});
+    assert.equal(await settleWithin(otherPoll, 200), "pending", "上限を過ぎても別の画面を断った");
+    assert.equal(stateOf((await json<StatusReply>(fetch(`${base}/status`))).plugin)?.session, "38649");
+    // 前の画面から遅れて届いた結果も、seq で受ける
+    assert.equal((await pluginRunResult(base, taken, { ok: true, value: 1 })).status, 200);
+    assert.deepEqual(await json(ran), { seq: 1, value: 1 });
+    assert.equal((await json<RequestReply>(fetch(`${base}/status?seq=1`))).state, "done");
+  } finally {
+    close();
+  }
+});
+
+test("負例: 別の画面が持ち主になったあとで前の持ち主の起動が来たら、409 の理由は other-screen", async () => {
+  const { base, close } = await startServer(undefined, { pluginStaleMs: 200 });
+  try {
+    const owner = { ...FILE_A, launch: "L1", session: "38648" };
+    const polled = pluginNext(base, "", undefined, owner);
+    const first = fetch(`${base}/export?file=${FILE}&timeout=5`, { method: "POST", body: "" });
+    const taken1 = await json<Next>(polled);
+    // 書き出し中に次の依頼が積まれ、持ち主の画面は結果を返したあと閉じられた
+    const second = fetch(`${base}/export?file=${FILE}&timeout=5`, { method: "POST", body: "" });
+    second.catch(() => {});
+    await sleep(50);
+    await pluginPost(base, "result", taken1, sampleZip());
+    assert.equal((await first).status, 200);
+    await sleep(250);
+    const taken2 = await json<Next>(pluginNext(base, "", undefined, { ...FILE_A, launch: "L2", session: "38649" }));
+    assert.equal(taken2.launch, "L2");
+    const res = await pluginNext(base, "", undefined, owner);
+    assert.equal(res.status, 409);
+    const body = await json<{ reason: string; error: string }>(res);
+    assert.equal(body.reason, "other-screen", "持ち主が替わったのに、同じ画面で走り直したと答えた");
+    assert.match(body.error, /別の画面/);
+  } finally {
+    close();
+  }
+});
+
+test("負例: /next の session が数字だけ・20 文字までの形でなければ、依頼を渡さず形が違う旨の 400 を返す", async () => {
+  const { base, close } = await startServer();
+  try {
+    for (const session of ["abc", "38648x", "1".repeat(21), "-1"]) {
+      const res = await fetch(`${base}/next?file=${FILE}&name=x&launch=L1&session=${encodeURIComponent(session)}`, {
+        headers: PLUGIN,
+        signal: AbortSignal.timeout(1000),
+      });
+      assert.equal(res.status, 400, `session: ${session} を受けた`);
+      const error = (await json<{ error: string }>(res)).error;
+      assert.match(error, /session は数字だけ/);
+      assert.doesNotMatch(error, /古い版/);
+    }
+    assert.deepEqual((await json<StatusReply>(fetch(`${base}/status`))).plugin, []);
+    const ok = pluginNext(base, "", undefined, { ...FILE_A, session: "1".repeat(20) });
+    ok.catch(() => {});
+    assert.equal(await settleWithin(ok, 100), "pending");
+  } finally {
+    close();
+  }
+});
+
 test("GET /hello はプラグインの口で、dev サーバーの印を返す", async () => {
   const { base, close } = await startServer();
   try {
