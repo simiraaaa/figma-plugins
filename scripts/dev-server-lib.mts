@@ -562,7 +562,11 @@ interface Bridge {
 }
 
 /** 結果を受けたときに引く、依頼の要約 (script のコードと合言葉は持たない) */
-type RequestSummary = Pick<DevRequest, "seq" | "kind" | "fileKey"> & Pick<DumpRequest, "nodeIds" | "images">;
+type RequestSummary = Pick<DevRequest, "seq" | "kind" | "fileKey"> &
+  Pick<DumpRequest, "nodeIds" | "images"> & {
+    /** 渡したときに Local Bridge が名乗っていたファイル名 */
+    fileName?: string;
+  };
 
 /** http.createServer に渡すハンドラ。fileCount は検査用で、覚えている Local Bridge のファイルの数を返す */
 export type DevServerHandler = http.RequestListener & { fileCount: () => number };
@@ -605,6 +609,11 @@ export function createDevServer(options: DevServerOptions): DevServerHandler {
    * 起動が替わって捨てた依頼の結果が、止めた起動から遅れて届いても、どのファイルの結果か引けるように、結果を受けるまで残す
    */
   const departed = new Map<number, RequestSummary>();
+  /**
+   * 渡した依頼の、渡したときに Local Bridge が名乗っていたファイル名。
+   * 結果が届く前にそのファイルを忘れても (処理中の期限切れなど)、結果の status にファイル名を入れられるように
+   */
+  const handedFileNames = new Map<number, string>();
 
   mkdirSync(resultsDir, { recursive: true });
   // results/ は起動をまたいで残る。前回の続きの番号から振らないと、保持件数の掃除が新しい結果を消す
@@ -898,8 +907,10 @@ export function createDevServer(options: DevServerOptions): DevServerHandler {
 
   /** 依頼の行き先のファイルと、その Local Bridge が名乗ったファイル名 */
   function fileOf(seq: number): Pick<DevStatus, "fileKey" | "fileName"> {
-    const fileKey = summaryOf(seq)?.fileKey;
-    return { fileKey, fileName: fileKey === undefined ? undefined : bridges.get(fileKey)?.fileName };
+    const summary = summaryOf(seq);
+    if (summary === undefined) return {};
+    const fileName = bridges.get(summary.fileKey)?.fileName ?? handedFileNames.get(seq) ?? departed.get(seq)?.fileName;
+    return { fileKey: summary.fileKey, fileName };
   }
 
   function waitFor(
@@ -995,11 +1006,13 @@ export function createDevServer(options: DevServerOptions): DevServerHandler {
           fileKey: dropped.fileKey,
           nodeIds: nodeIdsOf(dropped),
           images: dropped.kind === "export" ? dropped.images : undefined,
+          fileName: handedFileNames.get(dropped.seq),
         });
         if (departed.size > MAX_DEPARTED_REQUESTS) departed.delete(departed.keys().next().value as number);
       }
       outcomes.delete(dropped.seq);
       fates.delete(dropped.seq);
+      handedFileNames.delete(dropped.seq);
     }
   }
 
@@ -1161,6 +1174,7 @@ export function createDevServer(options: DevServerOptions): DevServerHandler {
           if (r.fileKey === fileKey && r.seq < request.seq && pending(r)) fates.set(r.seq, "skipped");
         }
         fates.set(request.seq, "handed");
+        handedFileNames.set(request.seq, bridge.fileName);
         setProcessing(bridge, { request, launch, handedAt: Date.now() });
         // 結果を送るときに launch を付けさせる (止めた起動からの結果で、後の起動の処理中を解かないように)
         send(res, 200, { server: serverId, launch, ...request });

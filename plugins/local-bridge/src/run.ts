@@ -110,8 +110,9 @@ export function sessionIdOf(api: unknown): string | undefined {
   } catch {
     return undefined;
   }
-  if (typeof sessionId === "number" && Number.isFinite(sessionId)) return String(sessionId);
-  if (typeof sessionId === "string" && sessionId !== "") return sessionId;
+  // dev サーバーが受けるのと同じ形 (数字だけ・20 文字まで) のときだけ取る。違う形で名乗ると、dev サーバーが 400 で断り続ける
+  if (typeof sessionId === "number" && Number.isSafeInteger(sessionId) && sessionId > 0) return String(sessionId);
+  if (typeof sessionId === "string" && /^\d{1,20}$/.test(sessionId)) return sessionId;
   return undefined;
 }
 

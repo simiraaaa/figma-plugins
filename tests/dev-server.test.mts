@@ -1889,6 +1889,27 @@ test("負例: /next の session が数字だけ・20 文字までの形でなけ
   }
 });
 
+test("負例: ファイルを忘れたあとに届いた書き出しの失敗にも、渡したときに Local Bridge が名乗ったファイル名を入れる", async () => {
+  const { base, handler, close } = await startServer(undefined, { pluginStaleMs: 50, processingStaleMs: 100 });
+  try {
+    const polled = pluginNext(base);
+    const exported = fetch(`${base}/export?file=${FILE}&timeout=5`, { method: "POST", body: "" });
+    const taken = await json<Next>(polled);
+    await sleep(200);
+    // 別のファイルの /next でファイルの掃除が走り、処理中の期限が切れた A を忘れる
+    const aborted = new AbortController();
+    pluginNext(base, "", aborted.signal, FILE_B).catch(() => {});
+    await sleep(20);
+    aborted.abort();
+    assert.equal(handler.fileCount(), 1, "A を忘れていない");
+    await pluginPost(base, "error", taken, "ノードが見つからない: 9:9");
+    const status = await json<DevStatus>(exported);
+    assert.deepEqual([status.fileKey, status.fileName], [FILE_A.key, FILE_A.name]);
+  } finally {
+    close();
+  }
+});
+
 test("GET /hello はプラグインの口で、dev サーバーの印を返す", async () => {
   const { base, close } = await startServer();
   try {

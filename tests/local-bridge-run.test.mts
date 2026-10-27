@@ -196,3 +196,10 @@ test("負例: 画面の sessionId は数か文字列のときだけ取り、権�
     assert.equal(sessionIdOf(api), undefined, JSON.stringify(api));
   }
 });
+
+test("負例: sessionId は dev サーバーと同じく、正の整数か数字だけ 20 文字までの文字列のときだけ取る", () => {
+  assert.equal(sessionIdOf({ currentUser: { sessionId: "1".repeat(20) } }), "1".repeat(20));
+  for (const sessionId of [-1, 0, 1.5, Number.MAX_SAFE_INTEGER + 2, "abc", "38648x", "-1", "1".repeat(21), " 1"]) {
+    assert.equal(sessionIdOf({ currentUser: { sessionId } }), undefined, JSON.stringify(sessionId));
+  }
+});
