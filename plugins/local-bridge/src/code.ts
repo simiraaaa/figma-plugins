@@ -14,10 +14,12 @@ import {
   failureText,
 } from "../../structure-dump/src/dump";
 import { DEFAULT_SCREENSHOT_SCALE, ImagesMode, parseImagesMode } from "../../structure-dump/src/plan";
-import { runScript } from "./run";
+import { RunResultBody, runScript, wrongFileReason } from "./run";
 
 interface DevRequest {
   seq: number;
+  /** 行き先のファイル。このファイルの figma.fileKey と違えば処理しない */
+  fileKey?: string;
   nodeIds?: string[];
   scale?: number;
   /** 省略は both。dev サーバーが 3 値以外を断るが、届いたら書き出さずに dev-error で返す */
@@ -44,6 +46,7 @@ async function devTarget(nodeIds: readonly string[] | undefined): Promise<DumpTa
 
 interface DevRunRequest {
   seq: number;
+  fileKey?: string;
   code: string;
   token: string;
 }
@@ -66,6 +69,18 @@ const UI_COMPACT_SIZE = { width: 200, height: 32 };
  */
 async function runLocalBridge(): Promise<void> {
   figma.showUI(__html__, UI_SIZE);
+  // dev サーバーは依頼をファイル (fileKey) ごとに振り分けるので、自分のファイルを名乗れなければつながない。
+  // 開発用プラグインの figma.fileKey は、manifest の enablePrivatePluginApi が無いと取れない
+  const fileKey = figma.fileKey;
+  if (typeof fileKey !== "string" || fileKey === "") {
+    figma.ui.postMessage({
+      type: "error",
+      message:
+        "このファイルの fileKey が取れないので、dev サーバーにつながない。\n" +
+        "Figma で プラグイン → 開発 → マニフェストからプラグインをインポート… から plugins/local-bridge/manifest.json を取り込み直し、Local Bridge を開き直す",
+    });
+    return;
+  }
   const stored: unknown = await figma.clientStorage.getAsync(RUN_TOKEN_KEY);
   let runToken = typeof stored === "string" ? stored : undefined;
   figma.ui.onmessage = async (msg: DevMessage) => {
@@ -81,12 +96,21 @@ async function runLocalBridge(): Promise<void> {
     }
     if (msg.type === "run-request") {
       const { seq, code, token } = msg.request;
-      const body = await runScript({ code, token, expectedToken: runToken, api: figma });
+      const wrongFile = wrongFileReason(msg.request.fileKey, fileKey);
+      const body =
+        wrongFile === undefined
+          ? await runScript({ code, token, expectedToken: runToken, api: figma })
+          : JSON.stringify({ ok: false, error: wrongFile } satisfies RunResultBody);
       figma.ui.postMessage({ type: "run-result", seq, body });
       return;
     }
     if (msg.type !== "dev-request") return;
     const request = msg.request;
+    const wrongFile = wrongFileReason(request.fileKey, fileKey);
+    if (wrongFile !== undefined) {
+      figma.ui.postMessage({ type: "dev-error", seq: request.seq, message: wrongFile });
+      return;
+    }
     const images = parseImagesMode(request.images);
     if (images === null) {
       figma.ui.postMessage({
@@ -112,7 +136,7 @@ async function runLocalBridge(): Promise<void> {
     }
   };
   // 合言葉がまだ無ければ、UI が作って dev-token で送り返す
-  figma.ui.postMessage({ type: "dev-start", token: runToken });
+  figma.ui.postMessage({ type: "dev-start", token: runToken, fileKey, fileName: figma.root.name });
 }
 
 runLocalBridge().catch((err: unknown) => {

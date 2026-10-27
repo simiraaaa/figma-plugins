@@ -10,7 +10,7 @@ import assert from "node:assert/strict";
 import * as runDist from "../plugins/local-bridge/dist/run.mjs";
 import type { RunResultBody } from "../plugins/local-bridge/src/run.ts";
 
-const { MAX_RUN_RESULT_CHARS, runScript } =
+const { MAX_RUN_RESULT_CHARS, runScript, wrongFileReason } =
   runDist as unknown as typeof import("../plugins/local-bridge/src/run.ts");
 
 async function run(code: string, api: unknown = {}, token = "t1", options: { expectedToken?: string } = { expectedToken: "t1" }) {
@@ -56,4 +56,13 @@ test("負例: JSON にできない返り値と、大きすぎる返り値は失�
   assert.match(errorOf(await run("const a = {}; a.self = a; return a;")), /JSON にできない/);
   const big = errorOf(await run(`return "x".repeat(${MAX_RUN_RESULT_CHARS});`));
   assert.match(big, /最後まで実行した.*大きすぎる/);
+});
+
+test("負例: 依頼の行き先のファイルがこの Local Bridge のファイルでなければ、実行しない理由を返す", () => {
+  assert.equal(wrongFileReason("fileKeyA", "fileKeyA"), undefined);
+  assert.match(wrongFileReason("fileKeyB", "fileKeyA") ?? "", /別のファイル \(fileKeyB\).*実行していない.*fileKeyA/);
+  // 行き先を持たない依頼 (古い版の dev サーバー) も実行しない
+  for (const missing of [undefined, null, ""]) {
+    assert.match(wrongFileReason(missing, "fileKeyA") ?? "", /行き先のファイル.*無い.*実行していない/);
+  }
 });

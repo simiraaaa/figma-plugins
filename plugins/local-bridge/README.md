@@ -43,16 +43,25 @@ Figma への取り込みは[リポルート README の共通手順](../../README
    以下の curl の `47717` は、表示されたポート (Local Bridge の画面からコピーした文なら、その URL のポート) に読み替える。
 
 2. Figma で Local Bridge を実行し、開いたままにする (最初の 1 回だけ人か computer use の操作が要る)。
-   Local Bridge は候補のポートを順に探して dev サーバーにつなぎ、つないだ dev サーバーと、script の実行の合言葉を画面に出す
-3. 書き出しを依頼する。dev サーバーは結果が届くまで待ってから、展開先 (`dir`) を含む JSON を返す
+   Local Bridge は候補のポートを順に探して dev サーバーにつなぎ、つないだ dev サーバーと、このファイルの名前と fileKey と、script の実行の合言葉を画面に出す。
+   複数のファイル (タブ) でそれぞれ開いてよい (下の「複数のファイルで開く」)
+3. 書き出しを依頼する。行き先のファイルを `?file=<fileKey>` でいつも指定する。
+   dev サーバーは結果が届くまで待ってから、展開先 (`dir`) を含む JSON を返す
 
    ```sh
-   curl -s -X POST localhost:47717/export -d '{"nodeIds":["9194:16583"]}'
-   curl -s -X POST localhost:47717/export -d '{"nodeIds":["0:1"],"scale":1}'  # ページの id ならページ直下
-   curl -s -X POST localhost:47717/export                                     # Figma で開いているページの選択
-   curl -s -X POST localhost:47717/export -d '{"nodeIds":["9194:16583"],"images":"none"}'  # 構造だけ (画像を省く)
-   curl -s -X POST localhost:47717/export -d '{"nodeIds":["9194:16583"],"images":"only"}'  # 画像だけ
+   curl -s -X POST 'localhost:47717/export?file=<fileKey>' -d '{"nodeIds":["9194:16583"]}'
+   curl -s -X POST 'localhost:47717/export?file=<fileKey>' -d '{"nodeIds":["0:1"],"scale":1}'  # ページの id ならページ直下
+   curl -s -X POST 'localhost:47717/export?file=<fileKey>'                                     # Figma で開いているページの選択
+   curl -s -X POST 'localhost:47717/export?file=<fileKey>' -d '{"nodeIds":["9194:16583"],"images":"none"}'  # 構造だけ (画像を省く)
+   curl -s -X POST 'localhost:47717/export?file=<fileKey>' -d '{"nodeIds":["9194:16583"],"images":"only"}'  # 画像だけ
    ```
+
+   - fileKey は、Local Bridge の画面と「AI に渡す文」に出ている。
+     Figma のファイルのリンク (`https://www.figma.com/design/<fileKey>/<ファイル名>?node-id=...`) の `<fileKey>` の部分も同じ値で、人からリンクを渡されたらそれを使ってよい。
+   - `file` の無い依頼は、積まずに HTTP 400 で断る。
+     指定したファイルで Local Bridge が繋がっていなければ、積まずに HTTP 503 で断る (繋がっているかの判定は下の 503 の項)。
+     どちらの本文にも、Local Bridge が繋がっているファイルの一覧 (`plugin`) が入る。
+     AI はその一覧 (ファイル名と fileKey) を人に見せ、どのファイルに送るかを聞く。AI が自分で選ばない。
 
    - 結果は `<置き場所>/results/<version>/` に展開し、`<置き場所>/latest` がいちばん新しく成功した結果を指す。
      中身は Structure Dump の [ZIP の中身](../structure-dump/README.md#zip-の中身-schema-dump-v3)と同じで、まず `README.md` を読む。
@@ -68,18 +77,23 @@ Figma への取り込みは[リポルート README の共通手順](../../README
      - 3 つ以外の値 (別の文字列・数値・`null` など) は、積まずに HTTP 400 で断る。
      - Local Bridge へ渡す依頼には、本文に `images` を書いたときだけ `images` が入る。Local Bridge は、無ければ `both` と読む。
    - 書き出せなかったとき (ノードが見つからない・すべて非表示など) は HTTP 422 で `error` に理由が入る。
-   - Local Bridge が前の依頼を書き出しているあいだに来た依頼は、断らずに待たせ、前の依頼が終わってから順に書き出す。
+   - 待ち行列はファイルごとにある。
+     Local Bridge が前の依頼を書き出しているあいだに、同じファイル宛てに来た依頼は、断らずに待たせ、前の依頼が終わってから順に書き出す。
+     別のファイル宛ての依頼は待たせず、そのファイルの Local Bridge へ渡す。
      書き出し中の Local Bridge からは何も届かない (重いページでは Figma ごと固まる) が、dev サーバーは、渡した依頼の結果がまだ返っていなければ書き出し中と見る。
      Figma のウィンドウがほかのアプリの裏にあると、書き出しが大きく遅れ、止まったように見えることもある (前に出すと進む)。
      画面がスリープかロックしているあいだも書き出しは止まり、画面を起こすと進む。
      スリープ中に進んだ書き出しが、警告 (「変数のモードを引けない」など) つきで欠けた結果になったことが 1 回ある。
      結果の `meta.warnings` (応答の `warnings`) に、同じノードの書き出しで普段は出ない警告があれば、画面を起こしたまま書き出し直す。
      非表示のため除外したノードのように、毎回出る警告は書き出し直しても消えない。
-   - 書き出し中の依頼が無く、Local Bridge から 35 秒何も届いていなければ、繋がっていないと見て、依頼を積まずにすぐ HTTP 503 を返す。
+   - 指定したファイルで、書き出し中の依頼が無く、そのファイルの Local Bridge から 35 秒何も届いていなければ、繋がっていないと見て、依頼を積まずにすぐ HTTP 503 を返す。
    - 300 秒以内に結果が来なければ HTTP 504 (`?timeout=<秒>` で変えられる)。
      Claude Code の Bash ツールは既定で 120 秒で切れるので、大きな書き出しでは Bash の timeout も延ばす。
-   - 503 と 504 の本文には、Local Bridge の様子 (`plugin`) が入る。
-     `plugin.processing` は Local Bridge へ渡してまだ結果が返っていない依頼 (`seq`・種類 `kind` (書き出しは `export`、script は `run`)・`nodeIds`・`images` (`none` か `only` のときだけ)・渡してからの秒数 `elapsedSeconds`) で、`plugin.lastSeenAt` は最後に Local Bridge から何か届いた時刻。
+   - 400・503・504 の本文には、Local Bridge が繋がっているファイルの一覧 (`plugin`) が入る (繋がっていないファイルは載らない)。
+     1 つのファイルの欄は次のとおり。
+     - `fileKey`・`fileName`: ファイルの fileKey と名前 (名前は Local Bridge が名乗ったもの)。
+     - `lastSeenAt`: そのファイルの Local Bridge から最後に何か届いた時刻。
+     - `processing`: そのファイルの Local Bridge へ渡してまだ結果が返っていない依頼 (`seq`・種類 `kind` (書き出しは `export`、script は `run`)・`nodeIds`・`images` (`none` か `only` のときだけ)・渡してからの秒数 `elapsedSeconds`)。
    - 504 になっても依頼は消えない。送り直さずに、504 の `seq` で `GET /status?seq=<seq>` を呼んで待つ。
      この呼び出しは、その依頼が決着するまで待ち、`state` で今の様子を返す。
      Bash の timeout も延ばす。
@@ -91,16 +105,19 @@ Figma への取り込みは[リポルート README の共通手順](../../README
      - `failed`: 書き出せなかった。`error` に理由が入る。
      - `skipped`: Local Bridge がこの依頼を飛ばしてあとの依頼に進んだので、もう書き出されない (走り直した Local Bridge が受け取るのは最後の依頼だけ。制約を参照)。送り直す。
      - `queued` (順番待ち) か `processing` (Local Bridge へ渡して結果がまだ): 待つ長さ (既定 300 秒、`?timeout=<秒>`) を過ぎて HTTP 504 で返った。もう一度待つ。
-       `queued` で `plugin.processing` が無く、`plugin.lastSeenAt` が 35 秒より前なら、Local Bridge が開いていない。人か computer use に Local Bridge を開いてもらう。
-       `processing` のまま `plugin.processing.elapsedSeconds` が伸び続けるときは、Figma が前に出ているか、Local Bridge が開いているかを人か computer use で確かめる (書き出しの途中で Local Bridge を閉じても `processing` のまま残る)。
+       応答の `fileKey` がその依頼の行き先のファイルで、`plugin` からそのファイルの欄を引いて様子を見る。
+       `queued` で `plugin` にそのファイルが無ければ、そのファイルの Local Bridge が開いていない。人か computer use に Local Bridge を開いてもらう。
+       `processing` のまま、そのファイルの `processing.elapsedSeconds` が伸び続けるときは、Figma が前に出ているか、Local Bridge が開いているかを人か computer use で確かめる (書き出しの途中で Local Bridge を閉じても `processing` のまま残る)。
      - HTTP 404: この起動の dev サーバーが受けていない依頼 (dev サーバーを起動し直す前の依頼など)。書き出しは送り直す。
        script は前の dev サーバーのときに実行したかもしれないので、書き換える script は送り直さず、[書き換えの手順](../../.claude/skills/figma-safe-edit/SKILL.md)の 2 に従う (読み取りだけの script は送り直してよい)。
-   - `<置き場所>/status.json` と `GET /status` は、最後に受けた結果 (`version`・`seq`・`images` (`none` か `only` のときだけ)・`dir`・`fileName`・`warnings`・`error`) を返す。
-     `GET /status` には `plugin` と、結果の置き場所 `outDir` も入る。
+   - `<置き場所>/status.json` と `GET /status` は、最後に受けた結果 (`version`・`seq`・`images` (`none` か `only` のときだけ)・`dir`・`fileKey`・`fileName`・`warnings`・`error`) を返す。
+     結果も `latest` も、どのファイルの書き出しでも全体で 1 つなので、`fileKey` (依頼の行き先) と `fileName` で、どのファイルの結果かを確かめる。
+     `fileName` は書き出した中身のファイル名で、書き出せなかったときは Local Bridge が名乗った名前。
+     `GET /status` には `plugin` (繋がっているファイルの一覧) と、結果の置き場所 `outDir` も入る。
      `GET /status?after=<version>` は、それより新しい結果が届くまで待つ (どの依頼の結果でも返る)。
      300 秒待っても届かなければ HTTP 504 で、待つ長さは `?timeout=<秒>` で変えられる。
 4. コードを直したら build する。
-   ホットリロードで Local Bridge が走り直し、最後の書き出しの依頼をもう一度書き出して送る
+   ホットリロードで Local Bridge が走り直し、自分のファイル宛ての最後の書き出しの依頼をもう一度書き出して送る (複数のファイルで開いていれば、それぞれが走り直す)
 
    ```sh
    npm run build:dump          # Structure Dump の書き出しを直したとき (Structure Dump と Local Bridge の両方を作り直す)
@@ -114,6 +131,32 @@ Local Bridge の画面には、いつ・なぜ (新しい依頼か、起動よ�
 画面の上の「小さくする」を押すと、状態の 1 行と「広げる」ボタンだけの小さな窓になる。
 依頼で問題があると、状態の行にそう出る (中身は広げた画面の記録にある)。
 小さくしたかは残さない。開き直しや build での走り直しでは、広げた大きさで開く。
+
+### 複数のファイルで開く
+
+Local Bridge は、Figma のファイル (タブ) ごとに開ける。
+それぞれの Local Bridge は、自分のファイルの fileKey (`figma.fileKey`) とファイル名を名乗って dev サーバーにつなぎ、自分のファイル宛ての依頼だけを受け取る。
+次の挙動は、2026-10-27 に Figma デスクトップ (macOS) で実測した。
+
+- 表示していない裏のタブの Local Bridge も、依頼を処理する。
+- 別々のタブの Local Bridge は並行に動く。
+  片方が重い処理でふさがっていても、もう片方は待たずに処理する。
+  dev サーバーも、待ち行列・処理中の依頼・繋がっているかの判定をファイルごとに持つ (依頼の番号 `seq` は全体で 1 本の通し番号)。
+- 開発用プラグインの `figma.fileKey` は、manifest に `"enablePrivatePluginApi": true` が無いと取れない (`null` になる)。
+  書いてあれば、ファイルのリンクの `<fileKey>` と同じ値になる。
+
+行き先の取り違えを防ぐため、次のように動く。
+
+- 依頼には、1 つのファイルでだけ開いているときも、行き先の `?file=<fileKey>` がいつも要る (無ければ 400)。
+- 指定したファイルで Local Bridge が繋がっていなければ断り (503)、繋がっているファイルの一覧を返す。
+  AI はどのファイルに送るかを人に聞き、自分で選ばない。
+- Local Bridge は、届いた依頼の fileKey が自分のファイルと違えば、書き出しも script も実行しない (dev サーバーの振り分けに不具合があっても止まる)。
+- Local Bridge は、`figma.fileKey` が取れなければ dev サーバーにつながず、画面に理由を出す。
+  manifest を取り込み直してから開き直す。
+- fileKey を名乗らずに `/next` に来た古い版の Local Bridge には、dev サーバーは依頼を渡さず、build し直して開き直すよう HTTP 400 で返す (Local Bridge の画面の記録に出る)。
+
+合言葉はファイルをまたいで共通 (下の「合言葉の扱い」)。
+結果の置き場所の `status.json` と `latest` も全体で 1 つで、どのファイルの書き出しかは `fileKey` と `fileName` で見分ける。
 
 ### script の実行
 
@@ -130,13 +173,14 @@ Plugin API のコードを送ると、Local Bridge が実行して返り値を J
 - 書き出し (`/export`) は取り消しの履歴に手を積まない (書き換えと取り消しのあいだに書き出しを挟んでも、取り消しは script の 1 手を戻した)。
 
 1. 人が Local Bridge の画面の「AI に渡す文をコピー」を押し、実行を任せる AI のセッションに貼る。
-   渡す文には、dev サーバーの URL と合言葉 (`X-Run-Token`) が入る。
-2. AI は本文にコードを入れ、合言葉をヘッダに付けて送る
+   渡す文には、dev サーバーの URL・そのタブのファイルの名前と fileKey・`?file=` を付けた curl の例・合言葉 (`X-Run-Token`) が入る。
+   複数のファイルで開いているときは、行き先にしたいファイルのタブでコピーする。
+2. AI は本文にコードを入れ、行き先のファイルを `?file=<fileKey>` に、合言葉をヘッダに付けて送る
 
    ```sh
-   curl -s -X POST localhost:47717/run -H 'X-Run-Token: <合言葉>' \
+   curl -s -X POST 'localhost:47717/run?file=<fileKey>' -H 'X-Run-Token: <合言葉>' \
      --data-binary 'return figma.currentPage.selection.map((n) => ({ id: n.id, name: n.name, type: n.type }));'
-   curl -s -X POST localhost:47717/run -H 'X-Run-Token: <合言葉>' --data-binary @script.js
+   curl -s -X POST 'localhost:47717/run?file=<fileKey>' -H 'X-Run-Token: <合言葉>' --data-binary @script.js
    ```
 
    - 本文は async 関数の本体として、`figma` を引数にして実行する。
@@ -146,16 +190,18 @@ Plugin API のコードを送ると、Local Bridge が実行して返り値を J
      関数などの JSON にない値は、`JSON.stringify` と同じく `null` になるか、消える。
    - 成功は HTTP 200 で `{"seq": 3, "value": ...}` が返る (return しなければ `value` は `null`)。
    - 失敗は HTTP 422 で、`error` に理由が入る。理由の文で、実行したかどうかが分かる。
-     - 「実行していない」: 合言葉が違う・コードを読めない (構文エラー)。直して送り直してよい。
+     - 「実行していない」: 合言葉が違う・コードを読めない (構文エラー)・別のファイル宛ての依頼が届いた (dev サーバーの振り分けの不具合。Local Bridge は依頼の fileKey が自分のファイルと違えば実行しない)。直して送り直してよい。
      - 「途中で例外を投げた (それまでの書き換えは残っている)」: 書き換える script は送り直さず、[書き換えの手順](../../.claude/skills/figma-safe-edit/SKILL.md)の 2 に従う。
        読み取りだけの script は、直して送り直してよい。
      - 「最後まで実行したが」: 返り値を JSON にできない・大きすぎる (JSON で 100 万文字まで)。
        script の書き換えは済んでいる。同じ script を送り直すと書き換えが二重にかかるので、送り直さずに、要る値は読み取りの script で確かめる。
      - 「実行したが、結果の送信に失敗」: Local Bridge から dev サーバーへ結果が届かなかった。
        書き換えは済んでいるので、送り直さずに、要る値は読み取りの script で確かめる。
-   - HTTP 400 は依頼の形が違う (`X-Run-Token` が無い・本文が空・`timeout` が正の数でない)。積んでいないので、直して送り直す。
-   - HTTP 503 は Local Bridge が繋がっていない (書き出しと同じ)。積んでいないので、Local Bridge を開いてから送り直す。
-   - 書き出しと同じ待ち行列に入り、前の依頼が終わってから順に実行する。
+   - HTTP 400 は依頼の形が違う (`file` が無い・`X-Run-Token` が無い・本文が空・`timeout` が正の数でない)。積んでいないので、直して送り直す。
+     `file` が無いときは、書き出しと同じく、本文の一覧を人に見せて行き先を聞く。
+   - HTTP 503 は、指定したファイルで Local Bridge が繋がっていない (書き出しと同じ)。積んでいないので、そのファイルで Local Bridge を開いてもらってから送り直す。
+     別のファイルに送るかは、本文の一覧を人に見せて聞く。
+   - 行き先のファイルの、書き出しと同じ待ち行列に入り、そのファイルの前の依頼が終わってから順に実行する。
    - 待つ長さの既定は 90 秒 (`?timeout=<秒>`)。
      Claude Code の Bash ツールの既定 (120 秒) で curl が止められる前に、`seq` の入った HTTP 504 を返すため。
    - 504 の `error` が「プラグインに渡せなかったので取り消した」なら、渡す前に取り消した (`cancelled`)。
@@ -164,7 +210,7 @@ Plugin API のコードを送ると、Local Bridge が実行して返り値を J
      script では、`state` に次の 2 つが加わる。
      - `cancelled`: Local Bridge へ渡す前に、依頼した側が待つのをやめた (時間切れか、curl が止められた) ので取り消した。
        実行していないので、送り直してよい。取り消した script は、あとで開いた Local Bridge にも渡さない。
-     - `abandoned`: Local Bridge へ渡したのに、結果が返らないまま Local Bridge が次へ進んだ (走り直した・閉じて開き直した)。
+     - `abandoned`: Local Bridge へ渡したのに、結果が返らないままそのファイルの Local Bridge が次へ進んだ (走り直した・閉じて開き直した)。
        途中まで実行したかもしれないので、書き換える script は送り直さず、[書き換えの手順](../../.claude/skills/figma-safe-edit/SKILL.md)の 2 に従う。
        読み取りだけの script は送り直してよい。
      script の `skipped` は、まだ渡さないうちにあとの依頼が先に渡った依頼で、実行していない。
@@ -192,29 +238,27 @@ Plugin API のコードを送ると、Local Bridge が実行して返り値を J
 
 制約:
 
-- Figma で同時に動かせるプラグインは 1 つ。
-  ほかのプラグイン (Structure Dump を含む) を起動すると Local Bridge は閉じ、依頼は処理されなくなる。
+- Figma の 1 つのタブで同時に動かせるプラグインは 1 つ。
+  そのタブでほかのプラグイン (Structure Dump を含む) を起動すると Local Bridge は閉じ、そのファイル宛ての依頼は処理されなくなる。
   終わったら Local Bridge を開き直す。
-- Local Bridge は 1 つだけ開く。
-  複数のファイルで開くと、依頼はどれか 1 つの Local Bridge に渡り、どのファイルで処理するかは選べない (書き出しは `fileName` で分かる)。
-  処理中の依頼を取り違え、script の `state` を `abandoned` と答えることもある。
 - ポートは、候補の 47717〜47721 (manifest の `devAllowedDomains` と同じ値) のうち、空いている最初のポート。dev サーバーは同時に 1 つしか動かせない。
   ポートが分からないときは、候補に順に `curl -s localhost:<ポート>/hello` を聞き、`app` に `structure-dump-dev-server` を返したポートを使う (`root` は dev サーバーを起動したリポの場所)。
   `npm run dev:server` が「dev サーバーはもう http://localhost:<ポート> で動いている」と出して終わったら、ほかのセッションが起動した dev サーバーが動いている。
   止めずに、そのまま依頼する。結果はそのサーバーの置き場所に入る。
   置き場所は表示され、`GET /status` の `outDir` でも分かる。
   止めると、それを使っているほかのセッションの依頼も止まる。
-  「古い版の dev サーバーが … で動いている」と出して終わったら、Local Bridge はその dev サーバーにつながらない。
+  「古い版の dev サーバーが … で動いている」と出して終わったら、Local Bridge はその dev サーバーにつながらないか、つながってもその dev サーバーの依頼を実行しない (依頼をファイルごとに振り分ける前の版の依頼には、行き先のファイルが無い)。
   使っているセッションが無いかを人に確かめてから止め、`npm run dev:server` で起動し直す。
   「候補のポート … がどれも、dev サーバーとして答えない相手に使われている」と出して終わったら、どれかのアプリを止めるか、表示に従って候補を変える。
   ただし相手は答えられなくなった dev サーバーで、ほかのセッションが使っているかもしれないので、止める前に何が使っているかを人に確かめる。
 - ホットリロードが走るのは、Figma が取り込んだ manifest のあるディレクトリで build したときだけ。
   別の worktree で build しても、取り込んだほうの Local Bridge は走り直さない。
-- 走り直した Local Bridge が受け取るのは、まだ渡していない最後の依頼 1 件だけ。それより前に積まれて応答していない依頼は、あとからも処理せず、時間切れになる。
-  まだ渡していない依頼が無ければ、最後の書き出しの依頼をもう一度書き出す。渡し済みの script は実行し直さない。
+- 走り直した Local Bridge が受け取るのは、自分のファイル宛てでまだ渡していない最後の依頼 1 件だけ。それより前に積まれて応答していない、そのファイル宛ての依頼は、あとからも処理せず、時間切れになる。
+  まだ渡していない依頼が無ければ、自分のファイル宛ての最後の書き出しの依頼をもう一度書き出す。渡し済みの script は実行し直さない。
+  別のファイル宛ての依頼は受け取らない。
 - 処理の途中で Local Bridge を閉じても、dev サーバーには分からない。
-  その依頼は処理中のまま残り (`plugin.processing.elapsedSeconds` が伸び続ける)、次の依頼も待たせる。
-  Local Bridge を開き直すと、前の項のとおりに依頼を受け取る。
+  その依頼は処理中のまま残り (`plugin` のそのファイルの `processing.elapsedSeconds` が伸び続ける)、同じファイル宛ての次の依頼も待たせる。
+  そのファイルで Local Bridge を開き直すと、前の項のとおりに依頼を受け取る。
 - 終わらない script・プラグインを閉じる script (`figma.closePlugin()`)・`figma.ui.onmessage` を書き換える script を送ると、それ以降の依頼は処理されない。
   Local Bridge を閉じて開き直す。
 - dev サーバーは使うときだけ起動する。
@@ -225,3 +269,5 @@ Plugin API のコードを送ると、Local Bridge が実行して返り値を J
 ## 未確認の前提 (Figma 実機での動作確認推奨)
 
 - 終わらない script (同期の無限ループ) を送ったとき、Local Bridge を閉じて止められること
+- ブランチのファイル (リンクが `figma.com/design/<fileKey>/branch/<branchKey>/...`) で、`figma.fileKey` がリンクのどちらのキーになるか。
+  違うキーを指定すると 503 で一覧が返るので、取り違えて送ることはない

@@ -3,7 +3,10 @@
  *
  * AI (curl) から書き出しと script の実行の依頼を受け、開いている開発用プラグイン Local Bridge (plugins/local-bridge) の UI が
  * それを long-poll で取り、書き出した ZIP や script の返り値をこのサーバーへ POST する。受けた ZIP は outDir の下へ展開する。
- * ホットリロードで走り直したプラグインは、まだ渡していない最後の依頼を受け取る (無ければ最後の書き出しの依頼をもう一度書き出す)。
+ * 依頼は行き先の Figma のファイル (fileKey) を持ち、そのファイルで開いている Local Bridge にだけ渡す。
+ * 待ち行列・処理中の依頼・繋がっているかの判定はファイルごとに持ち、seq は全体で 1 本の通し番号にする。
+ * ホットリロードで走り直したプラグインは、自分のファイル宛てでまだ渡していない最後の依頼を受け取る
+ * (無ければ自分のファイル宛ての最後の書き出しの依頼をもう一度書き出す)。
  *
  * 候補のポートと dev サーバーの印は、Local Bridge の manifest の devAllowedDomains と ui.html が同じ値を持つ
  * (tests/dev-server.test.mts が一致を見る)。
@@ -28,11 +31,16 @@ import path from "node:path";
 export const DEV_PORTS: readonly number[] = [47717, 47718, 47719, 47720, 47721];
 /** GET /hello が返す印。プラグインの UI は、候補のうちこれを返したポートを dev サーバーと見る */
 export const DEV_SERVER_APP = "structure-dump-dev-server";
+/**
+ * GET /hello が返す、Local Bridge とのやり取りの版。依頼をファイルごとに振り分ける版から 2 (それより前の版は返さない)。
+ * いまの Local Bridge は、振り分けない版の依頼 (行き先のファイルが無い) を実行しないので、npm run dev:server はこれが違う dev サーバーを古い版と見る
+ */
+export const DEV_SERVER_PROTOCOL = 2;
 
 /** プラグインの UI が /next を待つ長さ。これを過ぎたら 204 を返し、UI は待ち直す */
 const POLL_HOLD_MS = 25_000;
 /**
- * 処理中の依頼も待っている /next も無いまま、最後にプラグインが来てからこれを過ぎたら、繋がっていないと見る。
+ * あるファイルの処理中の依頼も待っている /next も無いまま、そのファイルのプラグインが最後に来てからこれを過ぎたら、繋がっていないと見る。
  * /next の待ちが切れてから UI が聞き直すまでのすき間を含む長さにする
  */
 const DEFAULT_PLUGIN_STALE_MS = POLL_HOLD_MS + 10_000;
@@ -133,6 +141,8 @@ export function entryPath(dir: string, name: string): string {
 interface RequestBase {
   seq: number;
   requestedAt: string;
+  /** 行き先の Figma のファイル (figma.fileKey)。Local Bridge は自分のファイルと違えば処理しない */
+  fileKey: string;
 }
 
 /** 書き出す中身。none は構造だけ (画像を省く)、only は画像だけ */
@@ -203,18 +213,26 @@ export interface DevStatus {
   receivedAt?: string;
   /** 展開したディレクトリ (outDir/latest はここを指す) */
   dir?: string;
-  /** 書き出した Figma のファイル名 (index.json の meta.fileName) */
+  /** 依頼の行き先のファイル */
+  fileKey?: string;
+  /** 書き出した Figma のファイル名 (index.json の meta.fileName。書き出せなかったときは Local Bridge が名乗った名前) */
   fileName?: string;
   files?: number;
   warnings?: string[];
   error?: string;
 }
 
-/** GET /status と、/export の 503・504 に添えるプラグインの様子 */
+/**
+ * GET /status と、/export・/run の 400・503・504 に添える、Local Bridge がつながっているファイル 1 つの様子。
+ * 繋がっていないファイルは一覧に載せない
+ */
 export interface PluginState {
-  /** 最後にプラグインから何か届いた時刻。起動してからまだ何も届いていなければ無い */
-  lastSeenAt?: string;
-  /** プラグインへ渡して、まだ結果も失敗も返っていない依頼 */
+  fileKey: string;
+  /** Local Bridge が /next で名乗ったファイル名 */
+  fileName: string;
+  /** そのファイルの Local Bridge から最後に何か届いた時刻 */
+  lastSeenAt: string;
+  /** そのファイルの Local Bridge へ渡して、まだ結果も失敗も返っていない依頼 */
   processing?: {
     seq: number;
     kind: DevRequest["kind"];
@@ -236,7 +254,7 @@ export interface RunReply {
 export interface StatusReply extends DevStatus {
   /** 結果の置き場所。ほかのセッションが起動した dev サーバーに相乗りしたとき、どこに届くかを知るため */
   outDir: string;
-  plugin: PluginState;
+  plugin: PluginState[];
 }
 
 /**
@@ -257,9 +275,10 @@ export type RequestState =
 export interface RequestReply extends Partial<DevStatus> {
   seq: number;
   kind: DevRequest["kind"];
+  fileKey: string;
   state: RequestState;
   value?: unknown;
-  plugin: PluginState;
+  plugin: PluginState[];
 }
 
 /** 依頼の決着。body は依頼した側へ返す本文 */
@@ -357,7 +376,7 @@ async function runningDevServer(base: string): Promise<{ outDir?: string; curren
   const hello = await getJson(`${base}/hello`);
   return {
     outDir: typeof status.outDir === "string" ? status.outDir : undefined,
-    current: hello?.app === DEV_SERVER_APP,
+    current: hello?.app === DEV_SERVER_APP && hello.protocol === DEV_SERVER_PROTOCOL,
   };
 }
 
@@ -366,7 +385,7 @@ export type CandidateOutcome =
   | { kind: "listening"; port: number; servers: http.Server[]; errors: string[]; busy: number[] }
   /**
    * 候補のポートで dev サーバーがもう動いている。outDir は古い版では無い。
-   * current が false なら、いまのプラグインがつながらない古い版
+   * current が false なら、いまのプラグインがつながらないか、依頼を実行しない古い版
    */
   | { kind: "running"; port: number; outDir?: string; current: boolean }
   /** 候補のポートがどれも、dev サーバーでない相手に使われている */
@@ -408,7 +427,7 @@ export function notStartedMessage(outcome: Exclude<CandidateOutcome, { kind: "li
     if (!outcome.current) {
       return (
         `古い版の dev サーバーが http://localhost:${outcome.port} で動いている。${where}` +
-        "いまのプラグインはこの版につながらないので、止めてから npm run dev:server で起動し直す。" +
+        "いまのプラグインはこの版につながらないか、この版の依頼を実行しないので、止めてから npm run dev:server で起動し直す。" +
         "止めると、それを使っているほかのセッションの依頼も止まるので、止める前に人に確かめる"
       );
     }
@@ -477,6 +496,17 @@ export function listenOnHosts(
   });
 }
 
+/** 1 つのファイルで開いている Local Bridge の様子 */
+interface Bridge {
+  /** /next で名乗ったファイル名 (ファイル名を変えたら、次の /next から新しい名前になる) */
+  fileName: string;
+  /** 最後にこのファイルの Local Bridge から何か届いた時刻 (ms) */
+  lastSeen: number;
+  pollers: Set<() => void>;
+  /** Local Bridge は 1 件ずつ処理し、終わってから /next を待ちに来るので、処理中の依頼はファイルごとに 1 つだけ持つ */
+  processing?: { request: DevRequest; handedAt: number };
+}
+
 /** 返すのは http.createServer に渡すハンドラ。listen は呼び出し側が行う */
 export function createDevServer(options: DevServerOptions): http.RequestListener {
   const log = options.log ?? (() => {});
@@ -490,15 +520,13 @@ export function createDevServer(options: DevServerOptions): http.RequestListener
   const requests: DevRequest[] = [];
   /** done と failed の依頼の結果。requests から落ちた依頼の分は消す */
   const outcomes = new Map<number, Outcome>();
-  const pollers = new Set<() => void>();
   const outcomeWaiters = new Map<number, Set<(outcome: Outcome) => void>>();
   const statusWaiters = new Set<() => void>();
   /** 依頼の state が変わるたびに呼ぶ (GET /status?seq の待ち) */
   const requestWaiters = new Set<() => void>();
   const pluginStaleMs = options.pluginStaleMs ?? DEFAULT_PLUGIN_STALE_MS;
-  let lastPluginSeen = 0;
-  /** プラグインは 1 件ずつ処理し、終わってから /next を待ちに来るので、処理中の依頼は 1 つだけ持つ */
-  let processing: { request: DevRequest; handedAt: number } | undefined;
+  /** Local Bridge を開いているファイルごとの様子。キーは fileKey */
+  const bridges = new Map<string, Bridge>();
   /**
    * プラグインへ渡した (handed)・あとの依頼を渡したので飛ばした (skipped)・依頼した側が待つのをやめたので取り消した (cancelled) 依頼。
    * どれでもない依頼だけを、これから渡す
@@ -537,24 +565,43 @@ export function createDevServer(options: DevServerOptions): http.RequestListener
 
   // 重い書き出しのあいだは Figma ごと固まり、UI から何も届かない。
   // だから処理中かどうかは、届いたかどうかでなく、渡した依頼の結果がまだかで見る
-  function pluginConnected(): boolean {
-    return processing !== undefined || pollers.size > 0 || Date.now() - lastPluginSeen < pluginStaleMs;
+  function connected(bridge: Bridge | undefined): bridge is Bridge {
+    if (bridge === undefined) return false;
+    return bridge.processing !== undefined || bridge.pollers.size > 0 || Date.now() - bridge.lastSeen < pluginStaleMs;
   }
 
-  function pluginState(): PluginState {
-    return {
-      lastSeenAt: lastPluginSeen === 0 ? undefined : new Date(lastPluginSeen).toISOString(),
-      processing:
-        processing === undefined
-          ? undefined
-          : {
-              seq: processing.request.seq,
-              kind: processing.request.kind,
-              nodeIds: nodeIdsOf(processing.request),
-              images: imagesOf(processing.request),
-              elapsedSeconds: Math.floor((Date.now() - processing.handedAt) / 1000),
-            },
-    };
+  /** /next で来たファイルの Local Bridge。初めて来たファイルなら作る */
+  function bridgeFor(fileKey: string, fileName: string): Bridge {
+    const bridge = bridges.get(fileKey) ?? { fileName, lastSeen: 0, pollers: new Set() };
+    bridge.fileName = fileName;
+    bridge.lastSeen = Date.now();
+    bridges.set(fileKey, bridge);
+    return bridge;
+  }
+
+  /** 繋がっているファイルの一覧 (最後に届いたのが新しい順) */
+  function pluginState(): PluginState[] {
+    return [...bridges]
+      .filter(([, bridge]) => connected(bridge))
+      .sort(([, a], [, b]) => b.lastSeen - a.lastSeen)
+      .map(([fileKey, bridge]) => {
+        const processing = bridge.processing;
+        return {
+          fileKey,
+          fileName: bridge.fileName,
+          lastSeenAt: new Date(bridge.lastSeen).toISOString(),
+          processing:
+            processing === undefined
+              ? undefined
+              : {
+                  seq: processing.request.seq,
+                  kind: processing.request.kind,
+                  nodeIds: nodeIdsOf(processing.request),
+                  images: imagesOf(processing.request),
+                  elapsedSeconds: Math.floor((Date.now() - processing.handedAt) / 1000),
+                },
+        };
+      });
   }
 
   function nodeIdsOf(request: DevRequest | undefined): string[] | undefined {
@@ -569,8 +616,8 @@ export function createDevServer(options: DevServerOptions): http.RequestListener
     return { ...status, outDir, plugin: pluginState() };
   }
 
-  function setProcessing(next: typeof processing): void {
-    processing = next;
+  function setProcessing(bridge: Bridge, next: Bridge["processing"]): void {
+    bridge.processing = next;
     requestWaiters.forEach((wake) => wake());
   }
 
@@ -579,12 +626,14 @@ export function createDevServer(options: DevServerOptions): http.RequestListener
     if (request === undefined) return undefined;
     const outcome = outcomes.get(seq);
     const plugin = pluginState();
+    const { kind, fileKey } = request;
     if (outcome !== undefined) {
-      return { ...outcome.body, seq, kind: request.kind, state: outcome.ok ? "done" : "failed", plugin };
+      return { ...outcome.body, seq, kind, fileKey, state: outcome.ok ? "done" : "failed", plugin };
     }
     return {
       seq,
-      kind: request.kind,
+      kind,
+      fileKey,
       nodeIds: nodeIdsOf(request),
       images: imagesOf(request),
       state: unsettledState(request),
@@ -593,7 +642,7 @@ export function createDevServer(options: DevServerOptions): http.RequestListener
   }
 
   function unsettledState(request: DevRequest): RequestState {
-    if (processing?.request.seq === request.seq) return "processing";
+    if (bridges.get(request.fileKey)?.processing?.request.seq === request.seq) return "processing";
     const fate = fates.get(request.seq);
     if (fate === undefined) return "queued";
     // 渡したのに結果が返らないままプラグインが先へ進んだ。書き出しは送り直せばよいが、script は途中まで実行したかもしれない
@@ -605,12 +654,14 @@ export function createDevServer(options: DevServerOptions): http.RequestListener
     return !fates.has(request.seq);
   }
 
-  function nextRequestFor(after: number | undefined): DevRequest | undefined {
-    if (after !== undefined) return requests.find((r) => r.seq > after && pending(r));
+  /** fileKey のファイルの Local Bridge に次に渡す依頼。ほかのファイル宛ての依頼は見ない */
+  function nextRequestFor(fileKey: string, after: number | undefined): DevRequest | undefined {
+    const own = requests.filter((r) => r.fileKey === fileKey);
+    if (after !== undefined) return own.find((r) => r.seq > after && pending(r));
     // 走り直したプラグイン (待ち位置を持たない) には、まだ渡していない最後の依頼を渡す (それより前の依頼は飛ばす)。
     // 無ければ最後の書き出しをやり直させる (build したプラグインの結果を status?after で待つ使い方)。
     // 渡し済みの script は渡し直さない (書き換えが二重にかかる)
-    return requests.findLast(pending) ?? requests.findLast((r) => r.kind === "export");
+    return own.findLast(pending) ?? own.findLast((r) => r.kind === "export");
   }
 
   /** 依頼した側が待つのをやめた script は、まだ渡していなければ取り消す。あとで開いたプラグインや別のファイルで実行させない */
@@ -669,6 +720,8 @@ export function createDevServer(options: DevServerOptions): http.RequestListener
     for (const old of kept.slice(keepResults)) {
       rmSync(path.join(resultsDir, String(old)), { recursive: true, force: true });
     }
+    const meta = indexMeta(files);
+    const file = fileOf(seq);
     publish(
       {
         version,
@@ -677,7 +730,9 @@ export function createDevServer(options: DevServerOptions): http.RequestListener
         images: imagesOf(requestOf(seq)),
         receivedAt: new Date().toISOString(),
         dir,
-        ...indexMeta(files),
+        fileKey: file.fileKey,
+        fileName: meta.fileName ?? file.fileName,
+        warnings: meta.warnings,
         files: files.length,
       },
       true
@@ -693,11 +748,18 @@ export function createDevServer(options: DevServerOptions): http.RequestListener
         nodeIds: nodeIdsOf(requestOf(seq)),
         images: imagesOf(requestOf(seq)),
         receivedAt: new Date().toISOString(),
+        ...fileOf(seq),
         error: message,
       },
       false
     );
     log(`#${seq} は失敗: ${message}`);
+  }
+
+  /** 依頼の行き先のファイルと、その Local Bridge が名乗ったファイル名 */
+  function fileOf(seq: number): Pick<DevStatus, "fileKey" | "fileName"> {
+    const fileKey = requestOf(seq)?.fileKey;
+    return { fileKey, fileName: fileKey === undefined ? undefined : bridges.get(fileKey)?.fileName };
   }
 
   function waitFor(
@@ -729,21 +791,43 @@ export function createDevServer(options: DevServerOptions): http.RequestListener
     });
   }
 
-  /** 繋がっていないのに積むと、あとで開いたプラグインが誰も待っていない依頼を処理するので、積まずに 503 を返す */
-  function refuseUnlessConnected(res: http.ServerResponse): boolean {
-    if (pluginConnected()) return false;
-    send(res, 503, {
-      error: "プラグインが繋がっていない (Figma で Local Bridge を開いたままにする)",
+  /**
+   * 行き先のファイル (?file=<fileKey>)。無ければ 400 を返して undefined。
+   * 行き先を AI が選ぶと取り違えるので、つながっているファイルの一覧を添えて人に聞かせる
+   */
+  function fileParam(url: URL, res: http.ServerResponse): string | undefined {
+    const fileKey = url.searchParams.get("file");
+    if (fileKey !== null && fileKey !== "") return fileKey;
+    send(res, 400, {
+      error:
+        "行き先のファイルを ?file=<fileKey> で指定する (fileKey は Figma のファイルのリンク figma.com/design/<fileKey>/... の部分。Local Bridge の「AI に渡す文」にも書いてある)。" +
+        "plugin は Local Bridge がつながっているファイルの一覧。どのファイルに送るかは、一覧を人に見せて聞く (自分で選ばない)",
       plugin: pluginState(),
+    });
+    return undefined;
+  }
+
+  /** 繋がっていないのに積むと、あとで開いたプラグインが誰も待っていない依頼を処理するので、積まずに 503 を返す */
+  function refuseUnlessConnected(res: http.ServerResponse, fileKey: string): boolean {
+    if (connected(bridges.get(fileKey))) return false;
+    const plugin = pluginState();
+    send(res, 503, {
+      error:
+        `ファイル ${fileKey} では Local Bridge が繋がっていない (Figma でそのファイルの Local Bridge を開いたままにする)。` +
+        (plugin.length === 0
+          ? "Local Bridge はどのファイルでも繋がっていない"
+          : "plugin は Local Bridge がつながっているファイルの一覧。別のファイルに送るなら、一覧を人に見せてどれか聞く (自分で選ばない)"),
+      plugin,
     });
     return true;
   }
 
   function describe(request: DevRequest): string {
-    if (request.kind === "run") return `script の実行 (${request.code.length} 文字)`;
+    const file = `${bridges.get(request.fileKey)?.fileName ?? ""} (${request.fileKey})`;
+    if (request.kind === "run") return `${file} で script の実行 (${request.code.length} 文字)`;
     const target = request.nodeIds ? request.nodeIds.join(", ") : "プラグインで開いているページの選択";
     const images = imagesOf(request);
-    return images === undefined ? target : `${target} (images: ${images})`;
+    return `${file} の ${images === undefined ? target : `${target} (images: ${images})`}`;
   }
 
   /** 依頼を積み、プラグインから決着が届いたら res に返す。seconds 待っても届かなければ 504 */
@@ -762,7 +846,7 @@ export function createDevServer(options: DevServerOptions): http.RequestListener
       fates.delete(dropped);
     }
     log(`#${request.seq} を受けた: ${describe(request)}`);
-    pollers.forEach((wake) => wake());
+    bridges.get(request.fileKey)?.pollers.forEach((wake) => wake());
     let resolveOutcome: ((outcome: Outcome) => void) | undefined;
     waitFor(
       res,
@@ -788,10 +872,11 @@ export function createDevServer(options: DevServerOptions): http.RequestListener
           return;
         }
         // 処理の途中でプラグインを閉じても処理中は残るので、「処理中」とは断定しない
+        const processing = plugin.find((p) => p.fileKey === request.fileKey)?.processing;
         const hint =
-          plugin.processing === undefined
-            ? "Figma で Local Bridge を開いているか確かめる"
-            : `プラグインへ渡した #${plugin.processing.seq} の結果がまだ来ていない`;
+          processing === undefined
+            ? "Figma でそのファイルの Local Bridge を開いているか確かめる"
+            : `プラグインへ渡した #${processing.seq} の結果がまだ来ていない`;
         send(res, 504, {
           error: `${seconds} 秒待ってもプラグインから結果が来ない (${hint})`,
           seq: request.seq,
@@ -820,15 +905,14 @@ export function createDevServer(options: DevServerOptions): http.RequestListener
       send(res, 403, { error: `この Origin からは受けない: ${origin}` });
       return;
     }
-    // /hello はポートを探すだけの送信 (curl からも来る) で、依頼を待つプラグインがいる印にならない
-    if (fromPlugin && route !== "GET /hello") lastPluginSeen = Date.now();
-
     if (route === "POST /export") {
       const seconds = secondsParam(url);
       if (seconds === undefined) {
         send(res, 400, { error: "timeout は正の秒数にする" });
         return;
       }
+      const fileKey = fileParam(url, res);
+      if (fileKey === undefined) return;
       let parsed: ExportFields;
       try {
         parsed = parseExportBody((await readBody(req)).toString("utf8"));
@@ -836,8 +920,8 @@ export function createDevServer(options: DevServerOptions): http.RequestListener
         send(res, 400, { error: e instanceof Error ? e.message : String(e) });
         return;
       }
-      if (refuseUnlessConnected(res)) return;
-      enqueueAndWait(res, { kind: "export", ...parsed }, seconds);
+      if (refuseUnlessConnected(res, fileKey)) return;
+      enqueueAndWait(res, { kind: "export", fileKey, ...parsed }, seconds);
       return;
     }
 
@@ -847,6 +931,8 @@ export function createDevServer(options: DevServerOptions): http.RequestListener
         send(res, 400, { error: "timeout は正の秒数にする" });
         return;
       }
+      const fileKey = fileParam(url, res);
+      if (fileKey === undefined) return;
       const token = req.headers["x-run-token"];
       if (typeof token !== "string" || token === "") {
         send(res, 400, { error: "X-Run-Token が無い (プラグインの画面に出ている合言葉をヘッダに付ける)" });
@@ -857,47 +943,61 @@ export function createDevServer(options: DevServerOptions): http.RequestListener
         send(res, 400, { error: "本文に実行するコードを入れる" });
         return;
       }
-      if (refuseUnlessConnected(res)) return;
-      enqueueAndWait(res, { kind: "run", code, token }, seconds);
+      if (refuseUnlessConnected(res, fileKey)) return;
+      enqueueAndWait(res, { kind: "run", fileKey, code, token }, seconds);
       return;
     }
 
     if (route === "GET /hello") {
-      send(res, 200, options.root === undefined ? { app: DEV_SERVER_APP } : { app: DEV_SERVER_APP, root: options.root });
+      const hello = { app: DEV_SERVER_APP, protocol: DEV_SERVER_PROTOCOL };
+      send(res, 200, options.root === undefined ? hello : { ...hello, root: options.root });
       return;
     }
 
     if (route === "GET /next") {
+      const fileKey = url.searchParams.get("file");
+      if (fileKey === null || fileKey === "") {
+        // どのファイルの Local Bridge か分からないと、別のファイル宛ての依頼を渡してしまう
+        send(res, 400, {
+          error:
+            "自分のファイル (file) を付けずに来たので、依頼を渡さない。古い版の Local Bridge なので、" +
+            "リポジトリで npm run build:local-bridge を実行して build し直し、Local Bridge を開き直す",
+        });
+        return;
+      }
+      const bridge = bridgeFor(fileKey, url.searchParams.get("name") ?? "");
       const afterParam = url.searchParams.get("after");
       const sameServer = url.searchParams.get("server") === serverId;
       const after = afterParam !== null && sameServer ? Number(afterParam) : undefined;
       const reply = (request: DevRequest): void => {
-        // プラグインは seq の小さい順に受け取るので、これより前でまだ渡していない依頼は、もう渡さない
-        for (const r of requests) if (r.seq < request.seq && pending(r)) fates.set(r.seq, "skipped");
+        // プラグインは自分のファイル宛ての依頼を seq の小さい順に受け取るので、これより前でまだ渡していない依頼は、もう渡さない
+        for (const r of requests) {
+          if (r.fileKey === fileKey && r.seq < request.seq && pending(r)) fates.set(r.seq, "skipped");
+        }
         fates.set(request.seq, "handed");
-        setProcessing({ request, handedAt: Date.now() });
+        setProcessing(bridge, { request, handedAt: Date.now() });
         send(res, 200, { server: serverId, ...request });
       };
       // 渡す依頼があれば、処理中をそれに差し替える。先に解くと、走り直して同じ依頼を受け取り直すあいだに
       // GET /status?seq の待ちが起き、書き出し直す依頼を skipped と答える
-      const ready = nextRequestFor(after);
+      const ready = nextRequestFor(fileKey, after);
       if (ready !== undefined) {
         reply(ready);
         return;
       }
-      // 書き出し中のプラグインは /next を待たないので、待ちに来たなら手元の依頼はもう無い
-      setProcessing(undefined);
+      // 書き出し中のプラグインは /next を待たないので、待ちに来たなら、このファイルの手元の依頼はもう無い
+      setProcessing(bridge, undefined);
       waitFor(
         res,
         (wake) => {
           const poller = (): void => {
-            const request = nextRequestFor(after);
+            const request = nextRequestFor(fileKey, after);
             if (request === undefined) return;
             wake();
             reply(request);
           };
-          pollers.add(poller);
-          return () => pollers.delete(poller);
+          bridge.pollers.add(poller);
+          return () => bridge.pollers.delete(poller);
         },
         POLL_HOLD_MS,
         () => send(res, 204)
@@ -916,8 +1016,11 @@ export function createDevServer(options: DevServerOptions): http.RequestListener
         send(res, 409, { error: "別の起動のサーバーの依頼の結果は受けない" });
         return;
       }
+      const request = requestOf(seq);
+      const bridge = request === undefined ? undefined : bridges.get(request.fileKey);
+      if (bridge !== undefined) bridge.lastSeen = Date.now();
       // 版の古いプラグインの UI は script の依頼を書き出しとして扱い、書き出しの結果を返してくる
-      const kind = requestOf(seq)?.kind;
+      const kind = request?.kind;
       if (kind !== undefined && (kind === "run") !== (route === "POST /run-result")) {
         send(res, 409, { error: `#${seq} は ${kind === "run" ? "script の実行" : "書き出し"} の依頼なので、この口では受けない` });
         return;
@@ -930,7 +1033,7 @@ export function createDevServer(options: DevServerOptions): http.RequestListener
       const body = await readBody(req);
       // 本文を受け取り終えるまでは処理中のままにする (受信中に時間切れになった依頼側に、処理中と見せる)。
       // ここでは待ちを起こさない。結果を保存する前に起こすと、結果の無い依頼として skipped と答える (保存の settle が起こす)
-      if (processing?.request.seq === seq) processing = undefined;
+      if (bridge?.processing?.request.seq === seq) bridge.processing = undefined;
       if (route === "POST /run-result") {
         const text = body.toString("utf8");
         const read = runOutcomeOf(seq, text);

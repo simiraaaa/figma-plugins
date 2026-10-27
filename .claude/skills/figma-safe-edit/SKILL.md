@@ -11,22 +11,28 @@ Local Bridge 自体の使い方は `<リポ>/plugins/local-bridge/README.md` に
 - `<リポ>`: この SKILL.md のパスから `.claude/skills/figma-safe-edit/SKILL.md` を除いたディレクトリ。
 - `<URL>`: Local Bridge の画面からコピーした文にある dev サーバー (例: `http://localhost:47717`)。
 - `<合言葉>`: 同じ文にある `X-Run-Token` の値。
+- `<fileKey>`: 行き先のファイルの fileKey。
+  同じ文の「行き先のファイル」にある。
+  人から Figma のファイルのリンク (`https://www.figma.com/design/<fileKey>/<ファイル名>?...`) を渡されたら、その `<fileKey>` の部分を使ってよい。
 
-script は次の形で送る (詳しくは README の「script の実行」)。
+script も書き出しも、いつも `?file=<fileKey>` を付けて送る (詳しくは README の「script の実行」と「複数のファイルで開く」)。
+Local Bridge は複数のファイルで同時に開いていることがあり、`file` が行き先を決める。
 
 ```sh
-curl -s -X POST '<URL>/run' -H 'X-Run-Token: <合言葉>' --data-binary @<script のファイル>
+curl -s -X POST '<URL>/run?file=<fileKey>' -H 'X-Run-Token: <合言葉>' --data-binary @<script のファイル>
 ```
+
+HTTP 400 (`file` が無い) か 503 (そのファイルで Local Bridge が繋がっていない) が返ったら、本文の `plugin` に Local Bridge が繋がっているファイルの一覧 (`fileName` と `fileKey`) が入っている。
+一覧を人に見せ、どのファイルに送るか (またはそのファイルで Local Bridge を開くか) を聞く。
+一覧から自分で選んで送らない。
+一覧が 1 件だけでも、名前が似ていても同じ。
 
 ## 始める前に
 
-- 書き換えるファイルの名前を人に確かめる。
-- Local Bridge を開いているのがそのファイルの 1 つだけか、人に確かめてもらう。
-  2 つ以上開いていると、依頼がどちらに届くか決まらない。
-  同じ名前のファイル (複製など) で開いていると、次の手順で名前を確かめても見分けられない。
-- `return figma.root.name;` を 3 回送り、3 回とも同じ名前が返ることを確かめる。
-  違う名前が混じったら、Local Bridge が 2 つ以上開いている。
-  書き換えずに、人に Local Bridge を 1 つだけにしてもらう。
+- 書き換えるファイルの名前と、行き先の `<fileKey>` を確かめる。
+  渡す文の「行き先のファイル」の名前か、人から渡されたリンクのファイルが、頼まれたファイルかを人に確かめる。
+- `return figma.root.name;` を `?file=<fileKey>` を付けて送り、確かめた名前が返ることを確かめる。
+  違う名前が返ったら、書き換えずに人に伝える。
 - 4 で戻し終えるまで (戻さないなら 3 で確かめ終えるまで)、同じファイルを手で触らないよう人に頼む。
   人が手で書き換えると、戻すときにそちらが先に戻る。
   戻す前の確かめは書き出した範囲しか見ないので、範囲の外で触られても気づけない。
@@ -38,7 +44,7 @@ curl -s -X POST '<URL>/run' -H 'X-Run-Token: <合言葉>' --data-binary @<script
 離れた場所のノードを書き換えるなら、それぞれの id を `nodeIds` に並べてよい。
 
 ```sh
-curl -s -X POST '<URL>/export?timeout=110' -d '{"nodeIds":["<id>"]}'
+curl -s -X POST '<URL>/export?file=<fileKey>&timeout=110' -d '{"nodeIds":["<id>"]}'
 ```
 
 応答の `dir` を before として控える。
@@ -84,7 +90,7 @@ return "<確かめたい値>";
 - 成功 (HTTP 200) 以外が返ったとき (応答が返らないまま curl が止まったときを含む) は、script が Figma で動いたかを README の「script の実行」で見分ける。
   504 は、README のとおり `/status?seq=<seq>` で決着を待ってから見分ける (`done` は成功と同じに扱い、`failed` は `error` の文を 422 と同じに読む)。
   - 動いていないと分かったとき (HTTP 400・503・422 の「実行していない」・504 の「プラグインに渡せなかったので取り消した」・`cancelled`・`skipped`): Figma は変わっていない。
-    直して送り直す (503 なら、人に Local Bridge を開いてもらってから)。
+    直して送り直す (400・503 なら、上のとおり一覧を人に見せて行き先を聞くか、人にそのファイルで Local Bridge を開いてもらってから)。
   - それ以外のとき: どこまで書き換えたか、取り消しの 1 手ができたかが分からない。
     送り直さず、取り消しも送らない。
     3 で後を書き出して比べ、比べた結果を人に伝えて、戻すかどうかは人に決めてもらう。

@@ -29,9 +29,10 @@
   <div id="error"></div>
   <div id="dev" hidden>
     <h2>Local Bridge (dev サーバー: <span id="dev-server">探している</span>)</h2>
-    <div class="meta">dev サーバーの依頼を待ち、Structure Dump と同じ書き出しをして ZIP を送る。プラグインのコードを build し直すと、最後の書き出しの依頼をもう一度書き出す。</div>
+    <div>このファイル: <span id="dev-file"></span></div>
+    <div class="meta">dev サーバーのこのファイル宛ての依頼を待ち、Structure Dump と同じ書き出しをして ZIP を送る。プラグインのコードを build し直すと、このファイル宛ての最後の書き出しの依頼をもう一度書き出す。</div>
     <h2>script の実行</h2>
-    <div class="meta">合言葉を渡した AI は、Plugin API の script でこのファイルを読み書きできる。渡すのは、実行を任せる AI のセッションだけにする。</div>
+    <div class="meta">合言葉を渡した AI は、Plugin API の script でこのファイルを読み書きできる (合言葉はファイルをまたいで共通)。渡すのは、実行を任せる AI のセッションだけにする。AI に渡す文には、このファイルの名前と fileKey が入る。</div>
     <div>合言葉: <span id="dev-token"></span></div>
     <div class="dev-run-actions">
       <button id="copy-run">AI に渡す文をコピー</button>
@@ -72,6 +73,8 @@ let devServer = null;
 let devRoot = null;
 /** プラグインの本体が照合に使う合言葉。本体が clientStorage に残す */
 let runToken = null;
+/** このタブのファイル (figma.fileKey と figma.root.name)。dev サーバーはこのファイル宛ての依頼だけを渡す */
+let devFile = null;
 /** 本体へ渡した依頼の結果 (dev-result / dev-error / run-result) を受け取る */
 let devResolve = null;
 
@@ -142,10 +145,13 @@ function repoPath(rel) {
 
 function runInstructions() {
   const host = devServer.replace("http://", "");
+  const file = encodeURIComponent(devFile.key);
   return [
     `Figma の Local Bridge の script 実行の口: ${devServer}/run`,
+    `行き先のファイル: ${devFile.name} (fileKey: ${devFile.key})`,
+    `/run と /export には、いつも ?file=${file} を付けて、このファイル宛てに送る`,
     `合言葉 (X-Run-Token ヘッダ): ${runToken}`,
-    `例: curl -s -X POST ${host}/run -H 'X-Run-Token: ${runToken}' --data-binary 'return figma.currentPage.name;'`,
+    `例: curl -s -X POST '${host}/run?file=${file}' -H 'X-Run-Token: ${runToken}' --data-binary 'return figma.root.name;'`,
     `使い方は ${repoPath("plugins/local-bridge/README.md")} を読む`,
     `Figma を書き換えるときは ${repoPath(".claude/skills/figma-safe-edit/SKILL.md")} の手順に従う`,
   ].join("\n");
@@ -225,8 +231,12 @@ async function localBridge() {
         document.getElementById("dev-server").textContent = devServer;
         devLog(`dev サーバーにつないだ: ${devServer}`);
       }
-      const query = server === null ? "" : `?server=${server}&after=${after}`;
-      const res = await fetch(`${devServer}/next${query}`);
+      const query = new URLSearchParams({ file: devFile.key, name: devFile.name });
+      if (server !== null) {
+        query.set("server", server);
+        query.set("after", String(after));
+      }
+      const res = await fetch(`${devServer}/next?${query}`);
       if (res.status === 204) continue;
       if (!res.ok) throw new Error(`HTTP ${res.status}: ${await res.text()}`);
       request = await res.json();
@@ -256,7 +266,7 @@ async function localBridge() {
         devLog(`#${request.seq} の script を実行する (${reason}): ${scriptHead(request.code)}`);
         const outcome = await askPlugin({
           type: "run-request",
-          request: { seq: request.seq, code: request.code, token: request.token },
+          request: { seq: request.seq, fileKey: request.fileKey, code: request.code, token: request.token },
         });
         ok = await devSendRun(request, outcome.body);
       } else {
@@ -285,6 +295,8 @@ onmessage = (event) => {
   }
 
   if (msg.type === "dev-start") {
+    devFile = { key: msg.fileKey, name: msg.fileName };
+    document.getElementById("dev-file").textContent = `${msg.fileName} (fileKey: ${msg.fileKey})`;
     document.getElementById("dev").hidden = false;
     if (typeof msg.token === "string") {
       runToken = msg.token;

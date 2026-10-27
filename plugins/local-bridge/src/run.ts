@@ -1,5 +1,6 @@
 /**
- * Local Bridge の script 実行 (dev サーバーの POST /run で AI が送ったコードを、プラグインの本体で実行する)
+ * Local Bridge の script 実行 (dev サーバーの POST /run で AI が送ったコードを、プラグインの本体で実行する) と、
+ * 依頼の行き先のファイルの照合 (書き出しの依頼にも使う)
  *
  * figma は引数で受け取る (node --test で素のオブジェクトを渡して検証できるようにする)。
  */
@@ -34,6 +35,18 @@ function errorText(e: unknown): string {
 
 function failure(error: string): string {
   return JSON.stringify({ ok: false, error } satisfies RunResultBody);
+}
+
+/**
+ * 依頼の行き先 (fileKey) がこの Local Bridge のファイルでなければ、処理しない理由を返す。
+ * dev サーバーの振り分けに不具合があっても、別のファイルを書き換えないための二重の守り
+ */
+export function wrongFileReason(requested: unknown, own: string): string | undefined {
+  if (requested === own) return undefined;
+  if (typeof requested !== "string" || requested === "") {
+    return "依頼に行き先のファイル (fileKey) が無いので実行していない (dev サーバーが古い版なら、止めて起動し直す)";
+  }
+  return `別のファイル (${requested}) 宛ての依頼なので実行していない (この Local Bridge のファイルは ${own})`;
 }
 
 /**
