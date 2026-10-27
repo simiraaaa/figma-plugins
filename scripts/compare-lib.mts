@@ -257,7 +257,10 @@ function isInside(child: string, parent: string): boolean {
   return rel === "" || (!rel.startsWith("..") && !path.isAbsolute(rel));
 }
 
-/** 前の比べた結果だけを消す。比べた結果の置き場所でなければ断る */
+/**
+ * 前の比べた結果だけを消す。比べた結果の置き場所でなければ断る。
+ * 比べた結果の置き場所の中には人がファイルを置かない前提で、中身までは確かめずに置き換える。
+ */
 function prepareOutDir(outDir: string, inputs: readonly string[]): void {
   for (const dir of inputs) {
     if (isInside(path.resolve(dir), path.resolve(outDir))) throw new Error(`比べる書き出しが --out の中にある: ${dir}`);
