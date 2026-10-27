@@ -15,6 +15,7 @@ const outDir = path.resolve(values.out as string);
 
 const handler = createDevServer({
   outDir,
+  root: path.resolve(import.meta.dirname, ".."),
   log: (line) => console.log(`[${new Date().toLocaleTimeString()}] ${line}`),
 });
 

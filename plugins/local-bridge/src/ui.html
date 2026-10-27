@@ -68,6 +68,8 @@ const DEV_RETRY_MS = 2000;
 const DEV_LOG_LINES = 50;
 /** つないでいる dev サーバー (http://localhost:<ポート>)。見つかっていなければ null */
 let devServer = null;
+/** dev サーバーを起動したリポの場所 (絶対パス)。root を返さない古い dev サーバーなら null。渡す文に埋めるので、改行などの制御文字を含む root も null にする */
+let devRoot = null;
 /** プラグインの本体が照合に使う合言葉。本体が clientStorage に残す */
 let runToken = null;
 /** 本体へ渡した依頼の結果 (dev-result / dev-error / run-result) を受け取る */
@@ -110,7 +112,10 @@ async function findDevServer() {
     try {
       const res = await fetch(`${base}/hello`, { signal: AbortSignal.timeout(DEV_PROBE_TIMEOUT_MS) });
       const body = await res.json();
-      if (body.app === DEV_SERVER_APP) return base;
+      if (body.app === DEV_SERVER_APP) {
+        devRoot = typeof body.root === "string" && /^\/[^\u0000-\u001f\u007f]*$/.test(body.root) ? body.root : null;
+        return base;
+      }
     } catch {
       // 待ち受けていない・dev サーバーでない相手 (JSON を返さない)
     }
@@ -130,13 +135,19 @@ function setRunToken(token) {
   parent.postMessage({ pluginMessage: { type: "dev-token", token } }, "*");
 }
 
+/** 渡す文を読む AI は別のリポで動いていることがあるので、リポの中の場所は絶対パスで書く */
+function repoPath(rel) {
+  return devRoot === null ? `figma-plugins リポジトリの ${rel}` : `${devRoot}/${rel}`;
+}
+
 function runInstructions() {
   const host = devServer.replace("http://", "");
   return [
     `Figma の Local Bridge の script 実行の口: ${devServer}/run`,
     `合言葉 (X-Run-Token ヘッダ): ${runToken}`,
     `例: curl -s -X POST ${host}/run -H 'X-Run-Token: ${runToken}' --data-binary 'return figma.currentPage.name;'`,
-    "使い方は figma-plugins リポジトリの plugins/local-bridge/README.md を読む",
+    `使い方は ${repoPath("plugins/local-bridge/README.md")} を読む`,
+    `Figma を書き換えるときは ${repoPath(".claude/skills/figma-safe-edit/SKILL.md")} の手順に従う`,
   ].join("\n");
 }
 

@@ -59,7 +59,7 @@ Figma のログインや MCP の認証は要らない (script の実行だけ合
    改名前の Dev Loop (`plugins/dev-loop/manifest.json`) を取り込んでいたら、その項目を**開発**の一覧から削除してから取り込む。
 5. 対象のファイルを開き、Local Bridge を起動して開いたままにする。
 6. Local Bridge の画面の「AI に渡す文をコピー」を押し、AI のセッションに貼る。
-   渡す文には、dev サーバーの URL・合言葉・この README のファイルパスが入る。
+   渡す文には、dev サーバーの URL・合言葉と、この README と[書き換えの手順](../../.claude/skills/figma-safe-edit/SKILL.md)の絶対パスが入る。
    合言葉は、script の実行を許す鍵で、Local Bridge が自動で作る (詳しくは [script の実行](#script-の実行))。
 
 注意:
@@ -151,7 +151,8 @@ Figma への取り込みは[リポルート README の共通手順](../../README
      - `queued` (順番待ち) か `processing` (Local Bridge へ渡して結果がまだ): 待つ長さ (既定 300 秒、`?timeout=<秒>`) を過ぎて HTTP 504 で返った。もう一度待つ。
        `queued` で `plugin.processing` が無く、`plugin.lastSeenAt` が 35 秒より前なら、Local Bridge が開いていない。人か computer use に Local Bridge を開いてもらう。
        `processing` のまま `plugin.processing.elapsedSeconds` が伸び続けるときは、Figma が前に出ているか、Local Bridge が開いているかを人か computer use で確かめる (書き出しの途中で Local Bridge を閉じても `processing` のまま残る)。
-     - HTTP 404: この起動の dev サーバーが受けていない依頼 (dev サーバーを起動し直す前の依頼など)。送り直す。
+     - HTTP 404: この起動の dev サーバーが受けていない依頼 (dev サーバーを起動し直す前の依頼など)。書き出しは送り直す。
+       script は前の dev サーバーのときに実行したかもしれないので、書き換える script は送り直さず、[書き換えの手順](../../.claude/skills/figma-safe-edit/SKILL.md)の 2 に従う (読み取りだけの script は送り直してよい)。
    - `<置き場所>/status.json` と `GET /status` は、最後に受けた結果 (`version`・`seq`・`images` (`none` か `only` のときだけ)・`dir`・`fileName`・`warnings`・`error`) を返す。
      `GET /status` には `plugin` と、結果の置き場所 `outDir` も入る。
      `GET /status?after=<version>` は、それより新しい結果が届くまで待つ (どの依頼の結果でも返る)。
@@ -176,6 +177,15 @@ Local Bridge の画面には、いつ・なぜ (新しい依頼か、起動よ�
 
 Plugin API のコードを送ると、Local Bridge が実行して返り値を JSON で返す (Figma MCP の use_figma と同じことを、回数の上限なしに手元で行う)。
 読み取りだけでなく、ファイルの書き換えや削除もできる。
+書き換える script は、[書き換えの手順](../../.claude/skills/figma-safe-edit/SKILL.md)に従って送る。
+書き換える前と後を書き出して `npm run compare` で比べ (構造の差分と、before・after・色が違う画素を赤くした差分の画像)、問題があれば Figma の取り消しで戻す。
+手順が頼る取り消しの挙動は、2026-10-26・27 に Figma デスクトップ 126.10.11 で実測した。
+
+- script の頭と終わりで `figma.commitUndo()` を呼ぶと、その script の書き換えが取り消しの 1 手になる (`figma.triggerUndo()` でも Cmd+Z でも 1 回で戻る)。
+  呼ばないと、続けて送った script の書き換えが 1 手にまとまる。
+- `figma.triggerUndo()` は、そのタブの取り消しの履歴のいちばん新しい 1 手を戻す。
+  script のあとに人が手で書き換えていれば、そちらが先に戻る。
+- 書き出し (`/export`) は取り消しの履歴に手を積まない (書き換えと取り消しのあいだに書き出しを挟んでも、取り消しは script の 1 手を戻した)。
 
 1. 人が Local Bridge の画面の「AI に渡す文をコピー」を押し、実行を任せる AI のセッションに貼る。
    渡す文には、dev サーバーの URL と合言葉 (`X-Run-Token`) が入る。
@@ -195,12 +205,14 @@ Plugin API のコードを送ると、Local Bridge が実行して返り値を J
    - 成功は HTTP 200 で `{"seq": 3, "value": ...}` が返る (return しなければ `value` は `null`)。
    - 失敗は HTTP 422 で、`error` に理由が入る。理由の文で、実行したかどうかが分かる。
      - 「実行していない」: 合言葉が違う・コードを読めない (構文エラー)。直して送り直してよい。
-     - 「途中で例外を投げた (それまでの書き換えは残っている)」: 送り直す前に、Figma の状態を確かめる。
+     - 「途中で例外を投げた (それまでの書き換えは残っている)」: 書き換える script は送り直さず、[書き換えの手順](../../.claude/skills/figma-safe-edit/SKILL.md)の 2 に従う。
+       読み取りだけの script は、直して送り直してよい。
      - 「最後まで実行したが」: 返り値を JSON にできない・大きすぎる (JSON で 100 万文字まで)。
-       script の書き換えは済んでいる。同じ script を送り直すと書き換えが二重にかかるので、返す値だけを減らした script にする。
+       script の書き換えは済んでいる。同じ script を送り直すと書き換えが二重にかかるので、送り直さずに、要る値は読み取りの script で確かめる。
      - 「実行したが、結果の送信に失敗」: Local Bridge から dev サーバーへ結果が届かなかった。
        書き換えは済んでいるので、送り直さずに、要る値は読み取りの script で確かめる。
    - HTTP 400 は依頼の形が違う (`X-Run-Token` が無い・本文が空・`timeout` が正の数でない)。積んでいないので、直して送り直す。
+   - HTTP 503 は Local Bridge が繋がっていない (書き出しと同じ)。積んでいないので、Local Bridge を開いてから送り直す。
    - 書き出しと同じ待ち行列に入り、前の依頼が終わってから順に実行する。
    - 待つ長さの既定は 90 秒 (`?timeout=<秒>`)。
      Claude Code の Bash ツールの既定 (120 秒) で curl が止められる前に、`seq` の入った HTTP 504 を返すため。
@@ -211,8 +223,11 @@ Plugin API のコードを送ると、Local Bridge が実行して返り値を J
      - `cancelled`: Local Bridge へ渡す前に、依頼した側が待つのをやめた (時間切れか、curl が止められた) ので取り消した。
        実行していないので、送り直してよい。取り消した script は、あとで開いた Local Bridge にも渡さない。
      - `abandoned`: Local Bridge へ渡したのに、結果が返らないまま Local Bridge が次へ進んだ (走り直した・閉じて開き直した)。
-       途中まで実行したかもしれないので、Figma の状態を確かめてから送り直す。
+       途中まで実行したかもしれないので、書き換える script は送り直さず、[書き換えの手順](../../.claude/skills/figma-safe-edit/SKILL.md)の 2 に従う。
+       読み取りだけの script は送り直してよい。
      script の `skipped` は、まだ渡さないうちにあとの依頼が先に渡った依頼で、実行していない。
+   - 応答が返らないまま curl が止まったとき (`seq` が分からない) は、実行したかが分からない。
+     書き換える script は送り直さず、[書き換えの手順](../../.claude/skills/figma-safe-edit/SKILL.md)の 2 に従う (読み取りだけの script は送り直してよい)。
    - 成功でも失敗でも、`status.json`・`version`・`latest` は変わらない (書き出しの結果ではないため)。
 3. 合言葉を取り消したいときは、Local Bridge の画面の「合言葉を作り直す」を押す。
    前の合言葉の付いた script は実行しない (渡したすべての AI で使えなくなる)。
@@ -242,7 +257,7 @@ Plugin API のコードを送ると、Local Bridge が実行して返り値を J
   複数のファイルで開くと、依頼はどれか 1 つの Local Bridge に渡り、どのファイルで処理するかは選べない (書き出しは `fileName` で分かる)。
   処理中の依頼を取り違え、script の `state` を `abandoned` と答えることもある。
 - ポートは、候補の 47717〜47721 (manifest の `devAllowedDomains` と同じ値) のうち、空いている最初のポート。dev サーバーは同時に 1 つしか動かせない。
-  ポートが分からないときは、候補に順に `curl -s localhost:<ポート>/hello` を聞き、`{"app": "structure-dump-dev-server"}` を返したポートを使う。
+  ポートが分からないときは、候補に順に `curl -s localhost:<ポート>/hello` を聞き、`app` に `structure-dump-dev-server` を返したポートを使う (`root` は dev サーバーを起動したリポの場所)。
   `npm run dev:server` が「dev サーバーはもう http://localhost:<ポート> で動いている」と出して終わったら、ほかのセッションが起動した dev サーバーが動いている。
   止めずに、そのまま依頼する。結果はそのサーバーの置き場所に入る。
   置き場所は表示され、`GET /status` の `outDir` でも分かる。
@@ -268,4 +283,3 @@ Plugin API のコードを送ると、Local Bridge が実行して返り値を J
 ## 未確認の前提 (Figma 実機での動作確認推奨)
 
 - 終わらない script (同期の無限ループ) を送ったとき、Local Bridge を閉じて止められること
-- 1 回の script の書き換えを、Figma の取り消し (Cmd+Z) で何回で戻せるか

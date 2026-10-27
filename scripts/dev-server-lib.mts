@@ -283,6 +283,8 @@ function runOutcomeOf(seq: number, text: string): Outcome | undefined {
 
 export interface DevServerOptions {
   outDir: string;
+  /** dev サーバーを起動したリポの場所 (絶対パス)。GET /hello で返し、Local Bridge は AI に渡す文の README などをこれで指す */
+  root?: string;
   keepResults?: number;
   pluginStaleMs?: number;
   log?: (line: string) => void;
@@ -861,7 +863,7 @@ export function createDevServer(options: DevServerOptions): http.RequestListener
     }
 
     if (route === "GET /hello") {
-      send(res, 200, { app: DEV_SERVER_APP });
+      send(res, 200, options.root === undefined ? { app: DEV_SERVER_APP } : { app: DEV_SERVER_APP, root: options.root });
       return;
     }
 
