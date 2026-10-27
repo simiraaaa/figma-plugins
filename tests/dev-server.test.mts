@@ -18,6 +18,8 @@ import {
   createDevServer,
   DEV_PORTS,
   DEV_SERVER_APP,
+  DEV_SERVER_PROTOCOL,
+  type DevServerHandler,
   type DevServerOptions,
   type DevStatus,
   type DumpRequest,
@@ -42,8 +44,17 @@ import * as planDist from "../plugins/structure-dump/dist/plan.mjs";
 const { IMAGES_MODES, parseImagesMode } =
   planDist as unknown as typeof import("../plugins/structure-dump/src/plan.ts");
 
-type Next = DumpRequest & { server: string };
-type RunNext = RunRequest & { server: string };
+/** /next の応答。launch はその依頼を渡した起動 id で、Local Bridge は結果を送るときに付ける */
+type Next = DumpRequest & { server: string; launch: string };
+type RunNext = RunRequest & { server: string; launch: string };
+/** 結果を送る口のクエリに要るもの */
+type Handed = { seq: number; server: string; launch?: string };
+
+function resultQuery(next: Handed): string {
+  const params = new URLSearchParams({ seq: String(next.seq), server: next.server });
+  if (next.launch !== undefined) params.set("launch", next.launch);
+  return params.toString();
+}
 
 async function json<T>(res: Response | Promise<Response>): Promise<T> {
   return (await (await res).json()) as T;
@@ -65,14 +76,16 @@ function sampleZip(): Uint8Array {
 async function startServer(
   outDir = mkdtempSync(path.join(tmpdir(), "structure-dump-dev-")),
   options: Partial<DevServerOptions> = {}
-): Promise<{ base: string; port: number; outDir: string; close: () => void }> {
-  const server = http.createServer(createDevServer({ outDir, ...options }));
+): Promise<{ base: string; port: number; outDir: string; handler: DevServerHandler; close: () => void }> {
+  const handler = createDevServer({ outDir, ...options });
+  const server = http.createServer(handler);
   await new Promise<void>((resolve) => server.listen(0, "127.0.0.1", resolve));
   const { port } = server.address() as AddressInfo;
   return {
     base: `http://127.0.0.1:${port}`,
     port,
     outDir,
+    handler,
     close: () => {
       server.closeAllConnections();
       server.close();
@@ -83,30 +96,58 @@ async function startServer(
 /** プラグインの UI の iframe と同じく Origin: null で送る */
 const PLUGIN = { Origin: "null" };
 
-function pluginNext(base: string, query = "", signal?: AbortSignal): Promise<Response> {
-  return fetch(`${base}/next${query}`, { headers: PLUGIN, signal });
+/**
+ * Local Bridge を開いている Figma のファイル。launch はその Local Bridge の起動 id (省けばファイルごとに 1 つの起動)、
+ * session は開いている画面 (figma.currentUser.sessionId。省けばファイルごとに 1 つの画面)
+ */
+interface FigmaFile {
+  key: string;
+  name: string;
+  launch?: string;
+  session?: string;
+}
+
+const FILE_A: FigmaFile = { key: "fileKeyA", name: "Rabee UI" };
+const FILE_B: FigmaFile = { key: "fileKeyB", name: "Rabee UI のコピー" };
+const FILE = FILE_A.key;
+
+/** query は `?server=...&after=...` の形。Local Bridge と同じく自分のファイルと起動 id を付けて聞く */
+function pluginNext(base: string, query = "", signal?: AbortSignal, file: FigmaFile = FILE_A): Promise<Response> {
+  const params = new URLSearchParams(query.replace(/^\?/, ""));
+  params.set("file", file.key);
+  params.set("name", file.name);
+  params.set("launch", file.launch ?? `launch-${file.key}`);
+  params.set("session", file.session ?? "38648");
+  return fetch(`${base}/next?${params}`, { headers: PLUGIN, signal });
 }
 
 function pluginPost(
   base: string,
   route: "result" | "error",
-  next: { seq: number; server: string },
+  next: Handed,
   body: Uint8Array | string
 ): Promise<Response> {
-  return fetch(`${base}/${route}?seq=${next.seq}&server=${next.server}`, {
+  return fetch(`${base}/${route}?${resultQuery(next)}`, {
     method: "POST",
     headers: PLUGIN,
     body,
   });
 }
 
-/** AI が script の実行を頼む */
-function runRequest(base: string, code: string, query = "", token = "t1"): Promise<Response> {
-  return fetch(`${base}/run${query}`, { method: "POST", headers: { "X-Run-Token": token }, body: code });
+/** 応答の plugin (つながっているファイルの一覧) から、そのファイルの Local Bridge の様子を引く */
+function stateOf(plugin: PluginState[], file = FILE): PluginState | undefined {
+  return plugin.find((p) => p.fileKey === file);
 }
 
-function pluginRunResult(base: string, next: { seq: number; server: string }, body: unknown): Promise<Response> {
-  return fetch(`${base}/run-result?seq=${next.seq}&server=${next.server}`, {
+/** AI が script の実行を頼む。query は `?timeout=...` の形 */
+function runRequest(base: string, code: string, query = "", token = "t1", file = FILE): Promise<Response> {
+  const params = new URLSearchParams(query.replace(/^\?/, ""));
+  params.set("file", file);
+  return fetch(`${base}/run?${params}`, { method: "POST", headers: { "X-Run-Token": token }, body: code });
+}
+
+function pluginRunResult(base: string, next: Handed, body: unknown): Promise<Response> {
+  return fetch(`${base}/run-result?${resultQuery(next)}`, {
     method: "POST",
     headers: PLUGIN,
     body: JSON.stringify(body),
@@ -211,7 +252,7 @@ test("images の付いた書き出しの依頼は、プラグインへそのま�
   const { base, close } = await startServer();
   try {
     const polled = pluginNext(base);
-    const exported = fetch(`${base}/export?timeout=5`, {
+    const exported = fetch(`${base}/export?file=${FILE}&timeout=5`, {
       method: "POST",
       body: JSON.stringify({ nodeIds: ["1:2"], images: "only" }),
     });
@@ -220,7 +261,7 @@ test("images の付いた書き出しの依頼は、プラグインへそのま�
     assert.deepEqual(next.nodeIds, ["1:2"]);
 
     const { plugin } = await json<StatusReply>(fetch(`${base}/status`));
-    assert.equal(plugin.processing?.images, "only");
+    assert.equal(stateOf(plugin)?.processing?.images, "only");
     const processing = await json<RequestReply>(fetch(`${base}/status?seq=1&timeout=0.1`));
     assert.equal(processing.state, "processing");
     assert.equal(processing.images, "only");
@@ -232,10 +273,10 @@ test("images の付いた書き出しの依頼は、プラグインへそのま�
 
     // 省いた依頼は images を付けずに渡し (プラグインは無ければ both と読む)、モードも載せない
     const again = pluginNext(base, `?server=${next.server}&after=1`);
-    const plain = fetch(`${base}/export?timeout=5`, { method: "POST", body: "" });
+    const plain = fetch(`${base}/export?file=${FILE}&timeout=5`, { method: "POST", body: "" });
     const plainNext = await json<Next>(again);
     assert.equal("images" in plainNext, false);
-    const plainProcessing = (await json<StatusReply>(fetch(`${base}/status`))).plugin.processing;
+    const plainProcessing = stateOf((await json<StatusReply>(fetch(`${base}/status`))).plugin)?.processing;
     assert.deepEqual([plainProcessing?.seq, plainProcessing?.kind], [2, "export"]);
     assert.equal("images" in (plainProcessing as object), false);
     await pluginPost(base, "result", plainNext, sampleZip());
@@ -249,7 +290,7 @@ test("images が none の依頼は、プラグインへ none のまま渡り、�
   const { base, outDir, close } = await startServer();
   try {
     const polled = pluginNext(base);
-    const exported = fetch(`${base}/export?timeout=5`, {
+    const exported = fetch(`${base}/export?file=${FILE}&timeout=5`, {
       method: "POST",
       body: JSON.stringify({ nodeIds: ["1:2"], images: "none" }),
     });
@@ -268,14 +309,14 @@ test("images に both を書いた依頼は、プラグインへ both のまま�
   const { base, outDir, close } = await startServer();
   try {
     const polled = pluginNext(base);
-    const exported = fetch(`${base}/export?timeout=5`, {
+    const exported = fetch(`${base}/export?file=${FILE}&timeout=5`, {
       method: "POST",
       body: JSON.stringify({ nodeIds: ["1:2"], images: "both" }),
     });
     const next = await json<Next>(polled);
     assert.equal(next.images, "both");
 
-    const processing = (await json<StatusReply>(fetch(`${base}/status`))).plugin.processing;
+    const processing = stateOf((await json<StatusReply>(fetch(`${base}/status`))).plugin)?.processing;
     assert.deepEqual([processing?.seq, processing?.kind], [1, "export"]);
     assert.equal("images" in (processing as object), false);
     const pendingReply = await json<RequestReply>(fetch(`${base}/status?seq=1&timeout=0.1`));
@@ -296,7 +337,7 @@ test("images が only の依頼が失敗しても、status.json・GET /status・
   const { base, outDir, close } = await startServer();
   try {
     const polled = pluginNext(base);
-    const exported = fetch(`${base}/export?timeout=5`, {
+    const exported = fetch(`${base}/export?file=${FILE}&timeout=5`, {
       method: "POST",
       body: JSON.stringify({ nodeIds: ["9:9"], images: "only" }),
     });
@@ -320,7 +361,7 @@ test("負例: images が both・none・only でない書き出しの依頼は、
     const polled = pluginNext(base);
     polled.catch(() => {});
     for (const bad of ['"png"', "null", "2"]) {
-      const res = await fetch(`${base}/export?timeout=1`, { method: "POST", body: `{"images":${bad}}` });
+      const res = await fetch(`${base}/export?file=${FILE}&timeout=1`, { method: "POST", body: `{"images":${bad}}` });
       assert.equal(res.status, 400, `images: ${bad} を受けた`);
       assert.equal((await json<{ error: string }>(res)).error, "images は both・none・only のどれかにする (省けば both)");
     }
@@ -335,7 +376,7 @@ test("依頼 → プラグインが取る → 結果を送ると、依頼した�
   try {
     // プラグインの UI は起動直後 after 無しで聞き、最後の依頼を受け取る
     const polled = pluginNext(base);
-    const exported = fetch(`${base}/export`, {
+    const exported = fetch(`${base}/export?file=${FILE}`, {
       method: "POST",
       body: JSON.stringify({ nodeIds: ["1:2"] }),
     });
@@ -343,6 +384,8 @@ test("依頼 → プラグインが取る → 結果を送ると、依頼した�
     assert.equal(next.seq, 1);
     assert.deepEqual(next.nodeIds, ["1:2"]);
     assert.equal(typeof next.server, "string");
+    // Local Bridge は依頼の fileKey が自分のファイルかを確かめてから処理する
+    assert.equal(next.fileKey, FILE);
 
     const posted = await pluginPost(base, "result", next, sampleZip());
     assert.equal(posted.status, 200);
@@ -352,6 +395,7 @@ test("依頼 → プラグインが取る → 結果を送ると、依頼した�
     const status = await json<DevStatus>(res);
     assert.equal(status.version, 1);
     assert.equal(status.seq, 1);
+    assert.equal(status.fileKey, FILE);
     assert.deepEqual(status.nodeIds, ["1:2"]);
     assert.equal(status.fileName, "Rabee UI");
     assert.equal(status.files, 3);
@@ -379,16 +423,21 @@ test("依頼 → プラグインが取る → 結果を送ると、依頼した�
 });
 
 test("プラグインが失敗を送ると、依頼した側に 422 と理由が返る", async () => {
-  const { base, close } = await startServer();
+  const { base, outDir, close } = await startServer();
   try {
     const polled = pluginNext(base);
-    const exported = fetch(`${base}/export`, { method: "POST", body: "" });
+    const exported = fetch(`${base}/export?file=${FILE}`, { method: "POST", body: "" });
     const next = await json<Next>(polled);
     assert.equal(next.nodeIds, undefined);
     await pluginPost(base, "error", next, "ノードが見つからない: 9:9");
     const res = await exported;
     assert.equal(res.status, 422);
-    assert.equal((await json<DevStatus>(res)).error, "ノードが見つからない: 9:9");
+    const body = await json<DevStatus>(res);
+    assert.equal(body.error, "ノードが見つからない: 9:9");
+    // 書き出せなかった結果も、どのファイルの結果かが分かる (ファイル名は Local Bridge が名乗った名前)
+    assert.deepEqual([body.fileKey, body.fileName], [FILE_A.key, FILE_A.name]);
+    const stored = JSON.parse(readFileSync(path.join(outDir, "status.json"), "utf8")) as DevStatus;
+    assert.deepEqual([stored.fileKey, stored.fileName], [FILE_A.key, FILE_A.name]);
   } finally {
     close();
   }
@@ -398,7 +447,7 @@ test("status?after は新しい結果が届くまで待つ (build で走り直�
   const { base, close } = await startServer();
   try {
     const polled = pluginNext(base);
-    const exported = fetch(`${base}/export`, { method: "POST", body: "" });
+    const exported = fetch(`${base}/export?file=${FILE}`, { method: "POST", body: "" });
     const next = await json<Next>(polled);
     await pluginPost(base, "result", next, sampleZip());
     await exported;
@@ -421,7 +470,7 @@ test("起動し直しても版の番号は前回の続きから振り、新し�
   try {
     assert.equal((await json<DevStatus>(fetch(`${base}/status`))).version, 50);
     const polled = pluginNext(base);
-    const exported = fetch(`${base}/export`, { method: "POST", body: "" });
+    const exported = fetch(`${base}/export?file=${FILE}`, { method: "POST", body: "" });
     await pluginPost(base, "result", await json<Next>(polled), sampleZip());
     const status = await json<DevStatus>(exported);
     assert.equal(status.version, 51);
@@ -461,6 +510,22 @@ test("候補のポートで古い版の dev サーバー (GET /hello に印を�
     assert.match(message, /古い版/);
     assert.match(message, /起動し直す/);
     assert.doesNotMatch(message, /そのまま依頼する/);
+  } finally {
+    old.close();
+  }
+});
+
+test("候補のポートで、依頼をファイルごとに振り分けない版の dev サーバーが動いていれば、古い版として止めて起動し直すよう案内する", async () => {
+  // 振り分ける前の版は GET /hello に印と root だけを返す。いまの Local Bridge はその版の依頼 (行き先が無い) を実行しない
+  const old = http.createServer((req, res) => {
+    res.writeHead(200, { "Content-Type": "application/json" });
+    res.end(req.url === "/status" ? '{"version": 3, "outDir": "/x"}' : `{"app": "${DEV_SERVER_APP}", "root": "/x"}`);
+  });
+  await new Promise<void>((resolve) => old.listen(0, "127.0.0.1", resolve));
+  const { port } = old.address() as AddressInfo;
+  try {
+    const outcome = await listenOnCandidatePorts((_req, res) => res.end(), [port], ["127.0.0.1"]);
+    assert.deepEqual(outcome, { kind: "running", port, outDir: "/x", current: false });
   } finally {
     old.close();
   }
@@ -563,19 +628,20 @@ test("渡した依頼の結果がまだなら、プラグインから何も来�
   const { base, close } = await startServer(undefined, { pluginStaleMs: 50 });
   try {
     const polled = pluginNext(base);
-    const first = fetch(`${base}/export?timeout=5`, { method: "POST", body: "" });
+    const first = fetch(`${base}/export?file=${FILE}&timeout=5`, { method: "POST", body: "" });
     first.catch(() => {});
     const taken = await json<Next>(polled);
     // 重い書き出しのあいだは Figma ごと固まり、UI からは何も届かない
     await new Promise((resolve) => setTimeout(resolve, 100));
-    const second = fetch(`${base}/export?timeout=5`, { method: "POST", body: '{"nodeIds":["5:6"]}' });
+    const second = fetch(`${base}/export?file=${FILE}&timeout=5`, { method: "POST", body: '{"nodeIds":["5:6"]}' });
     second.catch(() => {});
     assert.equal(await settleWithin(second, 200), "pending", "処理中なのに断った");
 
-    const { plugin } = await json<StatusReply>(fetch(`${base}/status`));
-    assert.equal(plugin.processing?.seq, 1);
-    assert.equal(typeof plugin.processing?.elapsedSeconds, "number");
-    assert.equal(typeof plugin.lastSeenAt, "string");
+    const plugin = stateOf((await json<StatusReply>(fetch(`${base}/status`))).plugin);
+    assert.equal(plugin?.processing?.seq, 1);
+    assert.equal(typeof plugin?.processing?.elapsedSeconds, "number");
+    assert.equal(typeof plugin?.lastSeenAt, "string");
+    assert.equal(plugin?.fileName, FILE_A.name);
 
     // 書き出しが終わると、待たせていた依頼を次に渡す
     await pluginPost(base, "result", taken, sampleZip());
@@ -583,7 +649,7 @@ test("渡した依頼の結果がまだなら、プラグインから何も来�
     const queued = await json<Next>(pluginNext(base, `?server=${taken.server}&after=1`));
     assert.equal(queued.seq, 2);
     assert.deepEqual(queued.nodeIds, ["5:6"]);
-    assert.equal((await json<StatusReply>(fetch(`${base}/status`))).plugin.processing?.seq, 2);
+    assert.equal(stateOf((await json<StatusReply>(fetch(`${base}/status`))).plugin)?.processing?.seq, 2);
     await pluginPost(base, "result", queued, sampleZip());
     assert.equal((await second).status, 200);
   } finally {
@@ -595,17 +661,17 @@ test("時間切れの 504 には、プラグインが処理中の依頼と最後
   const { base, close } = await startServer();
   try {
     const polled = pluginNext(base);
-    const first = fetch(`${base}/export?timeout=5`, { method: "POST", body: '{"nodeIds":["1:2"]}' });
+    const first = fetch(`${base}/export?file=${FILE}&timeout=5`, { method: "POST", body: '{"nodeIds":["1:2"]}' });
     first.catch(() => {});
     await json<Next>(polled);
-    const res = await fetch(`${base}/export?timeout=0.2`, { method: "POST", body: "" });
+    const res = await fetch(`${base}/export?file=${FILE}&timeout=0.2`, { method: "POST", body: "" });
     assert.equal(res.status, 504);
-    const body = await json<{ seq: number; error: string; plugin: PluginState }>(res);
+    const body = await json<{ seq: number; error: string; plugin: PluginState[] }>(res);
     assert.equal(body.seq, 2);
     assert.match(body.error, /#1 の結果がまだ来ていない/);
-    assert.equal(body.plugin.processing?.seq, 1);
-    assert.deepEqual(body.plugin.processing?.nodeIds, ["1:2"]);
-    assert.equal(typeof body.plugin.lastSeenAt, "string");
+    assert.equal(stateOf(body.plugin)?.processing?.seq, 1);
+    assert.deepEqual(stateOf(body.plugin)?.processing?.nodeIds, ["1:2"]);
+    assert.equal(typeof stateOf(body.plugin)?.lastSeenAt, "string");
   } finally {
     close();
   }
@@ -615,7 +681,7 @@ test("status?seq は、その依頼の結果が出るまで待ち、done と展�
   const { base, close } = await startServer();
   try {
     const polled = pluginNext(base);
-    const exported = fetch(`${base}/export?timeout=0.2`, { method: "POST", body: '{"nodeIds":["1:2"]}' });
+    const exported = fetch(`${base}/export?file=${FILE}&timeout=0.2`, { method: "POST", body: '{"nodeIds":["1:2"]}' });
     const taken = await json<Next>(polled);
     assert.equal((await exported).status, 504);
     const waiting = fetch(`${base}/status?seq=1`);
@@ -638,10 +704,10 @@ test("status?seq: 失敗は failed と理由、待つ長さを過ぎたら 504 �
   const { base, close } = await startServer();
   try {
     const polled = pluginNext(base);
-    const first = fetch(`${base}/export?timeout=5`, { method: "POST", body: "" });
+    const first = fetch(`${base}/export?file=${FILE}&timeout=5`, { method: "POST", body: "" });
     first.catch(() => {});
     const taken = await json<Next>(polled);
-    const second = fetch(`${base}/export?timeout=5`, { method: "POST", body: "" });
+    const second = fetch(`${base}/export?file=${FILE}&timeout=5`, { method: "POST", body: "" });
     second.catch(() => {});
     await new Promise((resolve) => setTimeout(resolve, 50));
 
@@ -665,12 +731,12 @@ test("status?seq: 走り直したプラグインが飛ばした依頼は、す�
   const { base, close } = await startServer();
   try {
     const polled = pluginNext(base);
-    const first = fetch(`${base}/export?timeout=5`, { method: "POST", body: "" });
+    const first = fetch(`${base}/export?file=${FILE}&timeout=5`, { method: "POST", body: "" });
     first.catch(() => {});
     await json<Next>(polled);
-    const skipped = fetch(`${base}/export?timeout=5`, { method: "POST", body: "" });
+    const skipped = fetch(`${base}/export?file=${FILE}&timeout=5`, { method: "POST", body: "" });
     skipped.catch(() => {});
-    const latest = fetch(`${base}/export?timeout=5`, { method: "POST", body: "" });
+    const latest = fetch(`${base}/export?file=${FILE}&timeout=5`, { method: "POST", body: "" });
     latest.catch(() => {});
     await new Promise((resolve) => setTimeout(resolve, 50));
     const waiting = fetch(`${base}/status?seq=2`);
@@ -690,7 +756,7 @@ test("status?seq: 走り直したプラグインが同じ依頼を書き出し�
   const { base, close } = await startServer();
   try {
     const polled = pluginNext(base);
-    const exported = fetch(`${base}/export?timeout=5`, { method: "POST", body: "" });
+    const exported = fetch(`${base}/export?file=${FILE}&timeout=5`, { method: "POST", body: "" });
     exported.catch(() => {});
     await json<Next>(polled);
     const waiting = fetch(`${base}/status?seq=1`);
@@ -716,16 +782,58 @@ test("status?seq: この起動で受けていない依頼は 404、seq が数字
   }
 });
 
+test("新しい起動が来て abandoned になった script も、前の起動の結果があとから届けば done に変わる", async () => {
+  const { base, close } = await startServer();
+  try {
+    const polled = pluginNext(base, "", undefined, { ...FILE_A, launch: "L1" });
+    const ran = runRequest(base, "return 1;", "?timeout=5");
+    ran.catch(() => {});
+    const taken = await json<RunNext>(polled);
+    const fresh = pluginNext(base, "", undefined, { ...FILE_A, launch: "L2" });
+    fresh.catch(() => {});
+    await settleWithin(fresh, 100);
+    assert.equal((await json<RequestReply>(fetch(`${base}/status?seq=1`))).state, "abandoned");
+    await pluginRunResult(base, taken, { ok: true, value: 1 });
+    const reply = await json<RequestReply>(fetch(`${base}/status?seq=1`));
+    assert.deepEqual([reply.state, reply.value], ["done", 1]);
+  } finally {
+    close();
+  }
+});
+
+test("負例: status?seq は、この起動で振ったが覚えておく数を超えて忘れた依頼と、受けていない依頼を言い分ける", async () => {
+  const { base, close } = await startServer();
+  try {
+    let query = "";
+    for (let i = 0; i < 105; i += 1) {
+      const polled = pluginNext(base, query);
+      const ran = runRequest(base, "return 1;", "?timeout=5");
+      const next = await json<RunNext>(polled);
+      await pluginRunResult(base, next, { ok: true, value: 1 });
+      assert.equal((await ran).status, 200);
+      query = `?server=${next.server}&after=${next.seq}`;
+    }
+    const forgotten = await fetch(`${base}/status?seq=1`);
+    assert.equal(forgotten.status, 404);
+    assert.match((await json<{ error: string }>(forgotten)).error, /覚えておく数を超えて忘れた依頼.*結果があったかは分からない/);
+    const unknown = await fetch(`${base}/status?seq=999`);
+    assert.equal(unknown.status, 404);
+    assert.match((await json<{ error: string }>(unknown)).error, /受けていない/);
+  } finally {
+    close();
+  }
+});
+
 test("起動し直しても依頼の seq は前回の続きから振り、前回の依頼と取り違えない", async () => {
   const outDir = mkdtempSync(path.join(tmpdir(), "structure-dump-dev-"));
   const first = await startServer(outDir);
   try {
     const polled = pluginNext(first.base);
-    const exported = fetch(`${first.base}/export?timeout=5`, { method: "POST", body: "" });
+    const exported = fetch(`${first.base}/export?file=${FILE}&timeout=5`, { method: "POST", body: "" });
     await pluginPost(first.base, "result", await json<Next>(polled), sampleZip());
     await exported;
     // 結果を返さずに残った依頼
-    const pending = fetch(`${first.base}/export?timeout=5`, { method: "POST", body: "" });
+    const pending = fetch(`${first.base}/export?file=${FILE}&timeout=5`, { method: "POST", body: "" });
     pending.catch(() => {});
     await new Promise((resolve) => setTimeout(resolve, 50));
   } finally {
@@ -733,11 +841,13 @@ test("起動し直しても依頼の seq は前回の続きから振り、前回
   }
   const second = await startServer(outDir);
   try {
-    // 前回の起動の結果は GET /status に残るが、前回の依頼の seq は引けない
+    // 前回の起動の結果は GET /status に残るが、前回の依頼の seq は引けない (忘れた依頼とは言わない)
     assert.equal((await json<StatusReply>(fetch(`${second.base}/status`))).seq, 1);
-    assert.equal((await fetch(`${second.base}/status?seq=1`)).status, 404);
+    const previous = await fetch(`${second.base}/status?seq=1`);
+    assert.equal(previous.status, 404);
+    assert.match((await json<{ error: string }>(previous)).error, /受けていない/);
     const polled = pluginNext(second.base);
-    const exported = fetch(`${second.base}/export?timeout=5`, { method: "POST", body: "" });
+    const exported = fetch(`${second.base}/export?file=${FILE}&timeout=5`, { method: "POST", body: "" });
     exported.catch(() => {});
     assert.equal((await json<Next>(polled)).seq, 3);
   } finally {
@@ -749,21 +859,21 @@ test("結果の本文を受け取っている途中で時間切れになった�
   const { base, port, close } = await startServer();
   try {
     const polled = pluginNext(base);
-    const exported = fetch(`${base}/export?timeout=0.3`, { method: "POST", body: "" });
+    const exported = fetch(`${base}/export?file=${FILE}&timeout=0.3`, { method: "POST", body: "" });
     const taken = await json<Next>(polled);
     const zip = sampleZip();
     const upload = http.request({
       host: "127.0.0.1",
       port,
       method: "POST",
-      path: `/result?seq=${taken.seq}&server=${taken.server}`,
+      path: `/result?${resultQuery(taken)}`,
       headers: { Origin: "null", "Content-Length": zip.length },
     });
     upload.on("error", () => {});
     upload.write(zip.subarray(0, 10));
     const res = await exported;
     assert.equal(res.status, 504);
-    assert.equal((await json<{ plugin: PluginState }>(res)).plugin.processing?.seq, 1);
+    assert.equal(stateOf((await json<{ plugin: PluginState[] }>(res)).plugin)?.processing?.seq, 1);
     upload.end(zip.subarray(10));
   } finally {
     close();
@@ -774,7 +884,7 @@ test("status?after の 504 は、最後の結果が失敗でも時間切れの�
   const { base, close } = await startServer();
   try {
     const polled = pluginNext(base);
-    const exported = fetch(`${base}/export?timeout=5`, { method: "POST", body: "" });
+    const exported = fetch(`${base}/export?file=${FILE}&timeout=5`, { method: "POST", body: "" });
     await pluginPost(base, "error", await json<Next>(polled), "ノードが見つからない: 9:9");
     assert.equal((await exported).status, 422);
     const res = await fetch(`${base}/status?after=1&timeout=0.2`);
@@ -791,16 +901,15 @@ test("結果を返したあと、しばらくプラグインから何も来な�
   const { base, close } = await startServer(undefined, { pluginStaleMs: 50 });
   try {
     const polled = pluginNext(base);
-    const exported = fetch(`${base}/export?timeout=5`, { method: "POST", body: "" });
+    const exported = fetch(`${base}/export?file=${FILE}&timeout=5`, { method: "POST", body: "" });
     await pluginPost(base, "result", await json<Next>(polled), sampleZip());
     assert.equal((await exported).status, 200);
     // 結果を返したあと /next を待ちに来ない (プラグインを閉じた)
     await new Promise((resolve) => setTimeout(resolve, 100));
-    const res = await fetch(`${base}/export?timeout=5`, { method: "POST", body: "" });
+    const res = await fetch(`${base}/export?file=${FILE}&timeout=5`, { method: "POST", body: "" });
     assert.equal(res.status, 503);
-    const body = await json<{ plugin: PluginState }>(res);
-    assert.equal(body.plugin.processing, undefined);
-    assert.equal(typeof body.plugin.lastSeenAt, "string");
+    // 繋がっていないファイルは一覧に載せない
+    assert.deepEqual((await json<{ plugin: PluginState[] }>(res)).plugin, []);
   } finally {
     close();
   }
@@ -810,15 +919,15 @@ test("渡した依頼の結果を返さずに /next を待ちに来たら、そ�
   const { base, close } = await startServer();
   try {
     const polled = pluginNext(base);
-    const exported = fetch(`${base}/export?timeout=5`, { method: "POST", body: "" });
+    const exported = fetch(`${base}/export?file=${FILE}&timeout=5`, { method: "POST", body: "" });
     exported.catch(() => {});
     const taken = await json<Next>(polled);
-    assert.equal((await json<StatusReply>(fetch(`${base}/status`))).plugin.processing?.seq, 1);
+    assert.equal(stateOf((await json<StatusReply>(fetch(`${base}/status`))).plugin)?.processing?.seq, 1);
     const waiting = new AbortController();
     const again = pluginNext(base, `?server=${taken.server}&after=1`, waiting.signal);
     again.catch(() => {});
     assert.equal(await settleWithin(again, 100), "pending");
-    assert.equal((await json<StatusReply>(fetch(`${base}/status`))).plugin.processing, undefined);
+    assert.equal(stateOf((await json<StatusReply>(fetch(`${base}/status`))).plugin)?.processing, undefined);
     waiting.abort();
   } finally {
     close();
@@ -828,12 +937,12 @@ test("渡した依頼の結果を返さずに /next を待ちに来たら、そ�
 test("プラグインが繋がっていなければ、依頼を積まずにすぐ 503 を返す", async () => {
   const { base, close } = await startServer();
   try {
-    const res = await fetch(`${base}/export?timeout=5`, { method: "POST", body: "" });
+    const res = await fetch(`${base}/export?file=${FILE}&timeout=5`, { method: "POST", body: "" });
     assert.equal(res.status, 503);
-    const body = await json<{ error: string; plugin: PluginState }>(res);
+    const body = await json<{ error: string; plugin: PluginState[] }>(res);
     assert.match(body.error, /Local Bridge を開いたままにする/);
     // 起動してからプラグインが一度も来ていない
-    assert.deepEqual(body.plugin, {});
+    assert.deepEqual(body.plugin, []);
     // 積んでいないので、あとから繋いだプラグインには何も渡らない
     const next = pluginNext(base);
     next.catch(() => {});
@@ -847,14 +956,14 @@ test("負例: 別の起動のサーバー宛ての結果と、数字でない ti
   const { base, outDir, close } = await startServer();
   try {
     const polled = pluginNext(base);
-    const exported = fetch(`${base}/export?timeout=2`, { method: "POST", body: "" });
+    const exported = fetch(`${base}/export?file=${FILE}&timeout=2`, { method: "POST", body: "" });
     const next = await json<Next>(polled);
     const stale = await pluginPost(base, "result", { seq: next.seq, server: "old-server" }, sampleZip());
     assert.equal(stale.status, 409);
     assert.equal(existsSync(path.join(outDir, "latest")), false);
     assert.equal((await exported).status, 504);
 
-    const bad = await fetch(`${base}/export?timeout=abc`, { method: "POST", body: "" });
+    const bad = await fetch(`${base}/export?file=${FILE}&timeout=abc`, { method: "POST", body: "" });
     assert.equal(bad.status, 400);
   } finally {
     close();
@@ -919,7 +1028,7 @@ test("負例: script の実行の依頼は、合言葉のヘッダかコード�
   try {
     const polled = pluginNext(base);
     polled.catch(() => {});
-    const noToken = await fetch(`${base}/run?timeout=1`, { method: "POST", body: "return 1;" });
+    const noToken = await fetch(`${base}/run?file=${FILE}&timeout=1`, { method: "POST", body: "return 1;" });
     assert.equal(noToken.status, 400);
     assert.match((await json<{ error: string }>(noToken)).error, /X-Run-Token/);
     const noCode = await runRequest(base, "  \n", "?timeout=1");
@@ -948,7 +1057,7 @@ test("走り直したプラグインには、渡し済みの script をもう一
     assert.equal(reply.state, "abandoned");
 
     // そのあとに来た依頼は渡す
-    const exported = fetch(`${base}/export?timeout=5`, { method: "POST", body: "" });
+    const exported = fetch(`${base}/export?file=${FILE}&timeout=5`, { method: "POST", body: "" });
     exported.catch(() => {});
     const next = await json<Next>(fresh);
     assert.equal(next.seq, 2);
@@ -962,7 +1071,7 @@ test("最後の依頼が渡し済みの script なら、走り直したプラグ
   const { base, close } = await startServer();
   try {
     const polled = pluginNext(base);
-    const exported = fetch(`${base}/export?timeout=5`, { method: "POST", body: '{"nodeIds":["1:2"]}' });
+    const exported = fetch(`${base}/export?file=${FILE}&timeout=5`, { method: "POST", body: '{"nodeIds":["1:2"]}' });
     const first = await json<Next>(polled);
     await pluginPost(base, "result", first, sampleZip());
     await exported;
@@ -987,7 +1096,7 @@ test("依頼した側が待つのをやめた script は、まだ渡していな
   const { base, close } = await startServer();
   try {
     const polled = pluginNext(base);
-    const exported = fetch(`${base}/export?timeout=5`, { method: "POST", body: "" });
+    const exported = fetch(`${base}/export?file=${FILE}&timeout=5`, { method: "POST", body: "" });
     exported.catch(() => {});
     const busy = await json<Next>(polled);
 
@@ -1002,7 +1111,7 @@ test("依頼した側が待つのをやめた script は、まだ渡していな
     // 接続が切れた (Bash の時間切れで curl が止められた)
     const aborted = new AbortController();
     runRequest(base, "return 2;", "?timeout=5").catch(() => {});
-    const dropped = fetch(`${base}/run?timeout=5`, {
+    const dropped = fetch(`${base}/run?file=${FILE}&timeout=5`, {
       method: "POST",
       headers: { "X-Run-Token": "t1" },
       body: "return 3;",
@@ -1030,7 +1139,7 @@ test("走り直したプラグインには、まだ渡していない script は
   const { base, close } = await startServer();
   try {
     const polled = pluginNext(base);
-    const exported = fetch(`${base}/export?timeout=5`, { method: "POST", body: "" });
+    const exported = fetch(`${base}/export?file=${FILE}&timeout=5`, { method: "POST", body: "" });
     exported.catch(() => {});
     await json<Next>(polled);
     const ran = runRequest(base, "return 1;", "?timeout=5");
@@ -1052,7 +1161,7 @@ test("負例: 書き出しの依頼に script の結果を、script の依頼に
   const { base, outDir, close } = await startServer();
   try {
     const polled = pluginNext(base);
-    const exported = fetch(`${base}/export?timeout=1`, { method: "POST", body: "" });
+    const exported = fetch(`${base}/export?file=${FILE}&timeout=1`, { method: "POST", body: "" });
     exported.catch(() => {});
     const exportNext = await json<Next>(polled);
     assert.equal((await pluginRunResult(base, exportNext, { ok: true, value: 1 })).status, 409);
@@ -1072,12 +1181,741 @@ test("負例: 書き出しの依頼に script の結果を、script の依頼に
   }
 });
 
+test("負例: 行き先のファイル (file) の無い依頼は、積まずに 400 と、つながっているファイルの一覧を返す", async () => {
+  const { base, close } = await startServer();
+  try {
+    const polled = pluginNext(base);
+    polled.catch(() => {});
+    await new Promise((resolve) => setTimeout(resolve, 50));
+    const exported = await fetch(`${base}/export?timeout=1`, { method: "POST", body: "" });
+    const ran = await fetch(`${base}/run?timeout=1`, {
+      method: "POST",
+      headers: { "X-Run-Token": "t1" },
+      body: "return 1;",
+    });
+    for (const res of [exported, ran]) {
+      assert.equal(res.status, 400);
+      const body = await json<{ error: string; plugin: PluginState[] }>(res);
+      assert.match(body.error, /file=/);
+      assert.deepEqual(
+        body.plugin.map((p) => [p.fileKey, p.fileName, typeof p.lastSeenAt]),
+        [[FILE_A.key, FILE_A.name, "string"]]
+      );
+    }
+    assert.equal(await settleWithin(polled, 200), "pending", "file の無い依頼がプラグインに渡った");
+  } finally {
+    close();
+  }
+});
+
+test("負例: Local Bridge がつながっていないファイル宛ての依頼は、積まずに 503 と、つながっているファイルの一覧を返す", async () => {
+  const { base, close } = await startServer();
+  try {
+    const polled = pluginNext(base);
+    polled.catch(() => {});
+    await new Promise((resolve) => setTimeout(resolve, 50));
+    const exported = await fetch(`${base}/export?file=${FILE_B.key}&timeout=1`, { method: "POST", body: "" });
+    const ran = await runRequest(base, "return 1;", "?timeout=1", "t1", FILE_B.key);
+    for (const res of [exported, ran]) {
+      assert.equal(res.status, 503);
+      const body = await json<{ error: string; plugin: PluginState[] }>(res);
+      assert.ok(body.error.includes(FILE_B.key), "断った行き先が理由に無い");
+      assert.deepEqual(
+        body.plugin.map((p) => [p.fileKey, p.fileName]),
+        [[FILE_A.key, FILE_A.name]]
+      );
+    }
+    assert.equal(await settleWithin(polled, 200), "pending", "別のファイル宛ての依頼がプラグインに渡った");
+  } finally {
+    close();
+  }
+});
+
+test("2 つのファイルの Local Bridge が待っていると、それぞれ自分のファイル宛ての依頼だけを受け取る", async () => {
+  const { base, close } = await startServer();
+  try {
+    const pollA = pluginNext(base, "", undefined, FILE_A);
+    const pollB = pluginNext(base, "", undefined, FILE_B);
+    await new Promise((resolve) => setTimeout(resolve, 50));
+    const exportedB = fetch(`${base}/export?file=${FILE_B.key}&timeout=5`, {
+      method: "POST",
+      body: '{"nodeIds":["2:2"]}',
+    });
+    const ranA = runRequest(base, "return figma.root.name;", "?timeout=5", "t1", FILE_A.key);
+    const nextB = await json<Next>(pollB);
+    const nextA = await json<RunNext>(pollA);
+    assert.deepEqual([nextB.seq, nextB.kind, nextB.fileKey], [1, "export", FILE_B.key]);
+    assert.deepEqual([nextA.seq, nextA.kind, nextA.fileKey], [2, "run", FILE_A.key]);
+
+    await pluginRunResult(base, nextA, { ok: true, value: FILE_A.name });
+    assert.deepEqual(await json(ranA), { seq: 2, value: FILE_A.name });
+    // A の続きを待っているあいだに、B 宛て (#3。B は書き出し中) と A 宛て (#4) の依頼が順に来る
+    const againA = pluginNext(base, `?server=${nextA.server}&after=2`, undefined, FILE_A);
+    const ranB = runRequest(base, "return 3;", "?timeout=5", "t1", FILE_B.key);
+    ranB.catch(() => {});
+    await new Promise((resolve) => setTimeout(resolve, 50));
+    const ranA2 = runRequest(base, "return 4;", "?timeout=5", "t1", FILE_A.key);
+    ranA2.catch(() => {});
+    const nextA2 = await json<RunNext>(againA);
+    assert.deepEqual([nextA2.seq, nextA2.fileKey], [4, FILE_A.key], "A に B 宛ての依頼を渡した");
+
+    await pluginPost(base, "result", nextB, sampleZip());
+    const status = await json<DevStatus>(exportedB);
+    assert.equal(status.fileKey, FILE_B.key);
+    const nextB2 = await json<RunNext>(pluginNext(base, `?server=${nextB.server}&after=1`, undefined, FILE_B));
+    assert.deepEqual([nextB2.seq, nextB2.fileKey], [3, FILE_B.key]);
+
+    const listed = (await json<StatusReply>(fetch(`${base}/status`))).plugin.map((p) => p.fileKey).sort();
+    assert.deepEqual(listed, [FILE_A.key, FILE_B.key]);
+  } finally {
+    close();
+  }
+});
+
+test("開き直した Local Bridge は、別のファイル宛ての最後の書き出しをやり直さない", async () => {
+  const { base, close } = await startServer();
+  try {
+    const polled = pluginNext(base, "", undefined, FILE_A);
+    const exported = fetch(`${base}/export?file=${FILE_A.key}&timeout=5`, { method: "POST", body: "" });
+    await pluginPost(base, "result", await json<Next>(polled), sampleZip());
+    assert.equal((await exported).status, 200);
+
+    const freshB = pluginNext(base, "", undefined, FILE_B);
+    freshB.catch(() => {});
+    assert.equal(await settleWithin(freshB, 200), "pending", "別のファイル宛ての書き出しを渡した");
+    // 同じファイルで開き直した Local Bridge には、いままでどおり最後の書き出しを渡す
+    const freshA = await json<Next>(pluginNext(base, "", undefined, FILE_A));
+    assert.deepEqual([freshA.seq, freshA.fileKey], [1, FILE_A.key]);
+  } finally {
+    close();
+  }
+});
+
+test("ファイル A の依頼を処理しているあいだも、ファイル B の依頼は待たせずに B の Local Bridge へ渡す", async () => {
+  const { base, close } = await startServer();
+  try {
+    const pollA = pluginNext(base, "", undefined, FILE_A);
+    const pollB = pluginNext(base, "", undefined, FILE_B);
+    pollB.catch(() => {});
+    await new Promise((resolve) => setTimeout(resolve, 50));
+    const exportedA = fetch(`${base}/export?file=${FILE_A.key}&timeout=5`, { method: "POST", body: "" });
+    exportedA.catch(() => {});
+    const takenA = await json<Next>(pollA);
+    assert.equal(takenA.fileKey, FILE_A.key);
+
+    const ranB = runRequest(base, "return 1;", "?timeout=5", "t1", FILE_B.key);
+    const takenB = await settleWithin(pollB, 500);
+    assert.notEqual(takenB, "pending", "A の処理中に B の依頼を待たせた");
+    const nextB = await json<RunNext>(takenB as Response);
+    assert.deepEqual([nextB.seq, nextB.fileKey], [2, FILE_B.key]);
+    await pluginRunResult(base, nextB, { ok: true, value: 1 });
+    assert.equal((await ranB).status, 200);
+    // B が終わっても、A の依頼は処理中のまま
+    assert.equal(stateOf((await json<StatusReply>(fetch(`${base}/status`))).plugin, FILE_A.key)?.processing?.seq, 1);
+  } finally {
+    close();
+  }
+});
+
+test("負例: 片方のファイルの Local Bridge が /next を待ちに来ても、もう片方の処理中の script を abandoned にしない", async () => {
+  const { base, close } = await startServer();
+  try {
+    const pollA = pluginNext(base, "", undefined, FILE_A);
+    const ran = runRequest(base, "figma.currentPage.selection[0].remove();", "?timeout=5", "t1", FILE_A.key);
+    ran.catch(() => {});
+    const takenA = await json<RunNext>(pollA);
+    assert.equal(takenA.fileKey, FILE_A.key);
+
+    // B のタブで Local Bridge を開いた (待ち位置を持たない)
+    const freshB = pluginNext(base, "", undefined, FILE_B);
+    freshB.catch(() => {});
+    assert.equal(await settleWithin(freshB, 100), "pending");
+    const still = await fetch(`${base}/status?seq=1&timeout=0.2`);
+    assert.equal(still.status, 504);
+    assert.equal((await json<RequestReply>(still)).state, "processing");
+  } finally {
+    close();
+  }
+});
+
+test("負例: 自分のファイルを付けずに /next に来た古い版の Local Bridge には、依頼を渡さず build し直すよう 400 で返す", async () => {
+  const { base, close } = await startServer();
+  try {
+    const old = await fetch(`${base}/next`, { headers: PLUGIN });
+    assert.equal(old.status, 400);
+    assert.match((await json<{ error: string }>(old)).error, /build/);
+    // 古い版が来ただけでは、どのファイルもつながっているとは見ない
+    assert.deepEqual((await json<StatusReply>(fetch(`${base}/status`))).plugin, []);
+  } finally {
+    close();
+  }
+});
+
+function sleep(ms: number): Promise<void> {
+  return new Promise((resolve) => setTimeout(resolve, ms));
+}
+
+test("同じ画面で走り直した (後から来た起動の) Local Bridge だけが依頼を受け取り、前の起動の Local Bridge には 409 で止まるよう返す", async () => {
+  const { base, close } = await startServer();
+  try {
+    const first = { ...FILE_A, launch: "L1" };
+    const second = { ...FILE_A, launch: "L2" };
+    const oldPoll = pluginNext(base, "", undefined, first);
+    oldPoll.catch(() => {});
+    await sleep(50);
+    const newPoll = pluginNext(base, "", undefined, second);
+    // 前の起動が待っていた /next は、後の起動が来た時点で 409 で返る
+    const stopped = await settleWithin(oldPoll, 300);
+    assert.notEqual(stopped, "pending", "前の起動の Local Bridge が待ち続けた");
+    assert.equal((stopped as Response).status, 409);
+    const stoppedBody = await json<{ error: string; reason: string }>(stopped as Response);
+    assert.equal(stoppedBody.reason, "superseded");
+    assert.match(stoppedBody.error, /走り直した/);
+
+    // 交互に渡らず、続けて来た依頼はどれも後の起動が受け取る
+    let poll = newPoll;
+    for (const nodeIds of [["1:1"], ["2:2"]]) {
+      const exported = fetch(`${base}/export?file=${FILE}&timeout=5`, { method: "POST", body: JSON.stringify({ nodeIds }) });
+      const next = await json<Next>(poll);
+      assert.deepEqual(next.nodeIds, nodeIds);
+      await pluginPost(base, "result", next, sampleZip());
+      assert.equal((await exported).status, 200);
+      // 前の起動がまた聞きに来ても、依頼を渡さずに 409
+      const again = await settleWithin(pluginNext(base, "", undefined, first), 300);
+      assert.notEqual(again, "pending", "前の起動の Local Bridge が待ち続けた");
+      assert.equal((again as Response).status, 409);
+      poll = pluginNext(base, `?server=${next.server}&after=${next.seq}`, undefined, second);
+    }
+    poll.catch(() => {});
+  } finally {
+    close();
+  }
+});
+
+test("負例: 前の起動の Local Bridge が /next に来ても、後の起動が処理中の script を abandoned にしない", async () => {
+  const { base, close } = await startServer();
+  try {
+    const first = { ...FILE_A, launch: "L1" };
+    const second = { ...FILE_A, launch: "L2" };
+    const aborted = new AbortController();
+    pluginNext(base, "", aborted.signal, first).catch(() => {});
+    await sleep(50);
+    aborted.abort();
+    const newPoll = pluginNext(base, "", undefined, second);
+    const ran = runRequest(base, "figma.currentPage.selection[0].remove();", "?timeout=5");
+    ran.catch(() => {});
+    assert.equal((await json<RunNext>(newPoll)).seq, 1);
+
+    const late = new AbortController();
+    const oldAgain = pluginNext(base, "", late.signal, first);
+    oldAgain.catch(() => {});
+    await settleWithin(oldAgain, 200);
+    late.abort();
+    const still = await fetch(`${base}/status?seq=1&timeout=0.2`);
+    assert.equal(still.status, 504);
+    assert.equal((await json<RequestReply>(still)).state, "processing");
+  } finally {
+    close();
+  }
+});
+
+test("負例: 起動 id (launch) を付けずに /next に来た Local Bridge には、依頼を渡さず build し直すよう 400 で返す", async () => {
+  const { base, close } = await startServer();
+  try {
+    const res = await fetch(`${base}/next?file=${FILE}&name=x`, { headers: PLUGIN, signal: AbortSignal.timeout(1000) });
+    assert.equal(res.status, 400);
+    assert.match((await json<{ error: string }>(res)).error, /build/);
+  } finally {
+    close();
+  }
+});
+
+test("GET /status?file はそのファイルの最後の結果を返し、status?after に file を付けるとそのファイルの新しい結果だけを待つ", async () => {
+  const { base, close } = await startServer();
+  try {
+    // ファイルごとの待ち位置 (Local Bridge が覚える server と after)
+    const positions = new Map<string, string>();
+    const exportOn = async (file: FigmaFile): Promise<DevStatus> => {
+      const polled = pluginNext(base, positions.get(file.key) ?? "", undefined, file);
+      const exported = fetch(`${base}/export?file=${file.key}&timeout=5`, { method: "POST", body: "" });
+      const next = await json<Next>(polled);
+      positions.set(file.key, `?server=${next.server}&after=${next.seq}`);
+      await pluginPost(base, "result", next, sampleZip());
+      return json<DevStatus>(exported);
+    };
+    const firstA = await exportOn(FILE_A);
+    const firstB = await exportOn(FILE_B);
+    assert.deepEqual([firstA.version, firstB.version], [1, 2]);
+
+    const ofA = await json<StatusReply>(fetch(`${base}/status?file=${FILE_A.key}`));
+    assert.deepEqual([ofA.version, ofA.fileKey, ofA.dir], [1, FILE_A.key, firstA.dir]);
+    assert.equal((await json<StatusReply>(fetch(`${base}/status`))).fileKey, FILE_B.key);
+    // そのファイルの結果がまだ無ければ version は 0
+    const none = await json<StatusReply>(fetch(`${base}/status?file=unknownKey`));
+    assert.deepEqual([none.version, none.dir], [0, undefined]);
+
+    const waiting = fetch(`${base}/status?file=${FILE_A.key}&after=1&timeout=5`);
+    await exportOn(FILE_B);
+    assert.equal(await settleWithin(waiting, 200), "pending", "別のファイルの結果で返った");
+    const secondA = await exportOn(FILE_A);
+    const res = await waiting;
+    assert.equal(res.status, 200);
+    assert.deepEqual(
+      [(await json<StatusReply>(res)).version, secondA.fileKey],
+      [secondA.version, FILE_A.key]
+    );
+  } finally {
+    close();
+  }
+});
+
+test("起動し直した直後の status?file は、前回の最後の結果がそのファイルのものならそれを返す", async () => {
+  const outDir = mkdtempSync(path.join(tmpdir(), "structure-dump-dev-"));
+  writeFileSync(path.join(outDir, "status.json"), JSON.stringify({ version: 7, seq: 3, fileKey: FILE_A.key, dir: "/x/7" }));
+  const { base, close } = await startServer(outDir);
+  try {
+    assert.equal((await json<StatusReply>(fetch(`${base}/status?file=${FILE_A.key}`))).version, 7);
+    assert.equal((await json<StatusReply>(fetch(`${base}/status?file=${FILE_B.key}`))).version, 0);
+  } finally {
+    close();
+  }
+});
+
+test("負例: ほかのファイルの依頼が保持の上限を超えても、処理中の依頼とそのファイルの最後の書き出しは落とさない", async () => {
+  const { base, close } = await startServer();
+  try {
+    const pollB = pluginNext(base, "", undefined, FILE_B);
+    const exportedB = fetch(`${base}/export?file=${FILE_B.key}&timeout=30`, { method: "POST", body: "" });
+    const takenB = await json<Next>(pollB);
+    let query = "";
+    for (let i = 0; i < 110; i += 1) {
+      const polled = pluginNext(base, query, undefined, FILE_A);
+      const ran = runRequest(base, "return 1;", "?timeout=5");
+      const next = await json<RunNext>(polled);
+      await pluginRunResult(base, next, { ok: true, value: 1 });
+      assert.equal((await ran).status, 200);
+      query = `?server=${next.server}&after=${next.seq}`;
+    }
+    // B の処理中の依頼は落ちていないので、結果を受け、どのファイルの結果かも分かる
+    await pluginPost(base, "result", takenB, sampleZip());
+    const status = await json<DevStatus>(exportedB);
+    assert.equal(status.fileKey, FILE_B.key);
+    assert.equal((await json<RequestReply>(fetch(`${base}/status?seq=${takenB.seq}`))).state, "done");
+    assert.equal(stateOf((await json<StatusReply>(fetch(`${base}/status`))).plugin, FILE_B.key)?.processing, undefined);
+    // B を開き直すと、B の最後の書き出しをやり直す
+    const fresh = await json<Next>(pluginNext(base, "", undefined, { ...FILE_B, launch: "B2" }));
+    assert.deepEqual([fresh.seq, fresh.fileKey], [takenB.seq, FILE_B.key]);
+  } finally {
+    close();
+  }
+});
+
+test("負例: 知らない fileKey の /next を大量に送っても、繋がっていないファイルは忘れ、処理中のファイルは覚えている", async () => {
+  const { base, handler, close } = await startServer(undefined, { pluginStaleMs: 50 });
+  try {
+    const pollB = pluginNext(base, "", undefined, FILE_B);
+    const exportedB = fetch(`${base}/export?file=${FILE_B.key}&timeout=5`, { method: "POST", body: "" });
+    exportedB.catch(() => {});
+    await json<Next>(pollB);
+    for (let i = 0; i < 30; i += 1) {
+      const aborted = new AbortController();
+      pluginNext(base, "", aborted.signal, { key: `junk${i}`, name: "x" }).catch(() => {});
+      await sleep(5);
+      aborted.abort();
+    }
+    await sleep(100);
+    const aborted = new AbortController();
+    pluginNext(base, "", aborted.signal, FILE_A).catch(() => {});
+    await sleep(20);
+    assert.equal(handler.fileCount(), 2, "繋がっていないファイルを覚え続けた");
+    aborted.abort();
+    assert.equal(stateOf((await json<StatusReply>(fetch(`${base}/status`))).plugin, FILE_B.key)?.processing?.seq, 1);
+  } finally {
+    close();
+  }
+});
+
+test("負例: /next で名乗ったファイル名は、制御文字を除き 200 文字までにして載せる", async () => {
+  const { base, close } = await startServer();
+  try {
+    const aborted = new AbortController();
+    pluginNext(base, "", aborted.signal, { key: FILE, name: `a\u0000b\nc\u007f${"あ".repeat(300)}` }).catch(() => {});
+    await sleep(50);
+    const name = stateOf((await json<StatusReply>(fetch(`${base}/status`))).plugin)?.fileName ?? "";
+    aborted.abort();
+    assert.doesNotMatch(name, /[\u0000-\u001f\u007f]/);
+    assert.equal(Array.from(name).length, 200);
+    assert.ok(name.startsWith("abc"), name.slice(0, 10));
+  } finally {
+    close();
+  }
+});
+
+test("負例: file を名乗らない古い版の Local Bridge が来たばかりなら、503 の理由にそれを添える", async () => {
+  const { base, close } = await startServer(undefined, { pluginStaleMs: 100 });
+  try {
+    assert.equal((await fetch(`${base}/next`, { headers: PLUGIN })).status, 400);
+    const res = await fetch(`${base}/export?file=${FILE}&timeout=1`, { method: "POST", body: "" });
+    assert.equal(res.status, 503);
+    assert.match((await json<{ error: string }>(res)).error, /名乗らない古い版の Local Bridge が \d+ 秒前に来た.*build し直/);
+    await sleep(150);
+    const later = await fetch(`${base}/export?file=${FILE}&timeout=1`, { method: "POST", body: "" });
+    assert.doesNotMatch((await json<{ error: string }>(later)).error, /古い版の Local Bridge/);
+  } finally {
+    close();
+  }
+});
+
+/** 結果の本文を途中まで送った POST /result。end で残りを送る */
+function slowUpload(port: number, next: Handed, zip: Uint8Array): { end: () => Promise<number> } {
+  let status: Promise<number> = Promise.resolve(0);
+  const upload = http.request({
+    host: "127.0.0.1",
+    port,
+    method: "POST",
+    path: `/result?${resultQuery(next)}`,
+    headers: { Origin: "null", "Content-Length": zip.length },
+  });
+  status = new Promise((resolve, reject) => {
+    upload.on("response", (res) => {
+      res.resume();
+      resolve(res.statusCode ?? 0);
+    });
+    upload.on("error", reject);
+  });
+  upload.write(zip.subarray(0, 10));
+  return {
+    end: () => {
+      upload.end(zip.subarray(10));
+      return status;
+    },
+  };
+}
+
+test("負例: 結果の本文を受け取っているあいだに後の起動へ渡した別の依頼の処理中を、その結果で消さない", async () => {
+  const { base, port, close } = await startServer();
+  try {
+    const first = { ...FILE_A, launch: "L1" };
+    const polled = pluginNext(base, "", undefined, first);
+    const exported1 = fetch(`${base}/export?file=${FILE}&timeout=5`, { method: "POST", body: "" });
+    exported1.catch(() => {});
+    const taken1 = await json<Next>(polled);
+    const exported2 = fetch(`${base}/export?file=${FILE}&timeout=5`, { method: "POST", body: '{"nodeIds":["2:2"]}' });
+    exported2.catch(() => {});
+    await sleep(50);
+    // 前の起動が #1 の結果を送り始めたところで、後の起動が開いて #2 を受け取る
+    const upload = slowUpload(port, taken1, sampleZip());
+    await sleep(50);
+    const taken2 = await json<Next>(pluginNext(base, "", undefined, { ...FILE_A, launch: "L2" }));
+    assert.equal(taken2.seq, 2);
+    assert.equal(await upload.end(), 200);
+    assert.equal((await exported1).status, 200);
+    const still = await fetch(`${base}/status?seq=2&timeout=0.2`);
+    assert.equal(still.status, 504);
+    assert.equal((await json<RequestReply>(still)).state, "processing", "#1 の結果で #2 の処理中が消えた");
+  } finally {
+    close();
+  }
+});
+
+test("負例: 止めた起動から遅れて届いた結果は受けるが、後の起動が同じ依頼を書き出し直している処理中は消さない", async () => {
+  const { base, close } = await startServer();
+  try {
+    const polled = pluginNext(base, "", undefined, { ...FILE_A, launch: "L1" });
+    const exported = fetch(`${base}/export?file=${FILE}&timeout=5`, { method: "POST", body: "" });
+    const taken1 = await json<Next>(polled);
+    // 後の起動は、最後の書き出しの #1 をやり直す
+    const taken2 = await json<Next>(pluginNext(base, "", undefined, { ...FILE_A, launch: "L2" }));
+    assert.deepEqual([taken2.seq, taken2.launch], [1, "L2"]);
+    assert.equal((await pluginPost(base, "result", taken1, sampleZip())).status, 200);
+    assert.equal((await exported).status, 200);
+    const plugin = stateOf((await json<StatusReply>(fetch(`${base}/status`))).plugin);
+    assert.equal(plugin?.processing?.seq, 1, "後の起動の処理中が、止めた起動の結果で消えた");
+    // 後の起動の結果も受ける (書き出しは上書きする)
+    assert.equal((await pluginPost(base, "result", taken2, sampleZip())).status, 200);
+    assert.equal(stateOf((await json<StatusReply>(fetch(`${base}/status`))).plugin)?.processing, undefined);
+  } finally {
+    close();
+  }
+});
+
+test("負例: 引き継いだときに捨てた前の起動の依頼が保持の上限で落ちても、遅れて届いた結果がどのファイルのものか引ける", async () => {
+  const { base, close } = await startServer();
+  try {
+    const polled = pluginNext(base, "", undefined, { ...FILE_A, launch: "L1" });
+    const exported1 = fetch(`${base}/export?file=${FILE}&timeout=30`, { method: "POST", body: '{"nodeIds":["1:1"]}' });
+    exported1.catch(() => {});
+    const taken1 = await json<Next>(polled);
+    const exported2 = fetch(`${base}/export?file=${FILE}&timeout=5`, { method: "POST", body: "" });
+    await sleep(50);
+    const second = { ...FILE_A, launch: "L2" };
+    const taken2 = await json<Next>(pluginNext(base, "", undefined, second));
+    assert.equal(taken2.seq, 2);
+    await pluginPost(base, "result", taken2, sampleZip());
+    assert.equal((await exported2).status, 200);
+    let query = `?server=${taken2.server}&after=2`;
+    for (let i = 0; i < 110; i += 1) {
+      const next = pluginNext(base, query, undefined, second);
+      const ran = runRequest(base, "return 1;", "?timeout=5");
+      const taken = await json<RunNext>(next);
+      await pluginRunResult(base, taken, { ok: true, value: 1 });
+      assert.equal((await ran).status, 200);
+      query = `?server=${taken.server}&after=${taken.seq}`;
+    }
+    assert.equal((await pluginPost(base, "result", taken1, sampleZip())).status, 200);
+    const status = await json<DevStatus>(exported1);
+    assert.deepEqual([status.fileKey, status.nodeIds], [FILE_A.key, ["1:1"]]);
+  } finally {
+    close();
+  }
+});
+
+test("負例: 起動 id (launch) を付けずに送られた結果は受けず、処理中も消さない", async () => {
+  const { base, close } = await startServer();
+  try {
+    const polled = pluginNext(base);
+    const exported = fetch(`${base}/export?file=${FILE}&timeout=2`, { method: "POST", body: "" });
+    exported.catch(() => {});
+    const taken = await json<Next>(polled);
+    const res = await pluginPost(base, "result", { seq: taken.seq, server: taken.server }, sampleZip());
+    assert.equal(res.status, 400);
+    assert.equal(stateOf((await json<StatusReply>(fetch(`${base}/status`))).plugin)?.processing?.seq, 1);
+  } finally {
+    close();
+  }
+});
+
+test("負例: 結果を残す数を超えても、各ファイルの最後の結果は消さない (GET /status?file が消えた dir を返さない)", async () => {
+  const { base, close } = await startServer(undefined, { keepResults: 2 });
+  try {
+    const positions = new Map<string, string>();
+    const exportOn = async (file: FigmaFile): Promise<DevStatus> => {
+      const polled = pluginNext(base, positions.get(file.key) ?? "", undefined, file);
+      const exported = fetch(`${base}/export?file=${file.key}&timeout=5`, { method: "POST", body: "" });
+      const next = await json<Next>(polled);
+      positions.set(file.key, `?server=${next.server}&after=${next.seq}`);
+      await pluginPost(base, "result", next, sampleZip());
+      return json<DevStatus>(exported);
+    };
+    const ofA = await exportOn(FILE_A);
+    const olderB = await exportOn(FILE_B);
+    for (let i = 0; i < 3; i += 1) await exportOn(FILE_B);
+    const reply = await json<StatusReply>(fetch(`${base}/status?file=${FILE_A.key}`));
+    assert.equal(reply.dir, ofA.dir);
+    assert.equal(existsSync(path.join(ofA.dir as string, "index.json")), true, "A の最後の結果を消した");
+    // 残す数は守る (各ファイルの最後でない古い結果は消える)
+    assert.equal(existsSync(olderB.dir as string), false);
+  } finally {
+    close();
+  }
+});
+
+test("負例: 画面 (session) を名乗らずに /next に来た Local Bridge には、依頼を渡さず build し直すよう 400 で返す", async () => {
+  const { base, close } = await startServer();
+  try {
+    const res = await fetch(`${base}/next?file=${FILE}&name=x&launch=L1`, { headers: PLUGIN, signal: AbortSignal.timeout(1000) });
+    assert.equal(res.status, 400);
+    assert.match((await json<{ error: string }>(res)).error, /build/);
+  } finally {
+    close();
+  }
+});
+
+test("負例: 同じファイルを別の画面で開いた Local Bridge は、先の画面が生きているあいだ 409 で断り、先の画面に依頼を渡し続ける", async () => {
+  const { base, close } = await startServer();
+  try {
+    const owner = { ...FILE_A, launch: "L1", session: "38648" };
+    const other = { ...FILE_A, launch: "L2", session: "38649" };
+    const ownerPoll = pluginNext(base, "", undefined, owner);
+    await sleep(50);
+    const refused = await settleWithin(pluginNext(base, "", undefined, other), 300);
+    assert.notEqual(refused, "pending", "別の画面の Local Bridge が待ちに入った");
+    assert.equal((refused as Response).status, 409);
+    const body = await json<{ error: string; reason: string }>(refused as Response);
+    assert.equal(body.reason, "other-screen");
+    assert.match(body.error, /別の画面/);
+    // 先の画面は止めない
+    const exported = fetch(`${base}/export?file=${FILE}&timeout=5`, { method: "POST", body: "" });
+    const next = await settleWithin(ownerPoll, 300);
+    assert.notEqual(next, "pending", "先の画面の Local Bridge に依頼が渡らない");
+    const taken = await json<Next>(next as Response);
+    assert.equal(taken.launch, "L1");
+    await pluginPost(base, "result", taken, sampleZip());
+    assert.equal((await exported).status, 200);
+    const plugin = stateOf((await json<StatusReply>(fetch(`${base}/status`))).plugin);
+    assert.equal(plugin?.session, "38648");
+    assert.equal(typeof plugin?.otherScreenRefusedAt, "string");
+  } finally {
+    close();
+  }
+});
+
+test("負例: 先の画面が処理中なら、別の画面の Local Bridge が来てもその script を abandoned にしない", async () => {
+  const { base, close } = await startServer();
+  try {
+    const polled = pluginNext(base, "", undefined, { ...FILE_A, launch: "L1", session: "38648" });
+    const ran = runRequest(base, "figma.currentPage.selection[0].remove();", "?timeout=5");
+    ran.catch(() => {});
+    await json<RunNext>(polled);
+    const refused = await settleWithin(pluginNext(base, "", undefined, { ...FILE_A, launch: "L2", session: "38649" }), 300);
+    assert.notEqual(refused, "pending");
+    assert.equal((refused as Response).status, 409);
+    const still = await fetch(`${base}/status?seq=1&timeout=0.2`);
+    assert.equal(still.status, 504);
+    assert.equal((await json<RequestReply>(still)).state, "processing");
+  } finally {
+    close();
+  }
+});
+
+test("先の画面が生きていなければ (待ち手も処理中も無く、最後に届いてから時間が過ぎた)、別の画面が新しい持ち主になり、残っていた依頼を受け取る", async () => {
+  const { base, close } = await startServer(undefined, { pluginStaleMs: 300 });
+  try {
+    const polled = pluginNext(base, "", undefined, { ...FILE_A, launch: "L1", session: "38648" });
+    const first = fetch(`${base}/export?file=${FILE}&timeout=5`, { method: "POST", body: "" });
+    const taken1 = await json<Next>(polled);
+    // 書き出し中に次の依頼が積まれ、先の画面は結果を返したあと閉じられた (/next に来ない)
+    const second = fetch(`${base}/export?file=${FILE}&timeout=5`, { method: "POST", body: '{"nodeIds":["2:2"]}' });
+    await sleep(50);
+    await pluginPost(base, "result", taken1, sampleZip());
+    assert.equal((await first).status, 200);
+    await sleep(350);
+    const taken2 = await json<Next>(pluginNext(base, "", undefined, { ...FILE_A, launch: "L2", session: "38649" }));
+    assert.deepEqual([taken2.seq, taken2.launch], [2, "L2"]);
+    await pluginPost(base, "result", taken2, sampleZip());
+    assert.equal((await second).status, 200);
+    assert.equal(stateOf((await json<StatusReply>(fetch(`${base}/status`))).plugin)?.session, "38649");
+  } finally {
+    close();
+  }
+});
+
+test("負例: 2 つの画面が同時にホットリロードで走り直し、持ち主でない画面の新しい起動が先に来ても断り、持ち主の画面の新しい起動が引き継ぐ", async () => {
+  const { base, close } = await startServer();
+  try {
+    // 走り直す前: 持ち主の画面 38648 の起動 L1 が待っていた
+    const before = new AbortController();
+    pluginNext(base, "", before.signal, { ...FILE_A, launch: "L1", session: "38648" }).catch(() => {});
+    await sleep(20);
+    before.abort();
+    // 走り直した: 持ち主でない画面の新しい起動が先に来る
+    const otherFirst = await settleWithin(pluginNext(base, "", undefined, { ...FILE_A, launch: "L2b", session: "38649" }), 300);
+    assert.notEqual(otherFirst, "pending", "持ち主でない画面が持ち主になった");
+    assert.equal((otherFirst as Response).status, 409);
+    // 持ち主の画面の新しい起動は引き継ぐ
+    const ownerPoll = pluginNext(base, "", undefined, { ...FILE_A, launch: "L1b", session: "38648" });
+    const exported = fetch(`${base}/export?file=${FILE}&timeout=5`, { method: "POST", body: "" });
+    const taken = await json<Next>(ownerPoll);
+    assert.equal(taken.launch, "L1b");
+    await pluginPost(base, "result", taken, sampleZip());
+    assert.equal((await exported).status, 200);
+    // 持ち主の画面の前の起動は止めた
+    assert.equal((await pluginNext(base, "", undefined, { ...FILE_A, launch: "L1", session: "38648" })).status, 409);
+  } finally {
+    close();
+  }
+});
+
+test("負例: 持ち主の画面が処理中のまま閉じられても、渡してから上限を過ぎて何も届かなければ、別の画面が持ち主になれる", async () => {
+  const { base, close } = await startServer(undefined, { pluginStaleMs: 50, processingStaleMs: 300 });
+  try {
+    const owner = { ...FILE_A, launch: "L1", session: "38648" };
+    const other = { ...FILE_A, launch: "L2", session: "38649" };
+    const polled = pluginNext(base, "", undefined, owner);
+    const ran = runRequest(base, "return 1;", "?timeout=5");
+    const taken = await json<RunNext>(polled);
+    // 処理中のあいだは、上限までは生きているとみなして断る
+    await sleep(100);
+    assert.equal((await pluginNext(base, "", undefined, other)).status, 409);
+    await sleep(300);
+    const otherPoll = pluginNext(base, "", undefined, other);
+    otherPoll.catch(() => {});
+    assert.equal(await settleWithin(otherPoll, 200), "pending", "上限を過ぎても別の画面を断った");
+    assert.equal(stateOf((await json<StatusReply>(fetch(`${base}/status`))).plugin)?.session, "38649");
+    // 前の画面から遅れて届いた結果も、seq で受ける
+    assert.equal((await pluginRunResult(base, taken, { ok: true, value: 1 })).status, 200);
+    assert.deepEqual(await json(ran), { seq: 1, value: 1 });
+    assert.equal((await json<RequestReply>(fetch(`${base}/status?seq=1`))).state, "done");
+  } finally {
+    close();
+  }
+});
+
+test("負例: 別の画面が持ち主になったあとで前の持ち主の起動が来たら、409 の理由は other-screen", async () => {
+  const { base, close } = await startServer(undefined, { pluginStaleMs: 200 });
+  try {
+    const owner = { ...FILE_A, launch: "L1", session: "38648" };
+    const polled = pluginNext(base, "", undefined, owner);
+    const first = fetch(`${base}/export?file=${FILE}&timeout=5`, { method: "POST", body: "" });
+    const taken1 = await json<Next>(polled);
+    // 書き出し中に次の依頼が積まれ、持ち主の画面は結果を返したあと閉じられた
+    const second = fetch(`${base}/export?file=${FILE}&timeout=5`, { method: "POST", body: "" });
+    second.catch(() => {});
+    await sleep(50);
+    await pluginPost(base, "result", taken1, sampleZip());
+    assert.equal((await first).status, 200);
+    await sleep(250);
+    const taken2 = await json<Next>(pluginNext(base, "", undefined, { ...FILE_A, launch: "L2", session: "38649" }));
+    assert.equal(taken2.launch, "L2");
+    const res = await pluginNext(base, "", undefined, owner);
+    assert.equal(res.status, 409);
+    const body = await json<{ reason: string; error: string }>(res);
+    assert.equal(body.reason, "other-screen", "持ち主が替わったのに、同じ画面で走り直したと答えた");
+    assert.match(body.error, /別の画面/);
+  } finally {
+    close();
+  }
+});
+
+test("負例: /next の session が数字だけ・20 文字までの形でなければ、依頼を渡さず形が違う旨の 400 を返す", async () => {
+  const { base, close } = await startServer();
+  try {
+    for (const session of ["abc", "38648x", "1".repeat(21), "-1"]) {
+      const res = await fetch(`${base}/next?file=${FILE}&name=x&launch=L1&session=${encodeURIComponent(session)}`, {
+        headers: PLUGIN,
+        signal: AbortSignal.timeout(1000),
+      });
+      assert.equal(res.status, 400, `session: ${session} を受けた`);
+      const error = (await json<{ error: string }>(res)).error;
+      assert.match(error, /session は数字だけ/);
+      assert.doesNotMatch(error, /古い版/);
+    }
+    assert.deepEqual((await json<StatusReply>(fetch(`${base}/status`))).plugin, []);
+    const ok = pluginNext(base, "", undefined, { ...FILE_A, session: "1".repeat(20) });
+    ok.catch(() => {});
+    assert.equal(await settleWithin(ok, 100), "pending");
+  } finally {
+    close();
+  }
+});
+
+test("負例: ファイルを忘れたあとに届いた書き出しの失敗にも、渡したときに Local Bridge が名乗ったファイル名を入れる", async () => {
+  const { base, handler, close } = await startServer(undefined, { pluginStaleMs: 50, processingStaleMs: 100 });
+  try {
+    const polled = pluginNext(base);
+    const exported = fetch(`${base}/export?file=${FILE}&timeout=5`, { method: "POST", body: "" });
+    const taken = await json<Next>(polled);
+    await sleep(200);
+    // 別のファイルの /next でファイルの掃除が走り、処理中の期限が切れた A を忘れる
+    const aborted = new AbortController();
+    pluginNext(base, "", aborted.signal, FILE_B).catch(() => {});
+    await sleep(20);
+    aborted.abort();
+    assert.equal(handler.fileCount(), 1, "A を忘れていない");
+    await pluginPost(base, "error", taken, "ノードが見つからない: 9:9");
+    const status = await json<DevStatus>(exported);
+    assert.deepEqual([status.fileKey, status.fileName], [FILE_A.key, FILE_A.name]);
+  } finally {
+    close();
+  }
+});
+
 test("GET /hello はプラグインの口で、dev サーバーの印を返す", async () => {
   const { base, close } = await startServer();
   try {
     const res = await fetch(`${base}/hello`, { headers: PLUGIN });
     assert.equal(res.status, 200);
-    assert.deepEqual(await json(res), { app: DEV_SERVER_APP });
+    assert.deepEqual(await json(res), { app: DEV_SERVER_APP, protocol: DEV_SERVER_PROTOCOL });
     assert.equal((await fetch(`${base}/hello`, { headers: { Origin: "https://example.com" } })).status, 403);
   } finally {
     close();
@@ -1088,7 +1926,7 @@ test("GET /hello は、起動したリポの場所を渡されていれば root 
   const { base, close } = await startServer(undefined, { root: "/work/figma-plugins" });
   try {
     const res = await fetch(`${base}/hello`, { headers: PLUGIN });
-    assert.deepEqual(await json(res), { app: DEV_SERVER_APP, root: "/work/figma-plugins" });
+    assert.deepEqual(await json(res), { app: DEV_SERVER_APP, protocol: DEV_SERVER_PROTOCOL, root: "/work/figma-plugins" });
   } finally {
     close();
   }
@@ -1100,7 +1938,7 @@ test("負例: GET /hello を聞いただけでは、プラグインが繋がっ�
     // ポートを探す curl も、プラグインの UI の探索も /hello を聞く。どちらも依頼を待つ相手ではない
     assert.equal((await fetch(`${base}/hello`)).status, 200);
     assert.equal((await fetch(`${base}/hello`, { headers: PLUGIN })).status, 200);
-    const res = await fetch(`${base}/export?timeout=1`, { method: "POST", body: "" });
+    const res = await fetch(`${base}/export?file=${FILE}&timeout=1`, { method: "POST", body: "" });
     assert.equal(res.status, 503);
   } finally {
     close();
@@ -1133,13 +1971,13 @@ test("負例: ブラウザのサイトからの送信と、AI 側の口への Or
     polled.catch(() => {});
     // 断らずに受けてしまうと結果を待つので、待つ長さを 1 秒にして 504 で落ちるようにする
     for (const origin of ["https://example.com", "null"]) {
-      const res = await fetch(`${base}/export?timeout=1`, {
+      const res = await fetch(`${base}/export?file=${FILE}&timeout=1`, {
         method: "POST",
         headers: { Origin: origin },
         body: "",
       });
       assert.equal(res.status, 403, `Origin ${origin} の /export を受けた`);
-      const run = await fetch(`${base}/run?timeout=1`, {
+      const run = await fetch(`${base}/run?file=${FILE}&timeout=1`, {
         method: "POST",
         headers: { Origin: origin, "X-Run-Token": "t1" },
         body: "return 1;",
@@ -1172,7 +2010,7 @@ test("負例: ブラウザのサイトからの送信と、AI 側の口への Or
   }
 });
 
-test("候補のポートと dev サーバーの印は、サーバー・Local Bridge の devAllowedDomains・ui.html でそろっている", () => {
+test("候補のポートと dev サーバーの印と版は、サーバー・Local Bridge の devAllowedDomains・ui.html でそろっている", () => {
   const manifest = JSON.parse(
     readFileSync(path.join(root, "plugins/local-bridge/manifest.json"), "utf8")
   ) as { networkAccess: { allowedDomains: string[]; devAllowedDomains?: string[] } };
@@ -1187,6 +2025,7 @@ test("候補のポートと dev サーバーの印は、サーバー・Local Bri
     "ui.html の DEV_PORTS がサーバーの DEV_PORTS と違う"
   );
   assert.ok(ui.includes(`const DEV_SERVER_APP = "${DEV_SERVER_APP}";`), "ui.html の DEV_SERVER_APP が違う");
+  assert.ok(ui.includes(`const DEV_SERVER_PROTOCOL = ${DEV_SERVER_PROTOCOL};`), "ui.html の DEV_SERVER_PROTOCOL が違う");
 });
 
 test("Local Bridge の manifest は、書き出しに効く実行条件が Structure Dump と同じ", () => {
@@ -1194,9 +2033,14 @@ test("Local Bridge の manifest は、書き出しに効く実行条件が Struc
     JSON.parse(readFileSync(path.join(root, `plugins/${name}/manifest.json`), "utf8")) as Record<string, unknown>;
   const dump = read("structure-dump");
   const localBridge = read("local-bridge");
-  for (const key of ["api", "editorType", "documentAccess", "permissions", "enableProposedApi"]) {
+  for (const key of ["api", "editorType", "documentAccess", "enableProposedApi"]) {
     assert.deepEqual(localBridge[key], dump[key], `manifest の ${key} が違う`);
   }
+  // Local Bridge だけが currentuser を持つ (画面ごとの sessionId で、同じファイルの別の画面の 2 つ目を断るため。書き出しには効かない)
+  const others = (permissions: unknown): unknown[] =>
+    Array.isArray(permissions) ? permissions.filter((p) => p !== "currentuser") : [];
+  assert.deepEqual(others(localBridge.permissions), others(dump.permissions), "manifest の permissions が違う");
+  assert.ok((localBridge.permissions as unknown[]).includes("currentuser"), "Local Bridge の manifest に currentuser が無い");
 });
 
 test("Structure Dump の build は Local Bridge も作り直す (Local Bridge は書き出しを build で取り込む)", () => {

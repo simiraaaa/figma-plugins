@@ -8,6 +8,7 @@
   .meta { color: #777; font-size: 11px; }
   button { font-size: 12px; padding: 6px 12px; border-radius: 6px; border: 1px solid #ccc; background: #fff; cursor: pointer; margin-right: 6px; }
   button:hover { background: #f0f0f0; }
+  button:disabled { color: #aaa; background: #fafafa; cursor: default; }
   .bar { display: flex; align-items: center; gap: 8px; }
   #status { flex: 1; min-width: 0; color: #777; }
   #toggle-size { flex: none; margin-right: 0; }
@@ -29,9 +30,10 @@
   <div id="error"></div>
   <div id="dev" hidden>
     <h2>Local Bridge (dev サーバー: <span id="dev-server">探している</span>)</h2>
-    <div class="meta">dev サーバーの依頼を待ち、Structure Dump と同じ書き出しをして ZIP を送る。プラグインのコードを build し直すと、最後の書き出しの依頼をもう一度書き出す。</div>
+    <div>このファイル: <span id="dev-file"></span></div>
+    <div class="meta">dev サーバーのこのファイル宛ての依頼を待ち、Structure Dump と同じ書き出しをして ZIP を送る。プラグインのコードを build し直すと、このファイル宛ての最後の書き出しの依頼をもう一度書き出す。</div>
     <h2>script の実行</h2>
-    <div class="meta">合言葉を渡した AI は、Plugin API の script でこのファイルを読み書きできる。渡すのは、実行を任せる AI のセッションだけにする。</div>
+    <div class="meta">合言葉を渡した AI は、Plugin API の script でこのファイルを読み書きできる。合言葉はこのファイル専用で、ほかのファイルでは使えない。渡すのは、実行を任せる AI のセッションだけにする。AI に渡す文には、このファイルの名前と fileKey が入る。「合言葉を作り直す」は、ほかのタブのファイルの合言葉も無効にする。</div>
     <div>合言葉: <span id="dev-token"></span></div>
     <div class="dev-run-actions">
       <button id="copy-run">AI に渡す文をコピー</button>
@@ -60,9 +62,10 @@ function setCompact(compact) {
   parent.postMessage({ pluginMessage: { type: "ui-compact", compact } }, "*");
 }
 
-// 候補のポートと印は manifest の devAllowedDomains と scripts/dev-server-lib.mts の DEV_PORTS・DEV_SERVER_APP と同じ値にする
+// 候補のポートと印と版は manifest の devAllowedDomains と scripts/dev-server-lib.mts の DEV_PORTS・DEV_SERVER_APP・DEV_SERVER_PROTOCOL と同じ値にする
 const DEV_PORTS = [47717, 47718, 47719, 47720, 47721];
 const DEV_SERVER_APP = "structure-dump-dev-server";
+const DEV_SERVER_PROTOCOL = 2;
 const DEV_PROBE_TIMEOUT_MS = 2000;
 const DEV_RETRY_MS = 2000;
 const DEV_LOG_LINES = 50;
@@ -70,10 +73,21 @@ const DEV_LOG_LINES = 50;
 let devServer = null;
 /** dev サーバーを起動したリポの場所 (絶対パス)。root を返さない古い dev サーバーなら null。渡す文に埋めるので、改行などの制御文字を含む root も null にする */
 let devRoot = null;
-/** プラグインの本体が照合に使う合言葉。本体が clientStorage に残す */
-let runToken = null;
+/**
+ * このタブのファイル (figma.fileKey と figma.root.name) と画面 (figma.currentUser.sessionId)。
+ * dev サーバーはこのファイル宛ての依頼だけを、そのファイルを先に開いた画面にだけ渡す
+ */
+let devFile = null;
+/**
+ * この起動の id。dev サーバーは、同じ画面で最後に来た起動だけに依頼を渡す
+ * (ホットリロード・開き直しで走り直したとき、前の起動の待ちに依頼を渡さないように)
+ */
+const launchId = randomHex(8);
 /** 本体へ渡した依頼の結果 (dev-result / dev-error / run-result) を受け取る */
 let devResolve = null;
+/** 本体に頼んだ合言葉の読み出し・作り直しの返事 (token) を、頼んだときの id で受け取る (1 件返らなくても、ほかの返事と取り違えない) */
+const tokenResolves = new Map();
+let nextTokenAsk = 1;
 
 function devLog(text) {
   const log = document.getElementById("dev-log");
@@ -105,34 +119,59 @@ function askPlugin(message) {
   });
 }
 
-/** 候補のポートに順に聞き、dev サーバーの印を返した最初のポートを返す。見つからなければ null */
+/**
+ * 候補のポートに順に聞き、dev サーバーの印と同じ版を返した最初のポートを返す。
+ * 見つからなければ throw (版の違う dev サーバーがいれば、起動し直すよう理由に書く)
+ */
 async function findDevServer() {
+  let oldServer = null;
   for (const port of DEV_PORTS) {
     const base = `http://localhost:${port}`;
     try {
       const res = await fetch(`${base}/hello`, { signal: AbortSignal.timeout(DEV_PROBE_TIMEOUT_MS) });
       const body = await res.json();
-      if (body.app === DEV_SERVER_APP) {
-        devRoot = typeof body.root === "string" && /^\/[^\u0000-\u001f\u007f]*$/.test(body.root) ? body.root : null;
-        return base;
+      if (body.app !== DEV_SERVER_APP) continue;
+      // 依頼をファイルごとに振り分けない古い版の依頼には行き先が無く、本体が実行しないので、つながない
+      if (body.protocol !== DEV_SERVER_PROTOCOL) {
+        oldServer ??= base;
+        continue;
       }
+      devRoot = typeof body.root === "string" && /^\/[^\u0000-\u001f\u007f]*$/.test(body.root) ? body.root : null;
+      return base;
     } catch {
       // 待ち受けていない・dev サーバーでない相手 (JSON を返さない)
     }
   }
-  return null;
+  if (oldServer !== null) {
+    const error = new Error(`古い版の dev サーバーが ${oldServer} で動いている`);
+    error.statusText = "古い版の dev サーバー。止めて npm run dev:server で起動し直す";
+    throw error;
+  }
+  throw new Error(`候補のポート ${DEV_PORTS.join("・")} に dev サーバーがいない`);
 }
 
-/** 16 バイトの乱数の hex */
-function newRunToken() {
-  const bytes = crypto.getRandomValues(new Uint8Array(16));
-  return Array.from(bytes, (b) => b.toString(16).padStart(2, "0")).join("");
+/** bytes バイトの乱数の hex */
+function randomHex(bytes) {
+  return Array.from(crypto.getRandomValues(new Uint8Array(bytes)), (b) => b.toString(16).padStart(2, "0")).join("");
 }
 
-function setRunToken(token) {
-  runToken = token;
+/**
+ * このファイルの合言葉を本体に読ませる (無ければ作らせる)。renew なら全ファイルの合言葉を消して作り直させる。
+ * 合言葉は clientStorage にあり、別のタブで作り直されることがあるので、使うたびに読み直す
+ */
+function askToken(renew) {
+  return new Promise((resolve) => {
+    const id = nextTokenAsk;
+    nextTokenAsk += 1;
+    tokenResolves.set(id, resolve);
+    // 合言葉は 16 バイトの乱数の hex。乱数はこの iframe の crypto で作る
+    const message = { type: renew ? "token-renew" : "token-get", id, candidate: randomHex(16) };
+    parent.postMessage({ pluginMessage: message }, "*");
+  });
+}
+
+function showRunToken(token) {
   document.getElementById("dev-token").textContent = token;
-  parent.postMessage({ pluginMessage: { type: "dev-token", token } }, "*");
 }
 
 /** 渡す文を読む AI は別のリポで動いていることがあるので、リポの中の場所は絶対パスで書く */
@@ -140,12 +179,15 @@ function repoPath(rel) {
   return devRoot === null ? `figma-plugins リポジトリの ${rel}` : `${devRoot}/${rel}`;
 }
 
-function runInstructions() {
+function runInstructions(runToken) {
   const host = devServer.replace("http://", "");
+  const file = encodeURIComponent(devFile.key);
   return [
     `Figma の Local Bridge の script 実行の口: ${devServer}/run`,
-    `合言葉 (X-Run-Token ヘッダ): ${runToken}`,
-    `例: curl -s -X POST ${host}/run -H 'X-Run-Token: ${runToken}' --data-binary 'return figma.currentPage.name;'`,
+    `行き先のファイル: ${devFile.name} (fileKey: ${devFile.key})`,
+    `/run と /export には、いつも ?file=${file} を付けて、このファイル宛てに送る`,
+    `合言葉 (X-Run-Token ヘッダ。このファイル専用): ${runToken}`,
+    `例: curl -s -X POST '${host}/run?file=${file}' -H 'X-Run-Token: ${runToken}' --data-binary 'return figma.root.name;'`,
     `使い方は ${repoPath("plugins/local-bridge/README.md")} を読む`,
     `Figma を書き換えるときは ${repoPath(".claude/skills/figma-safe-edit/SKILL.md")} の手順に従う`,
   ].join("\n");
@@ -153,7 +195,8 @@ function runInstructions() {
 
 /** fetch の本文は Content-Type を付けない形 (Uint8Array・文字列) にし、CORS の preflight を起こさない */
 async function devPost(route, request, body) {
-  const res = await fetch(`${devServer}/${route}?seq=${request.seq}&server=${request.server}`, {
+  const query = new URLSearchParams({ seq: String(request.seq), server: request.server, launch: request.launch });
+  const res = await fetch(`${devServer}/${route}?${query}`, {
     method: "POST",
     body,
   });
@@ -211,38 +254,79 @@ async function devSendRun(request, body) {
   return result.ok;
 }
 
+/** 409 の本文の reason ごとの、状態の行に出す文 */
+const STOP_STATUS = new Map([
+  ["other-screen", "止まった (このファイルは別の画面で Local Bridge が開いている)"],
+  ["superseded", "止まった (この画面で Local Bridge が走り直した)"],
+]);
+
+/**
+ * dev サーバーに 409 で断られて止まったか。止まった画面からコピーした文の依頼は、依頼を受けている別の画面で実行され、
+ * 「選択しているもの」や開いているページが人の見ている画面と食い違う。作り直した合言葉も、依頼を受けている画面のファイルに効く。
+ * だから止まったら、コピーと合言葉の作り直しをさせない
+ */
+let stopped = false;
+
+/** dev サーバーが 409 で断ったので、この Local Bridge は依頼を受けるのをやめる (人が開き直すまで止まったまま) */
+function stopRefused(reason, detail) {
+  stopped = true;
+  for (const id of ["copy-run", "renew-token"]) document.getElementById(id).disabled = true;
+  devLog(`止まった: ${detail}`);
+  setStatus(STOP_STATUS.get(reason) ?? "止まった (dev サーバーに断られた)");
+  document.getElementById("error").textContent =
+    `${detail}\nこの画面からは、AI に渡す文のコピーと合言葉の作り直しはできない (依頼を受けている画面でする)`;
+  // 小さくしていても、止まった理由が見えるよう広げる
+  setCompact(false);
+}
+
 async function localBridge() {
   const startedAt = Date.now();
   let server = null;
   let after = null;
-  let offline = false;
+  /** つながらない理由。同じ理由を繰り返し記録しないよう、変わったときだけ記録する */
+  let offline = null;
   for (;;) {
     let request;
     try {
       if (devServer === null) {
         devServer = await findDevServer();
-        if (devServer === null) throw new Error(`候補のポート ${DEV_PORTS.join("・")} に dev サーバーがいない`);
         document.getElementById("dev-server").textContent = devServer;
         devLog(`dev サーバーにつないだ: ${devServer}`);
       }
-      const query = server === null ? "" : `?server=${server}&after=${after}`;
-      const res = await fetch(`${devServer}/next${query}`);
+      const query = new URLSearchParams({ file: devFile.key, name: devFile.name, launch: launchId, session: devFile.session });
+      if (server !== null) {
+        query.set("server", server);
+        query.set("after", String(after));
+      }
+      const res = await fetch(`${devServer}/next?${query}`);
       if (res.status === 204) continue;
+      if (res.status === 409) {
+        const text = await res.text();
+        let body = {};
+        try {
+          body = JSON.parse(text);
+        } catch {
+          // JSON でない本文は、そのまま記録に出す
+        }
+        stopRefused(body.reason, body.error ?? text);
+        return;
+      }
       if (!res.ok) throw new Error(`HTTP ${res.status}: ${await res.text()}`);
       request = await res.json();
     } catch (e) {
       // 起動し直した dev サーバーは別の候補のポートにいるかもしれないので、探し直す
       devServer = null;
       document.getElementById("dev-server").textContent = "探している";
-      if (!offline) {
-        devLog(`dev サーバーにつながらない (${failureDetail(e)})。npm run dev:server を起動すると自動でつながる`);
-        setStatus("dev サーバーを待っている");
+      const detail = failureDetail(e);
+      if (offline !== detail) {
+        devLog(`dev サーバーにつながらない (${detail})。npm run dev:server を起動すると自動でつながる`);
+        setStatus(e.statusText ?? "dev サーバーを待っている");
       }
-      offline = true;
+      offline = detail;
       await new Promise((resolve) => setTimeout(resolve, DEV_RETRY_MS));
       continue;
     }
-    offline = false;
+    offline = null;
     server = request.server;
     after = request.seq;
     const reason =
@@ -256,7 +340,7 @@ async function localBridge() {
         devLog(`#${request.seq} の script を実行する (${reason}): ${scriptHead(request.code)}`);
         const outcome = await askPlugin({
           type: "run-request",
-          request: { seq: request.seq, code: request.code, token: request.token },
+          request: { seq: request.seq, fileKey: request.fileKey, code: request.code, token: request.token },
         });
         ok = await devSendRun(request, outcome.body);
       } else {
@@ -285,15 +369,23 @@ onmessage = (event) => {
   }
 
   if (msg.type === "dev-start") {
+    // ファイル名は AI に渡す文に入れるので、改行などで文の行を偽れないよう制御文字と行区切りを除く
+    devFile = {
+      key: msg.fileKey,
+      name: msg.fileName.replace(/[\u0000-\u001f\u007f\u0085\u2028\u2029]/g, ""),
+      session: msg.session,
+    };
+    document.getElementById("dev-file").textContent = `${devFile.name} (fileKey: ${devFile.key}・画面: ${devFile.session})`;
     document.getElementById("dev").hidden = false;
-    if (typeof msg.token === "string") {
-      runToken = msg.token;
-      document.getElementById("dev-token").textContent = msg.token;
-    } else {
-      setRunToken(newRunToken());
-    }
+    askToken(false).then(showRunToken);
     setStatus("依頼を待っている");
     localBridge();
+    return;
+  }
+  if (msg.type === "token") {
+    const resolve = tokenResolves.get(msg.id);
+    tokenResolves.delete(msg.id);
+    if (resolve) resolve(msg.token);
     return;
   }
   if (msg.type === "dev-result" || msg.type === "dev-error" || msg.type === "run-result") {
@@ -334,18 +426,26 @@ function copyText(text, label) {
   }
 }
 
-document.getElementById("copy-run").onclick = () => {
+document.getElementById("copy-run").onclick = async () => {
+  // 止まった表示を上書きしないよう、状態の行には何も出さない (ボタンも押せなくしてある)
+  if (stopped) return;
   // 渡す文にはつないでいる dev サーバーのポートを書くので、つながるまではコピーしない
   if (devServer === null) {
     setStatus("dev サーバーにつながってからコピーする");
     return;
   }
-  copyText(runInstructions(), "AI に渡す文");
+  // 別のタブで作り直されていれば、古い合言葉の文を渡さないよう、最新の合言葉で文を作る
+  const token = await askToken(false);
+  // 合言葉を読むあいだに止まったら、コピーしない
+  if (stopped) return;
+  showRunToken(token);
+  copyText(runInstructions(token), "AI に渡す文");
 };
 
-document.getElementById("renew-token").onclick = () => {
-  setRunToken(newRunToken());
-  devLog("合言葉を作り直した。前の合言葉の付いた script は実行しない");
+document.getElementById("renew-token").onclick = async () => {
+  if (stopped) return;
+  showRunToken(await askToken(true));
+  devLog("合言葉を作り直した。前の合言葉の付いた script は、どのファイルでも実行しない (ほかのタブでは、渡す文をコピーし直すと新しい合言葉ができる)");
 };
 </script>
 </body>
