@@ -14,7 +14,7 @@ import {
   failureText,
 } from "../../structure-dump/src/dump";
 import { DEFAULT_SCREENSHOT_SCALE, ImagesMode, parseImagesMode } from "../../structure-dump/src/plan";
-import { ensureRunToken, renewRunTokens, runScript, wrongFileReason } from "./run";
+import { ensureRunToken, exportRefusal, renewRunTokens, runScript } from "./run";
 
 interface DevRequest {
   seq: number;
@@ -55,7 +55,7 @@ type DevMessage =
   | { type: "dev-request"; request: DevRequest }
   | { type: "run-request"; request: DevRunRequest }
   /** このファイルの合言葉を読む (無ければ candidate で作る)。renew なら全ファイルの合言葉を消して作り直す */
-  | { type: "token-get" | "token-renew"; candidate: string }
+  | { type: "token-get" | "token-renew"; id: number; candidate: string }
   | { type: "ui-compact"; compact: boolean };
 
 /** 小さくしたかは残さず、開くたびに広げた大きさで始める */
@@ -93,7 +93,7 @@ async function runLocalBridge(): Promise<void> {
         msg.type === "token-renew"
           ? await renewRunTokens(figma.clientStorage, fileKey, msg.candidate)
           : await ensureRunToken(figma.clientStorage, fileKey, msg.candidate);
-      figma.ui.postMessage({ type: "token", token });
+      figma.ui.postMessage({ type: "token", id: msg.id, token });
       return;
     }
     if (msg.type === "run-request") {
@@ -111,7 +111,7 @@ async function runLocalBridge(): Promise<void> {
     }
     if (msg.type !== "dev-request") return;
     const request = msg.request;
-    const wrongFile = wrongFileReason(request.fileKey, fileKey);
+    const wrongFile = exportRefusal(request, fileKey);
     if (wrongFile !== undefined) {
       figma.ui.postMessage({ type: "dev-error", seq: request.seq, message: wrongFile });
       return;

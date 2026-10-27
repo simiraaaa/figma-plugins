@@ -31,12 +31,17 @@ export function runTokenKey(fileKey: string): string {
   return `${RUN_TOKEN_PREFIX}${fileKey}`;
 }
 
-/** このファイルの合言葉。無ければ candidate (UI が作った乱数) を合言葉にする */
+/**
+ * このファイルの合言葉。無ければ candidate (UI が作った乱数) を合言葉にする。
+ * 書いたあとに読み直して、保存された値を返す (2 つのタブが同時に初めて作ると、あとから書いたほうが残るので)
+ */
 export async function ensureRunToken(store: TokenStore, fileKey: string, candidate: string): Promise<string> {
-  const stored = await store.getAsync(runTokenKey(fileKey));
+  const key = runTokenKey(fileKey);
+  const stored = await store.getAsync(key);
   if (typeof stored === "string" && stored !== "") return stored;
-  await store.setAsync(runTokenKey(fileKey), candidate);
-  return candidate;
+  await store.setAsync(key, candidate);
+  const saved = await store.getAsync(key);
+  return typeof saved === "string" && saved !== "" ? saved : candidate;
 }
 
 /**
@@ -91,6 +96,16 @@ export function wrongFileReason(requested: unknown, own: string): string | undef
     return "依頼に行き先のファイル (fileKey) が無いので実行していない (dev サーバーが古い版なら、止めて起動し直す)";
   }
   return `別のファイル (${requested}) 宛ての依頼なので実行していない (この Local Bridge のファイルは ${own})`;
+}
+
+/** 書き出しの依頼の行き先がこのファイルでなければ、書き出さない理由を返す (script の wrongFileReason と同じ二重の守り) */
+export function exportRefusal(request: { fileKey?: unknown }, own: string): string | undefined {
+  const requested = request.fileKey;
+  if (requested === own) return undefined;
+  if (typeof requested !== "string" || requested === "") {
+    return "依頼に行き先のファイル (fileKey) が無いので書き出していない (dev サーバーが古い版なら、止めて起動し直す)";
+  }
+  return `別のファイル (${requested}) 宛ての書き出しの依頼なので書き出していない (この Local Bridge のファイルは ${own})`;
 }
 
 /**

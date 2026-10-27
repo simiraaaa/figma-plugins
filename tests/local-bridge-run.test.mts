@@ -10,7 +10,7 @@ import assert from "node:assert/strict";
 import * as runDist from "../plugins/local-bridge/dist/run.mjs";
 import type { RunResultBody, TokenStore } from "../plugins/local-bridge/src/run.ts";
 
-const { MAX_RUN_RESULT_CHARS, ensureRunToken, renewRunTokens, runScript, runTokenKey, wrongFileReason } =
+const { MAX_RUN_RESULT_CHARS, ensureRunToken, exportRefusal, renewRunTokens, runScript, runTokenKey, wrongFileReason } =
   runDist as unknown as typeof import("../plugins/local-bridge/src/run.ts");
 
 const OWN = "fileKeyA";
@@ -156,4 +156,20 @@ test("負例: 別のファイル宛ての script は、合言葉が合ってい�
   );
   assert.match(errorOf(await run("figma.ran = true;", api, "t1", memoryStore(), null)), /行き先のファイル.*無い/);
   assert.equal(api.ran, false, "別のファイル宛ての script を実行した");
+});
+
+test("負例: 2 つのタブが同時に合言葉を初めて作っても、どちらも保存された合言葉を返す", async () => {
+  const store = memoryStore({});
+  const [first, second] = await Promise.all([ensureRunToken(store, OWN, "c1"), ensureRunToken(store, OWN, "c2")]);
+  const stored = store.data.get(runTokenKey(OWN));
+  assert.equal(first, stored, "画面に出す合言葉と保存された合言葉が食い違う");
+  assert.equal(second, stored);
+});
+
+test("負例: 別のファイル宛て・行き先の無い書き出しの依頼は、書き出さない理由を返す", () => {
+  assert.equal(exportRefusal({ fileKey: OWN }, OWN), undefined);
+  assert.match(exportRefusal({ fileKey: "fileKeyB" }, OWN) ?? "", /別のファイル \(fileKeyB\) 宛ての書き出しの依頼なので書き出していない.*fileKeyA/);
+  for (const fileKey of [undefined, null, ""]) {
+    assert.match(exportRefusal({ fileKey }, OWN) ?? "", /行き先のファイル.*無いので書き出していない/);
+  }
 });

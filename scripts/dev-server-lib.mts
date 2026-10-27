@@ -69,6 +69,8 @@ const KEEP_REQUESTS = 100;
 const MAX_FILE_NAME_CHARS = 200;
 /** 止めた起動 id を覚えておく数。超えたら古いほうから忘れる */
 const MAX_RETIRED_LAUNCHES = 1000;
+/** 覚えておく依頼から落とした、渡したのに結果がまだの依頼の要約を覚えておく数。超えたら古いほうから忘れる */
+const MAX_DEPARTED_REQUESTS = 1000;
 const DEFAULT_KEEP_RESULTS = 20;
 const SCREENSHOT_SCALES: ReadonlySet<number> = new Set([1, 2]);
 export const IMAGE_MODES: ReadonlySet<unknown> = new Set<ImageMode>(["both", "none", "only"]);
@@ -522,9 +524,15 @@ interface Bridge {
   /** 最後にこのファイルの Local Bridge から何か届いた時刻 (ms) */
   lastSeen: number;
   pollers: Set<() => void>;
-  /** Local Bridge は 1 件ずつ処理し、終わってから /next を待ちに来るので、処理中の依頼はファイルごとに 1 つだけ持つ */
-  processing?: { request: DevRequest; handedAt: number };
+  /**
+   * Local Bridge は 1 件ずつ処理し、終わってから /next を待ちに来るので、処理中の依頼はファイルごとに 1 つだけ持つ。
+   * launch は渡した起動 id で、いつも今の launch と同じ (起動が替わると、新しい起動の最初の /next で差し替えるか解く)
+   */
+  processing?: { request: DevRequest; launch: string; handedAt: number };
 }
+
+/** 結果を受けたときに引く、依頼の要約 (script のコードと合言葉は持たない) */
+type RequestSummary = Pick<DevRequest, "seq" | "kind" | "fileKey"> & Pick<DumpRequest, "nodeIds" | "images">;
 
 /** http.createServer に渡すハンドラ。fileCount は検査用で、覚えている Local Bridge のファイルの数を返す */
 export type DevServerHandler = http.RequestListener & { fileCount: () => number };
@@ -558,6 +566,11 @@ export function createDevServer(options: DevServerOptions): DevServerHandler {
    * どれでもない依頼だけを、これから渡す
    */
   const fates = new Map<number, "handed" | "skipped" | "cancelled">();
+  /**
+   * 覚えておく依頼から落とした依頼のうち、渡したのに結果がまだのもの。
+   * 起動が替わって捨てた依頼の結果が、止めた起動から遅れて届いても、どのファイルの結果か引けるように、結果を受けるまで残す
+   */
+  const departed = new Map<number, RequestSummary>();
 
   mkdirSync(resultsDir, { recursive: true });
   // results/ は起動をまたいで残る。前回の続きの番号から振らないと、保持件数の掃除が新しい結果を消す
@@ -661,11 +674,11 @@ export function createDevServer(options: DevServerOptions): DevServerHandler {
       });
   }
 
-  function nodeIdsOf(request: DevRequest | undefined): string[] | undefined {
+  function nodeIdsOf(request: RequestSummary | undefined): string[] | undefined {
     return request?.kind === "export" ? request.nodeIds : undefined;
   }
 
-  function imagesOf(request: DevRequest | undefined): ImageMode | undefined {
+  function imagesOf(request: RequestSummary | undefined): ImageMode | undefined {
     return request?.kind === "export" && request.images !== "both" ? request.images : undefined;
   }
 
@@ -737,7 +750,9 @@ export function createDevServer(options: DevServerOptions): DevServerHandler {
   }
 
   function settle(seq: number, outcome: Outcome): void {
-    outcomes.set(seq, outcome);
+    departed.delete(seq);
+    // 落とした依頼の結果は、GET /status?seq では引かない (覚えておく依頼の中の依頼の結果だけを持つ)
+    if (requestOf(seq) !== undefined) outcomes.set(seq, outcome);
     const waiters = outcomeWaiters.get(seq);
     if (waiters !== undefined) {
       outcomeWaiters.delete(seq);
@@ -756,6 +771,11 @@ export function createDevServer(options: DevServerOptions): DevServerHandler {
 
   function requestOf(seq: number): DevRequest | undefined {
     return requests.find((r) => r.seq === seq);
+  }
+
+  /** 結果を受けるときに引く依頼。覚えておく依頼から落ちていても、渡したのに結果がまだなら引ける */
+  function summaryOf(seq: number): RequestSummary | undefined {
+    return requestOf(seq) ?? departed.get(seq);
   }
 
   function storeRunOutcome(seq: number, outcome: Outcome): void {
@@ -781,17 +801,22 @@ export function createDevServer(options: DevServerOptions): DevServerHandler {
       .map(Number)
       .filter((n) => Number.isInteger(n))
       .sort((a, b) => b - a);
-    for (const old of kept.slice(keepResults)) {
-      rmSync(path.join(resultsDir, String(old)), { recursive: true, force: true });
-    }
     const meta = indexMeta(files);
     const file = fileOf(seq);
+    // GET /status?file が返す各ファイルの最後の結果は、残す数を超えても消さない
+    const lastOfFiles = new Set([...fileStatuses.values()].map((s) => s.version));
+    if (file.fileKey !== undefined) lastOfFiles.delete(fileStatuses.get(file.fileKey)?.version ?? -1);
+    lastOfFiles.add(version);
+    for (const old of kept.slice(keepResults)) {
+      if (lastOfFiles.has(old)) continue;
+      rmSync(path.join(resultsDir, String(old)), { recursive: true, force: true });
+    }
     publish(
       {
         version,
         seq,
-        nodeIds: nodeIdsOf(requestOf(seq)),
-        images: imagesOf(requestOf(seq)),
+        nodeIds: nodeIdsOf(summaryOf(seq)),
+        images: imagesOf(summaryOf(seq)),
         receivedAt: new Date().toISOString(),
         dir,
         fileKey: file.fileKey,
@@ -809,8 +834,8 @@ export function createDevServer(options: DevServerOptions): DevServerHandler {
       {
         version: status.version + 1,
         seq,
-        nodeIds: nodeIdsOf(requestOf(seq)),
-        images: imagesOf(requestOf(seq)),
+        nodeIds: nodeIdsOf(summaryOf(seq)),
+        images: imagesOf(summaryOf(seq)),
         receivedAt: new Date().toISOString(),
         ...fileOf(seq),
         error: message,
@@ -822,7 +847,7 @@ export function createDevServer(options: DevServerOptions): DevServerHandler {
 
   /** 依頼の行き先のファイルと、その Local Bridge が名乗ったファイル名 */
   function fileOf(seq: number): Pick<DevStatus, "fileKey" | "fileName"> {
-    const fileKey = requestOf(seq)?.fileKey;
+    const fileKey = summaryOf(seq)?.fileKey;
     return { fileKey, fileName: fileKey === undefined ? undefined : bridges.get(fileKey)?.fileName };
   }
 
@@ -912,6 +937,16 @@ export function createDevServer(options: DevServerOptions): DevServerHandler {
       const index = requests.findIndex(droppable);
       if (index === -1) return;
       const [dropped] = requests.splice(index, 1);
+      if (fates.get(dropped.seq) === "handed" && !outcomes.has(dropped.seq)) {
+        departed.set(dropped.seq, {
+          seq: dropped.seq,
+          kind: dropped.kind,
+          fileKey: dropped.fileKey,
+          nodeIds: nodeIdsOf(dropped),
+          images: dropped.kind === "export" ? dropped.images : undefined,
+        });
+        if (departed.size > MAX_DEPARTED_REQUESTS) departed.delete(departed.keys().next().value as number);
+      }
       outcomes.delete(dropped.seq);
       fates.delete(dropped.seq);
     }
@@ -1064,8 +1099,9 @@ export function createDevServer(options: DevServerOptions): DevServerHandler {
           if (r.fileKey === fileKey && r.seq < request.seq && pending(r)) fates.set(r.seq, "skipped");
         }
         fates.set(request.seq, "handed");
-        setProcessing(bridge, { request, handedAt: Date.now() });
-        send(res, 200, { server: serverId, ...request });
+        setProcessing(bridge, { request, launch, handedAt: Date.now() });
+        // 結果を送るときに launch を付けさせる (止めた起動からの結果で、後の起動の処理中を解かないように)
+        send(res, 200, { server: serverId, launch, ...request });
       };
       // 渡す依頼があれば、処理中をそれに差し替える。先に解くと、走り直して同じ依頼を受け取り直すあいだに
       // GET /status?seq の待ちが起き、書き出し直す依頼を skipped と答える
@@ -1110,11 +1146,17 @@ export function createDevServer(options: DevServerOptions): DevServerHandler {
         send(res, 409, { error: "別の起動のサーバーの依頼の結果は受けない" });
         return;
       }
-      // 止まった起動の Local Bridge からの結果も、seq で受ける (渡し済みの依頼の結果なので)
-      const bridge = processingBridgeOf(seq);
-      if (bridge !== undefined) bridge.lastSeen = Date.now();
+      const launch = url.searchParams.get("launch");
+      if (launch === null || launch === "") {
+        send(res, 400, { error: "launch が無い (/next で受け取った launch を付けて送る)" });
+        return;
+      }
+      // 止めた起動の Local Bridge からの結果も、seq で受ける (渡し済みの依頼の結果なので)
+      const summary = summaryOf(seq);
+      const bridge = summary === undefined ? undefined : bridges.get(summary.fileKey);
+      if (bridge?.launch === launch) bridge.lastSeen = Date.now();
       // 版の古いプラグインの UI は script の依頼を書き出しとして扱い、書き出しの結果を返してくる
-      const kind = requestOf(seq)?.kind;
+      const kind = summary?.kind;
       if (kind !== undefined && (kind === "run") !== (route === "POST /run-result")) {
         send(res, 409, { error: `#${seq} は ${kind === "run" ? "script の実行" : "書き出し"} の依頼なので、この口では受けない` });
         return;
@@ -1126,8 +1168,10 @@ export function createDevServer(options: DevServerOptions): DevServerHandler {
       }
       const body = await readBody(req);
       // 本文を受け取り終えるまでは処理中のままにする (受信中に時間切れになった依頼側に、処理中と見せる)。
-      // ここでは待ちを起こさない。結果を保存する前に起こすと、結果の無い依頼として skipped と答える (保存の settle が起こす)
-      if (bridge !== undefined) bridge.processing = undefined;
+      // ここでは待ちを起こさない。結果を保存する前に起こすと、結果の無い依頼として skipped と答える (保存の settle が起こす)。
+      // 解くのは、受け取り終えた時点でこの seq をこの起動に渡した処理中だけ (受信中に起動が替わり、別の依頼か同じ依頼を後の起動へ渡していることがある)
+      const owner = summary === undefined ? undefined : bridges.get(summary.fileKey);
+      if (owner?.processing?.request.seq === seq && owner.processing.launch === launch) owner.processing = undefined;
       if (route === "POST /run-result") {
         const text = body.toString("utf8");
         const read = runOutcomeOf(seq, text);

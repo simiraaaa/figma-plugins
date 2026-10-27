@@ -81,8 +81,9 @@ let devFile = null;
 const launchId = randomHex(8);
 /** 本体へ渡した依頼の結果 (dev-result / dev-error / run-result) を受け取る */
 let devResolve = null;
-/** 本体に頼んだ合言葉の読み出し・作り直しの返事 (token) を、頼んだ順に受け取る */
-const tokenResolves = [];
+/** 本体に頼んだ合言葉の読み出し・作り直しの返事 (token) を、頼んだときの id で受け取る (1 件返らなくても、ほかの返事と取り違えない) */
+const tokenResolves = new Map();
+let nextTokenAsk = 1;
 
 function devLog(text) {
   const log = document.getElementById("dev-log");
@@ -156,9 +157,11 @@ function randomHex(bytes) {
  */
 function askToken(renew) {
   return new Promise((resolve) => {
-    tokenResolves.push(resolve);
+    const id = nextTokenAsk;
+    nextTokenAsk += 1;
+    tokenResolves.set(id, resolve);
     // 合言葉は 16 バイトの乱数の hex。乱数はこの iframe の crypto で作る
-    const message = { type: renew ? "token-renew" : "token-get", candidate: randomHex(16) };
+    const message = { type: renew ? "token-renew" : "token-get", id, candidate: randomHex(16) };
     parent.postMessage({ pluginMessage: message }, "*");
   });
 }
@@ -188,7 +191,8 @@ function runInstructions(runToken) {
 
 /** fetch の本文は Content-Type を付けない形 (Uint8Array・文字列) にし、CORS の preflight を起こさない */
 async function devPost(route, request, body) {
-  const res = await fetch(`${devServer}/${route}?seq=${request.seq}&server=${request.server}`, {
+  const query = new URLSearchParams({ seq: String(request.seq), server: request.server, launch: request.launch });
+  const res = await fetch(`${devServer}/${route}?${query}`, {
     method: "POST",
     body,
   });
@@ -278,7 +282,14 @@ async function localBridge() {
       const res = await fetch(`${devServer}/next?${query}`);
       if (res.status === 204) continue;
       if (res.status === 409) {
-        stopSuperseded(await res.text());
+        const text = await res.text();
+        let detail = text;
+        try {
+          detail = JSON.parse(text).error ?? text;
+        } catch {
+          // JSON でない本文は、そのまま記録に出す
+        }
+        stopSuperseded(detail);
         return;
       }
       if (!res.ok) throw new Error(`HTTP ${res.status}: ${await res.text()}`);
@@ -339,8 +350,9 @@ onmessage = (event) => {
   }
 
   if (msg.type === "dev-start") {
-    devFile = { key: msg.fileKey, name: msg.fileName };
-    document.getElementById("dev-file").textContent = `${msg.fileName} (fileKey: ${msg.fileKey})`;
+    // ファイル名は AI に渡す文に入れるので、改行などで文の行を偽れないよう制御文字と行区切りを除く
+    devFile = { key: msg.fileKey, name: msg.fileName.replace(/[\u0000-\u001f\u007f\u0085\u2028\u2029]/g, "") };
+    document.getElementById("dev-file").textContent = `${devFile.name} (fileKey: ${devFile.key})`;
     document.getElementById("dev").hidden = false;
     askToken(false).then(showRunToken);
     setStatus("依頼を待っている");
@@ -348,7 +360,8 @@ onmessage = (event) => {
     return;
   }
   if (msg.type === "token") {
-    const resolve = tokenResolves.shift();
+    const resolve = tokenResolves.get(msg.id);
+    tokenResolves.delete(msg.id);
     if (resolve) resolve(msg.token);
     return;
   }
