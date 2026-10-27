@@ -318,6 +318,17 @@ test("負例: 比べた結果と同じ名前だけでも、compare が書いた 
   assert.equal(readFileSync(path.join(out, "summary.json"), "utf8"), JSON.stringify({ same: true }));
 });
 
+test("負例: --out が比べる書き出しの中を指すシンボリックリンクでも断る", () => {
+  const root = mkdtempSync(path.join(tmpdir(), "compare-"));
+  const before = writeExport(path.join(root, "before"), {});
+  const after = writeExport(path.join(root, "after"), {});
+  mkdirSync(path.join(before, "inner"));
+  symlinkSync(path.join(before, "inner"), path.join(root, "link"));
+  assert.throws(() => compareExports(before, after, path.join(root, "link")), /--out が比べる書き出しの中にある/);
+  assert.throws(() => compareExports(before, after, path.join(root, "link", "out")), /--out が比べる書き出しの中にある/);
+  assert.ok(!existsSync(path.join(before, "inner", "summary.json")));
+});
+
 test("負例: --out が比べる書き出しの中にあれば断り、空のディレクトリなら使う", () => {
   const root = mkdtempSync(path.join(tmpdir(), "compare-"));
   const before = writeExport(path.join(root, "before"), {});

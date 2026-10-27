@@ -252,6 +252,14 @@ function writeFile(file: string, data: Buffer | string): void {
   writeFileSync(file, data);
 }
 
+/** シンボリックリンクをたどった実際の場所。まだ無いパスは、在る親までをたどって残りをつなぐ */
+function realPathOf(p: string): string {
+  const abs = path.resolve(p);
+  if (existsSync(abs)) return realpathSync(abs);
+  const parent = path.dirname(abs);
+  return parent === abs ? abs : path.join(realPathOf(parent), path.basename(abs));
+}
+
 function isInside(child: string, parent: string): boolean {
   const rel = path.relative(parent, child);
   return rel === "" || (!rel.startsWith("..") && !path.isAbsolute(rel));
@@ -262,9 +270,10 @@ function isInside(child: string, parent: string): boolean {
  * 比べた結果の置き場所の中には人がファイルを置かない前提で、中身までは確かめずに置き換える。
  */
 function prepareOutDir(outDir: string, inputs: readonly string[]): void {
+  const out = realPathOf(outDir);
   for (const dir of inputs) {
-    if (isInside(path.resolve(dir), path.resolve(outDir))) throw new Error(`比べる書き出しが --out の中にある: ${dir}`);
-    if (isInside(path.resolve(outDir), path.resolve(dir))) throw new Error(`--out が比べる書き出しの中にある: ${outDir}`);
+    if (isInside(realPathOf(dir), out)) throw new Error(`比べる書き出しが --out の中にある: ${dir}`);
+    if (isInside(out, realPathOf(dir))) throw new Error(`--out が比べる書き出しの中にある: ${outDir}`);
   }
   if (existsSync(outDir)) {
     // 隠しファイル (Finder が作る .DS_Store など) は、比べた結果の中身でないので数えず、消さずに残す
