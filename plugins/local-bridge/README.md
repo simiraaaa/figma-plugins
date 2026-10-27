@@ -9,73 +9,12 @@ Local Bridge を開いておくと、AI が curl で手元の dev サーバー�
   Structure Dump から書き出したものと同じ ZIP になる。
 - script の実行: Plugin API のコードを渡して実行させる (「script の実行」)。
 
+人が最初に読む文書は [利用ガイド](GUIDE.md) で、何ができるか・初めて使うときの準備・2 回目以降の使い方・困ったときの対処を書いてある。
+このファイルには、dev サーバーと Local Bridge の仕様を書く。
+
 リリースの zip には入れない。
-使う人 (開発者もデザイナーも) は、リポジトリを clone して取り込む (導入手順を参照)。
+使う人 (開発者もデザイナーも) は、リポジトリを clone して取り込む ([利用ガイド](GUIDE.md#初めて使うとき-1-回だけ))。
 Structure Dump と Component Spec は通信しない。dev サーバーにつなぐのは Local Bridge だけ。
-
-## 導入手順 (デザイナー向け)
-
-開発者でなくても、手元の Figma を AI に読み書きさせたいときに使える。
-
-AI は `/export` で画面フレームの構造と画像を書き出して読み、`/run` で Plugin API の script を流す (組み合わせ表を並べる・名前の揺れを検査する、など)。
-Figma の公式 MCP と違って回数の上限が無い。
-Figma のログインや MCP の認証は要らない (script の実行だけ合言葉が要る)。
-
-前提:
-
-- Figma デスクトップアプリ (開発プラグインを取り込めるのはデスクトップアプリだけ)
-- Node 22.18 以上。
-  ただし 23 系は 23.6 以上 (手元は 26 で確認)。
-  dev サーバーは `.mts` を node で直接実行するので、型を剥がす機能が既定で有効な版 (v22.18.0・v23.6.0 から) でないと、dev サーバーの起動で止まる。
-  未インストールなら https://nodejs.org/ から入れる。
-- git
-- Claude Code など、手元で curl を打てる AI (無いと Local Bridge を使う意味が無い)。
-  Claude Code は https://code.claude.com/docs/ja/overview から入れる。
-
-手順:
-
-1. リポジトリを clone する。
-   置いた場所は、取り込んだあと動かさない (理由は[共通手順](../../README.md#figma-への取り込み-共通手順)の 2)。
-
-   ```sh
-   git clone https://github.com/simiraaaa/figma-plugins.git
-   ```
-
-2. clone したディレクトリ (リポルート) で build する ([リポルート README のセットアップ](../../README.md#セットアップ))。
-
-   ```sh
-   npm install
-   npm run build
-   ```
-
-3. dev サーバーを起動し、動かしたままにする ([使い方](#使い方)の 1)。
-   Claude Code に頼むなら、background で動かしてもらう。
-
-   ```sh
-   npm run dev:server
-   ```
-
-4. Figma で **プラグイン** → **開発** → **マニフェストからプラグインをインポート…** から、`plugins/local-bridge/manifest.json` を取り込む ([共通手順](../../README.md#figma-への取り込み-共通手順))。
-   改名前の Dev Loop (`plugins/dev-loop/manifest.json`) を取り込んでいたら、その項目を**開発**の一覧から削除してから取り込む。
-5. 対象のファイルを開き、Local Bridge を起動して開いたままにする。
-6. Local Bridge の画面の「AI に渡す文をコピー」を押し、AI のセッションに貼る。
-   渡す文には、dev サーバーの URL・合言葉と、この README と[書き換えの手順](../../.claude/skills/figma-safe-edit/SKILL.md)の絶対パスが入る。
-   合言葉は、script の実行を許す鍵で、Local Bridge が自動で作る (詳しくは [script の実行](#script-の実行))。
-
-注意:
-
-- 書き出しのあいだは、Figma のウィンドウを前に出し、画面をスリープ・ロックさせない (裏にあると遅れ、スリープ・ロック中は止まる。[使い方](#使い方)の 3 の、書き出し中の依頼の項)。
-- `/run` は、開いているファイルを書き換えも削除もできる。
-  合言葉は、実行を任せる AI にだけ渡す。
-
-使い終わったら:
-
-1. Local Bridge の画面の「合言葉を作り直す」を押す ([script の実行](#script-の実行)の 3)。
-2. dev サーバーを止める。
-   起動した端末で Ctrl+C を押す。
-   Claude Code に background で動かしてもらったなら、そのセッションに止めてもらう。
-   ほかのセッションが同じ dev サーバーを使っていれば、その依頼も止まる (制約を参照)。
-3. Local Bridge を閉じる。
 
 ## セットアップ
 
@@ -83,6 +22,9 @@ Figma のログインや MCP の認証は要らない (script の実行だけ合
 npm install           # リポルートで (未実施なら)
 npm run build:local-bridge
 ```
+
+Node は 22.18 以上 (23 系は 23.6 以上。手元は 26 で確認)。
+dev サーバーは `.mts` を node で直接実行するので、型を剥がす機能が既定で有効な版 (v22.18.0・v23.6.0 から) でないと、dev サーバーの起動で止まる。
 
 Figma への取り込みは[リポルート README の共通手順](../../README.md#figma-への取り込み-共通手順)を参照
 (選択する manifest は `plugins/local-bridge/manifest.json`)。

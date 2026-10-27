@@ -4,7 +4,8 @@
 配るのは Structure Dump と Component Spec で、どちらも「Figma のデザインを AI (Claude 等) に渡せる形に書き出す」ためのプラグイン。
 コード生成はしない (解釈とコード化は AI 側の仕事)。
 Local Bridge は、AI が自分で書き出しや script の実行を頼むためのプラグインで、リリースの zip には入れない。
-使う人 (開発者もデザイナーも) は、リポジトリを clone して、Figma に取り込む ([導入手順](plugins/local-bridge/README.md#導入手順-デザイナー向け))。
+使う人 (開発者もデザイナーも) は、リポジトリを clone して、Figma に取り込む。
+Local Bridge を使う人が最初に読む文書は [Local Bridge 利用ガイド](plugins/local-bridge/GUIDE.md)。
 
 | プラグイン | 用途 |
 |---|---|
