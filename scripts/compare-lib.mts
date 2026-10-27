@@ -71,8 +71,10 @@ export interface CompareSummary {
   report: string;
 }
 
-/** 比べ終えた置き場所の印。--out に既にある置き場所を消してよいかは、これがあるかで決める */
+/** 比べた結果の置き場所の印。--out に既にある置き場所を消してよいかは、これに SUMMARY_MARK が入っているかで決める */
 const SUMMARY_FILE = "summary.json";
+/** compare が書いた summary.json だけに入れる値。名前が同じだけのファイルを、比べた結果と取り違えて消さないため */
+const SUMMARY_MARK = { tool: "figma-plugins compare" } as const;
 const REPORT_FILE = "report.html";
 /** 比べた結果の置き場所に作るもの。これ以外があれば、人の置いたものとみて消さない */
 const OUT_ENTRIES: ReadonlySet<string> = new Set([
@@ -265,8 +267,15 @@ function prepareOutDir(outDir: string, inputs: readonly string[]): void {
     // 隠しファイル (Finder が作る .DS_Store など) は、比べた結果の中身でないので数えず、消さずに残す
     const entries = readdirSync(outDir).filter((e) => !e.startsWith("."));
     const unknown = entries.filter((e) => !OUT_ENTRIES.has(e));
-    if (entries.length > 0 && (!entries.includes(SUMMARY_FILE) || unknown.length > 0)) {
-      const detail = unknown.length > 0 ? ` (比べた結果が作らないもの: ${unknown.join(", ")})` : " (summary.json が無い)";
+    const detail =
+      unknown.length > 0
+        ? ` (比べた結果が作らないもの: ${unknown.join(", ")})`
+        : !entries.includes(SUMMARY_FILE)
+          ? " (summary.json が無い)"
+          : !hasSummaryMark(path.join(outDir, SUMMARY_FILE))
+            ? " (summary.json が compare の書いたものでない)"
+            : null;
+    if (entries.length > 0 && detail !== null) {
       throw new Error(`比べた結果の置き場所でないものがすでにある: ${outDir}${detail}`);
     }
     // 途中で止まっても印が残り、次の実行が置き換えられるよう、印は最後に消す
@@ -274,7 +283,16 @@ function prepareOutDir(outDir: string, inputs: readonly string[]): void {
   }
   mkdirSync(outDir, { recursive: true });
   // 途中で失敗しても、次の実行がこの置き場所を比べた結果のものと見て置き換えられるよう、先に印を置く
-  writeFileSync(path.join(outDir, SUMMARY_FILE), JSON.stringify({ incomplete: true }) + "\n");
+  writeFileSync(path.join(outDir, SUMMARY_FILE), JSON.stringify({ ...SUMMARY_MARK, incomplete: true }) + "\n");
+}
+
+function hasSummaryMark(file: string): boolean {
+  try {
+    const parsed: unknown = JSON.parse(readFileSync(file, "utf8"));
+    return typeof parsed === "object" && parsed !== null && (parsed as Record<string, unknown>).tool === SUMMARY_MARK.tool;
+  } catch {
+    return false;
+  }
 }
 
 /** 画像の比べ方は文字のファイルと違う (diff/ と crop/ を作る) ので、分けて扱う */
@@ -388,7 +406,7 @@ export function compareExports(beforeDir: string, afterDir: string, outDir: stri
   const sameChanges = changesDiff === null ? [] : sameChangesOf(outDir, changesDiff);
   const summary: CompareSummary = { same, added, removed, renamed, changed, images, outDir, changesDiff, sameChanges, report };
   writeFile(report, reportHtml(summary, beforeDir, afterDir));
-  writeFile(path.join(outDir, SUMMARY_FILE), JSON.stringify(summary, null, 2) + "\n");
+  writeFile(path.join(outDir, SUMMARY_FILE), JSON.stringify({ ...SUMMARY_MARK, ...summary }, null, 2) + "\n");
   return summary;
 }
 

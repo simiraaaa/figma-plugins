@@ -305,6 +305,19 @@ test("負例: 比べた結果の置き場所でも、比べた結果が作らな
   assert.ok(existsSync(path.join(first.outDir, "notes.txt")));
 });
 
+test("負例: 比べた結果と同じ名前だけでも、compare が書いた summary.json でなければ、消さずに断る", () => {
+  const root = mkdtempSync(path.join(tmpdir(), "compare-"));
+  const before = writeExport(path.join(root, "before"), {});
+  const after = writeExport(path.join(root, "after"), {});
+  const out = path.join(root, "keep");
+  mkdirSync(path.join(out, "before"), { recursive: true });
+  writeFileSync(path.join(out, "before", "keep.txt"), "x");
+  writeFileSync(path.join(out, "summary.json"), JSON.stringify({ same: true }));
+  assert.throws(() => compareExports(before, after, out), /比べた結果の置き場所でない/);
+  assert.ok(existsSync(path.join(out, "before", "keep.txt")));
+  assert.equal(readFileSync(path.join(out, "summary.json"), "utf8"), JSON.stringify({ same: true }));
+});
+
 test("負例: --out が比べる書き出しの中にあれば断り、空のディレクトリなら使う", () => {
   const root = mkdtempSync(path.join(tmpdir(), "compare-"));
   const before = writeExport(path.join(root, "before"), {});

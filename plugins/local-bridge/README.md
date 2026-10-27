@@ -151,7 +151,8 @@ Figma への取り込みは[リポルート README の共通手順](../../README
      - `queued` (順番待ち) か `processing` (Local Bridge へ渡して結果がまだ): 待つ長さ (既定 300 秒、`?timeout=<秒>`) を過ぎて HTTP 504 で返った。もう一度待つ。
        `queued` で `plugin.processing` が無く、`plugin.lastSeenAt` が 35 秒より前なら、Local Bridge が開いていない。人か computer use に Local Bridge を開いてもらう。
        `processing` のまま `plugin.processing.elapsedSeconds` が伸び続けるときは、Figma が前に出ているか、Local Bridge が開いているかを人か computer use で確かめる (書き出しの途中で Local Bridge を閉じても `processing` のまま残る)。
-     - HTTP 404: この起動の dev サーバーが受けていない依頼 (dev サーバーを起動し直す前の依頼など)。送り直す。
+     - HTTP 404: この起動の dev サーバーが受けていない依頼 (dev サーバーを起動し直す前の依頼など)。書き出しは送り直す。
+       script は前の dev サーバーのときに実行したかもしれないので、書き換える script は送り直さず、[書き換えの手順](../../.claude/skills/figma-safe-edit/SKILL.md)の 2 に従う (読み取りだけの script は送り直してよい)。
    - `<置き場所>/status.json` と `GET /status` は、最後に受けた結果 (`version`・`seq`・`images` (`none` か `only` のときだけ)・`dir`・`fileName`・`warnings`・`error`) を返す。
      `GET /status` には `plugin` と、結果の置き場所 `outDir` も入る。
      `GET /status?after=<version>` は、それより新しい結果が届くまで待つ (どの依頼の結果でも返る)。
@@ -222,6 +223,8 @@ Plugin API のコードを送ると、Local Bridge が実行して返り値を J
        途中まで実行したかもしれないので、書き換える script は送り直さず、[書き換えの手順](../../.claude/skills/figma-safe-edit/SKILL.md)の 2 に従う。
        読み取りだけの script は送り直してよい。
      script の `skipped` は、まだ渡さないうちにあとの依頼が先に渡った依頼で、実行していない。
+   - 応答が返らないまま curl が止まったとき (`seq` が分からない) は、実行したかが分からない。
+     書き換える script は送り直さず、[書き換えの手順](../../.claude/skills/figma-safe-edit/SKILL.md)の 2 に従う (読み取りだけの script は送り直してよい)。
    - 成功でも失敗でも、`status.json`・`version`・`latest` は変わらない (書き出しの結果ではないため)。
 3. 合言葉を取り消したいときは、Local Bridge の画面の「合言葉を作り直す」を押す。
    前の合言葉の付いた script は実行しない (渡したすべての AI で使えなくなる)。
