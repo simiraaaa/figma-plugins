@@ -9,6 +9,8 @@ Local Bridge を開いておくと、AI が curl で手元の dev サーバー�
   Structure Dump から書き出したものと同じ ZIP になる。
 - script の実行: Plugin API のコードを渡して実行させる (「script の実行」)。
 
+人がすることと AI がすることの通しの流れは、[運用ガイド](GUIDE.md) にある。
+
 リリースの zip には入れない。
 使う人 (開発者もデザイナーも) は、リポジトリを clone して取り込む (導入手順を参照)。
 Structure Dump と Component Spec は通信しない。dev サーバーにつなぐのは Local Bridge だけ。

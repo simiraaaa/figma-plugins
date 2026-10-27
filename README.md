@@ -5,6 +5,7 @@
 コード生成はしない (解釈とコード化は AI 側の仕事)。
 Local Bridge は、AI が自分で書き出しや script の実行を頼むためのプラグインで、リリースの zip には入れない。
 使う人 (開発者もデザイナーも) は、リポジトリを clone して、Figma に取り込む ([導入手順](plugins/local-bridge/README.md#導入手順-デザイナー向け))。
+使い方の通しの流れは [Local Bridge 運用ガイド](plugins/local-bridge/GUIDE.md) にある。
 
 | プラグイン | 用途 |
 |---|---|
