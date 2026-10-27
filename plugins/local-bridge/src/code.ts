@@ -51,20 +51,29 @@ interface DevRunRequest {
 type DevMessage =
   | { type: "dev-request"; request: DevRequest }
   | { type: "run-request"; request: DevRunRequest }
-  | { type: "dev-token"; token: string };
+  | { type: "dev-token"; token: string }
+  | { type: "ui-compact"; compact: boolean };
 
 /** script の実行の合言葉。ホットリロードやファイルをまたいで同じ値を使えるよう、clientStorage に残す */
 const RUN_TOKEN_KEY = "devRunToken";
+/** 小さくしたかは残さず、開くたびに広げた大きさで始める */
+const UI_SIZE = { width: 480, height: 600 };
+const UI_COMPACT_SIZE = { width: 200, height: 32 };
 
 /**
  * UI が dev サーバーから依頼を long-poll で取り、ここへ 1 件ずつ渡す。
  * 結果は UI がサーバーへ POST する (ネットワークに出られるのは UI の iframe だけ)
  */
 async function runLocalBridge(): Promise<void> {
-  figma.showUI(__html__, { width: 480, height: 600 });
+  figma.showUI(__html__, UI_SIZE);
   const stored: unknown = await figma.clientStorage.getAsync(RUN_TOKEN_KEY);
   let runToken = typeof stored === "string" ? stored : undefined;
   figma.ui.onmessage = async (msg: DevMessage) => {
+    if (msg.type === "ui-compact") {
+      const size = msg.compact ? UI_COMPACT_SIZE : UI_SIZE;
+      figma.ui.resize(size.width, size.height);
+      return;
+    }
     if (msg.type === "dev-token") {
       runToken = msg.token;
       await figma.clientStorage.setAsync(RUN_TOKEN_KEY, msg.token);

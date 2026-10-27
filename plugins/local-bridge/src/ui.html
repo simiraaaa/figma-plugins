@@ -8,7 +8,13 @@
   .meta { color: #777; font-size: 11px; }
   button { font-size: 12px; padding: 6px 12px; border-radius: 6px; border: 1px solid #ccc; background: #fff; cursor: pointer; margin-right: 6px; }
   button:hover { background: #f0f0f0; }
-  #status { color: #777; }
+  .bar { display: flex; align-items: center; gap: 8px; }
+  #status { flex: 1; min-width: 0; color: #777; }
+  #toggle-size { flex: none; margin-right: 0; }
+  body.compact { padding: 4px 6px; }
+  body.compact #status { white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
+  body.compact #toggle-size { font-size: 11px; padding: 1px 8px; }
+  body.compact #error, body.compact #dev { display: none; }
   #error { color: #c62828; white-space: pre-wrap; }
   #dev-log { white-space: pre-wrap; margin: 4px 0 0; max-height: 300px; overflow: auto; }
   #dev-token { font: 11px/1.5 "SF Mono", Menlo, monospace; background: #f5f5f5; border-radius: 4px; padding: 2px 6px; word-break: break-all; }
@@ -16,7 +22,10 @@
 </style>
 </head>
 <body>
-  <div id="status">始めている…</div>
+  <div class="bar">
+    <div id="status">始めている…</div>
+    <button id="toggle-size">小さくする</button>
+  </div>
   <div id="error"></div>
   <div id="dev" hidden>
     <h2>Local Bridge (dev サーバー: <span id="dev-server">探している</span>)</h2>
@@ -34,11 +43,21 @@
 
 <script>
 function setStatus(text) {
-  document.getElementById("status").textContent = text;
+  const status = document.getElementById("status");
+  status.textContent = text;
+  // 小さい窓では状態の行が途中で切れるので、指を置くと全文が出るようにする
+  status.title = text;
 }
 
 function failureDetail(e) {
   return e instanceof Error ? e.message : String(e);
+}
+
+/** 小さい画面では、状態の 1 行と広げるボタンだけを出す。窓の大きさは本体が変える */
+function setCompact(compact) {
+  document.body.classList.toggle("compact", compact);
+  document.getElementById("toggle-size").textContent = compact ? "広げる" : "小さくする";
+  parent.postMessage({ pluginMessage: { type: "ui-compact", compact } }, "*");
 }
 
 // 候補のポートと印は manifest の devAllowedDomains と scripts/dev-server-lib.mts の DEV_PORTS・DEV_SERVER_APP と同じ値にする
@@ -153,20 +172,24 @@ async function devSend(request, outcome) {
     devLog(
       `#${request.seq} を送った: 画面フレーム ${m.frameCount} 枚・ZIP ${(m.zipBytes / 1024).toFixed(0)} KB・警告 ${m.warnings.length} 件`
     );
-    return;
+    return true;
   }
+  // 理由を伝える送信が落ちても理由が記録に残るよう、先に記録する
+  devLog(`#${request.seq} は書き出せなかった: ${outcome.message}`);
   await devPost("error", request, outcome.message);
-  devLog(`#${request.seq} は書き出せなかった (dev サーバーへ伝えた): ${outcome.message}`);
+  return false;
 }
 
 /** 本体が作った POST /run-result の本文 (JSON) を送る */
 async function devSendRun(request, body) {
+  const result = JSON.parse(body);
+  // 結果の送信が落ちても script の結果が記録に残るよう、先に記録する
+  devLog(result.ok ? `#${request.seq} の script を実行した` : `#${request.seq} の script は失敗: ${result.error}`);
   try {
     await devPost("run-result", request, body);
   } catch (e) {
     // 本体の結果が示す「実行したかどうか」を残して送り直す (依頼側はそれで送り直してよいかを決める)
     if (e.httpStatus === undefined) {
-      const result = JSON.parse(body);
       const error = result.ok
         ? `script は実行したが、結果の送信に失敗 (書き換えは残っている): ${failureDetail(e)}`
         : `${result.error} (結果の送信にも一度失敗した: ${failureDetail(e)})`;
@@ -174,8 +197,7 @@ async function devSendRun(request, body) {
     }
     throw e;
   }
-  const result = JSON.parse(body);
-  devLog(result.ok ? `#${request.seq} の script を実行した` : `#${request.seq} の script は失敗: ${result.error}`);
+  return result.ok;
 }
 
 async function localBridge() {
@@ -216,6 +238,8 @@ async function localBridge() {
       Date.parse(request.requestedAt) < startedAt
         ? "起動 (build で走り直したときを含む) より前に積まれていた依頼"
         : "新しい依頼";
+    let ok = false;
+    setStatus(`#${request.seq} を処理している`);
     try {
       if (request.kind === "run") {
         devLog(`#${request.seq} の script を実行する (${reason}): ${scriptHead(request.code)}`);
@@ -223,15 +247,17 @@ async function localBridge() {
           type: "run-request",
           request: { seq: request.seq, code: request.code, token: request.token },
         });
-        await devSendRun(request, outcome.body);
+        ok = await devSendRun(request, outcome.body);
       } else {
         devLog(`#${request.seq} を書き出す (${reason}・${devImages(request)}): ${devTargets(request)}`);
-        await devSend(request, await askPlugin({ type: "dev-request", request }));
+        ok = await devSend(request, await askPlugin({ type: "dev-request", request }));
       }
     } catch (e) {
       devLog(`#${request.seq} の送信に失敗: ${failureDetail(e)}`);
     }
-    setStatus("依頼を待っている");
+    // 小さい窓では記録が隠れるので、問題があったことだけを状態の行に残す。
+    // 実行したか・結果を送れたかなどの中身は記録に書いてある (状態の行では言い分けない)
+    setStatus(ok ? "依頼を待っている" : `#${request.seq} で問題あり (広げて記録を見る)`);
   }
 }
 
@@ -246,7 +272,6 @@ onmessage = (event) => {
     else if (msg.phase === "assets") setStatus(`書き出し中… 画像 ${count}`);
     return;
   }
-  setStatus("");
 
   if (msg.type === "dev-start") {
     document.getElementById("dev").hidden = false;
@@ -261,14 +286,22 @@ onmessage = (event) => {
     return;
   }
   if (msg.type === "dev-result" || msg.type === "dev-error" || msg.type === "run-result") {
+    // 状態の行は、結果を dev サーバーへ送り終えたあとに依頼のループが書く
     const resolve = devResolve;
     devResolve = null;
     if (resolve) resolve(msg);
     return;
   }
   if (msg.type === "error") {
+    setStatus("始められなかった");
     document.getElementById("error").textContent = msg.message;
+    // 小さくしていても、エラーの理由が見えるよう広げる
+    setCompact(false);
   }
+};
+
+document.getElementById("toggle-size").onclick = () => {
+  setCompact(!document.body.classList.contains("compact"));
 };
 
 function copyText(text, label) {
