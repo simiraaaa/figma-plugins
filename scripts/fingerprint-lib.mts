@@ -1,27 +1,41 @@
 /**
- * ファイル全体のノードの指紋 (scripts/fingerprint.js が返すもの) を 2 つ比べ、変わったノードを、書き出した範囲の中と外に分ける。
+ * ファイル全体のノードのスナップショット (scripts/fingerprint.js が返すもの) を 2 つ比べ、変わったノードを、書き出した範囲の中と外に分ける。
  * 書き換えの script が意図しない場所を変えていないかを確かめるために使う。手順は .claude/skills/figma-safe-edit/SKILL.md。
  */
 import { readFileSync } from "node:fs";
 
 /** fingerprint.js の返り値 (POST /run の応答の value) */
 export interface Fingerprint {
-  v: 1;
+  v: 2;
   file: string;
   /** figma.fileKey。取れないプラグインでは null */
   fileKey?: string | null;
   takenAt: string;
   pages: Record<string, string>;
-  /** "<ノードの id>|<親の id (ページ直下ならページの id。ページ自身なら空)>|<指紋>[|<メインコンポーネントの id (インスタンスだけ)>]" (id に | は入らない) */
+  /**
+   * "<ノードの id>|<親の id (ページ直下ならページの id。ページ自身なら空)>|<要約>[|<メインコンポーネントの id (インスタンスだけ)>]" (id に | は入らない)。
+   * 要約は区分ごとのハッシュを "." でつないだもの (ASPECTS の順。ページは name と children の 2 つ、document は children だけ)
+   */
   nodes: string[];
 }
+
+/** 要約の区分 (fingerprint.js の ASPECT_FIELDS と同じ順)。変わったノードについて、どの区分が変わったかを出す */
+export const ASPECTS = ["name", "geometry", "look", "text", "layout", "component", "children"] as const;
+export type Aspect = (typeof ASPECTS)[number];
+const PAGE_ASPECTS: readonly Aspect[] = ["name", "children"];
+const DOCUMENT_ASPECTS: readonly Aspect[] = ["children"];
+const SUPPORTED_VERSION = 2;
+/** ページの並びを持つ、ファイル全体のノードの id */
+export const DOCUMENT_ID = "document";
 
 export interface ChangedNode {
   id: string;
   /** ノードのあるページの名前 (after に無ければ before の) */
   page: string;
-  /** moved は、指紋は同じでも親が変わった (別の親やページへ移した) ノード */
+  /** moved は、要約は同じでも親が変わった (別の親やページへ移した) ノード */
   kind: "changed" | "added" | "removed" | "moved";
+  /** changed のとき、変わった区分 (ASPECTS の順)。要約の形が区分に対応しないときは省く */
+  aspects?: Aspect[];
 }
 
 export interface PropagatedNode extends ChangedNode {
@@ -30,7 +44,7 @@ export interface PropagatedNode extends ChangedNode {
 }
 
 export interface FingerprintDiff {
-  /** 指紋を取ったファイルの名前 (before と after で違えば、別のファイルを比べている) */
+  /** スナップショットを取ったファイルの名前 (before と after で違えば、別のファイルを比べている) */
   file: { before: string; after: string };
   nodes: { before: number; after: number };
   /** 書き出した範囲 (inside の id とその子孫) の中で変わったノード */
@@ -47,11 +61,31 @@ export interface FingerprintDiff {
 /** POST /run の応答 ({ seq, value }) か、value そのものを読む */
 export function readFingerprint(file: string): Fingerprint {
   const parsed = JSON.parse(readFileSync(file, "utf8")) as { value?: unknown } & Partial<Fingerprint>;
-  const candidate = (parsed.value ?? parsed) as Partial<Fingerprint>;
-  if (candidate.v !== 1 || !Array.isArray(candidate.nodes) || typeof candidate.pages !== "object" || candidate.pages === null) {
-    throw new Error(`指紋のファイルでない (fingerprint.js の返り値を保存したものを渡す): ${file}`);
+  const candidate = (parsed.value ?? parsed) as Partial<Fingerprint> & { v?: unknown };
+  if (typeof candidate.v !== "number" || !Array.isArray(candidate.nodes) || typeof candidate.pages !== "object" || candidate.pages === null) {
+    throw new Error(`スナップショットのファイルでない (fingerprint.js の返り値を保存したものを渡す): ${file}`);
+  }
+  if (candidate.v !== SUPPORTED_VERSION) {
+    throw new Error(`古い形のスナップショット (v${candidate.v}。今の fingerprint.js は v${SUPPORTED_VERSION})。取り直す: ${file}`);
   }
   return candidate as Fingerprint;
+}
+
+/** 前後の要約を区分ごとに比べ、変わった区分を返す。区分の数が合わない (形が違う) ときは undefined */
+function changedAspects(id: string, before: string, after: string): Aspect[] | undefined {
+  const a = before.split(".");
+  const b = after.split(".");
+  if (a.length !== b.length) return undefined;
+  const names =
+    id === DOCUMENT_ID
+      ? DOCUMENT_ASPECTS
+      : a.length === ASPECTS.length
+        ? ASPECTS
+        : a.length === PAGE_ASPECTS.length
+          ? PAGE_ASPECTS
+          : null;
+  if (names === null || names.length !== a.length) return undefined;
+  return names.filter((_, i) => a[i] !== b[i]);
 }
 
 interface Entry {
@@ -95,11 +129,11 @@ function pageOf(id: string, entries: Map<string, Entry>, pages: Record<string, s
 
 /**
  * before と after を比べる。insideIds は書き出した範囲の根 (export の nodeIds)。
- * 範囲の根の指紋には子の並びが入るので、子を足す・消すと根も changed に出る (範囲の中)
+ * 範囲の根のスナップショットには子の並びが入るので、子を足す・消すと根も changed に出る (範囲の中)
  */
 export function diffFingerprints(before: Fingerprint, after: Fingerprint, insideIds: readonly string[]): FingerprintDiff {
   if (before.fileKey != null && after.fileKey != null && before.fileKey !== after.fileKey) {
-    throw new Error(`別のファイルの指紋を比べている (before: ${before.fileKey}, after: ${after.fileKey})`);
+    throw new Error(`別のファイルのスナップショットを比べている (before: ${before.fileKey}, after: ${after.fileKey})`);
   }
   const b = index(before);
   const a = index(after);
@@ -108,7 +142,10 @@ export function diffFingerprints(before: Fingerprint, after: Fingerprint, inside
   for (const [id, entry] of a) {
     const prev = b.get(id);
     if (prev === undefined) changes.push({ id, page: pageOf(id, a, after.pages), kind: "added" });
-    else if (prev.hash !== entry.hash) changes.push({ id, page: pageOf(id, a, after.pages), kind: "changed" });
+    else if (prev.hash !== entry.hash) {
+      const aspects = changedAspects(id, prev.hash, entry.hash);
+      changes.push({ id, page: pageOf(id, a, after.pages), kind: "changed", ...(aspects === undefined ? {} : { aspects }) });
+    }
     else if (prev.parent !== entry.parent) changes.push({ id, page: pageOf(id, a, after.pages), kind: "moved" });
   }
   for (const id of b.keys()) {

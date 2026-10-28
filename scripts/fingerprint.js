@@ -1,18 +1,20 @@
-// Local Bridge の /run に送る script (async 関数の本体)。ファイル全体のノードの指紋を返す。
-// 書き換える前と後に 1 回ずつ取り、scripts/fingerprint.mts の diff で比べると、書き出した範囲の外で変わったノードが分かる。
+// Local Bridge の /run に送る script (async 関数の本体)。ファイル全体のスナップショット (全ノードの要約) を返す。
+// 書き換える前と後に 1 回ずつ取り、npm run compare (または scripts/fingerprint.mts の diff) で比べると、書き出した範囲の外で変わったノードと、何が変わったかの区分が分かる。
 // 使い方は .claude/skills/figma-safe-edit/SKILL.md。
 //
 //   curl -s -X POST '<URL>/run?file=<fileKey>&timeout=580' -H 'X-Run-Token: <合言葉>' --data-binary @<リポ>/scripts/fingerprint.js > <保存先>.json
 //
-// 返り値: { v: 1, file, fileKey, takenAt, ms, pages: { <ページ id>: <名前> }, nodes: ["<id>|<親の id>|<指紋>[|<メインコンポーネントの id>]", ...] }
+// 返り値: { v: 2, file, fileKey, takenAt, ms, pages: { <ページ id>: <名前> }, nodes: ["<id>|<親の id>|<要約>[|<メインコンポーネントの id>]", ...] }
 // (4 つ目はインスタンスだけ)
+// 要約は ASPECTS の順に区分ごとのハッシュを "." でつないだもの。区分ごとに分けるのは、変わったノードについて「位置だけ変わった」のように何が変わったかを言うため。
 // (ノードごとに 1 つの文字列にするのは、dev サーバーが応答を字下げつきの JSON にするので、配列だと 1 万ノードで 900 KB になるため。返り値の上限は 100 万文字)
-// ページも 1 つのノードとして入る (親は空。指紋は名前と直下の子の並び)。ファイル全体も id "document" のノードとして入る (指紋はページの並び)。
-// 指紋は、種類・名前・表示・ロック・位置・大きさ・回転・不透明度・塗り・線・効果・角丸・制約・レイアウト・文字 (範囲ごとの書式を含む)・
-// スタイル・コンポーネントの property・メインコンポーネント・子の並びから作る。
+// ページも 1 つのノードとして入る (親は空。要約は名前と直下の子の並び)。ファイル全体も id "document" のノードとして入る (要約はページの並び)。
 // 値の一覧は網羅ではない (Plugin API の値は多く、見ていない値 (書き出し設定・プラグインデータなど) の変化は拾えない)。
 const startedAt = Date.now();
 await figma.loadAllPagesAsync();
+
+/** 区分ごとのハッシュの長さ (16 進の桁)。8 桁だと 1 万ノードで返り値が 100 万文字に近づくので短くする */
+const HASH_LENGTH = 6;
 
 function hash(text) {
   let x = 2166136261;
@@ -20,7 +22,7 @@ function hash(text) {
     x ^= text.charCodeAt(i);
     x = Math.imul(x, 16777619);
   }
-  return (x >>> 0).toString(16).padStart(8, "0");
+  return (x >>> 0).toString(16).padStart(8, "0").slice(0, HASH_LENGTH);
 }
 
 function safeJson(value) {
@@ -31,50 +33,37 @@ function safeJson(value) {
   }
 }
 
-const FIELDS = [
-  "visible",
-  "locked",
-  "x",
-  "y",
-  "width",
-  "height",
-  "rotation",
-  "opacity",
-  "blendMode",
-  "fills",
-  "strokes",
-  "strokeWeight",
-  "effects",
-  "cornerRadius",
-  "vectorPaths",
-  "vectorNetwork",
-  "arcData",
-  "pointCount",
-  "innerRadius",
-  "constraints",
-  "layoutMode",
-  "layoutAlign",
-  "layoutGrow",
-  "layoutPositioning",
-  "itemSpacing",
-  "paddingLeft",
-  "paddingRight",
-  "paddingTop",
-  "paddingBottom",
-  "clipsContent",
-  "characters",
-  "textAlignHorizontal",
-  "textAlignVertical",
-  "textAutoResize",
-  "textTruncation",
-  "maxLines",
-  "fillStyleId",
-  "strokeStyleId",
-  "effectStyleId",
-  "textStyleId",
-  "componentProperties",
-  "variantProperties",
-];
+// 要約の区分 (順番は scripts/fingerprint-lib.mts の ASPECTS と同じにする)。
+// name: 名前 / geometry: 位置・大きさ・回転・制約・親のレイアウトの中での伸び方 / look: 表示・塗り・線・効果・角丸・ベクターの形 /
+// text: 文字と書式 / layout: 自動レイアウトの設定 / component: 種類・コンポーネントの property・メインコンポーネント / children: 子の並び
+const ASPECT_FIELDS = {
+  name: [],
+  geometry: ["x", "y", "width", "height", "rotation", "constraints", "layoutAlign", "layoutGrow", "layoutPositioning"],
+  look: [
+    "visible",
+    "locked",
+    "opacity",
+    "blendMode",
+    "fills",
+    "strokes",
+    "strokeWeight",
+    "effects",
+    "cornerRadius",
+    "vectorPaths",
+    "vectorNetwork",
+    "arcData",
+    "pointCount",
+    "innerRadius",
+    "clipsContent",
+    "fillStyleId",
+    "strokeStyleId",
+    "effectStyleId",
+  ],
+  text: ["characters", "textAlignHorizontal", "textAlignVertical", "textAutoResize", "textTruncation", "maxLines", "textStyleId"],
+  layout: ["layoutMode", "itemSpacing", "paddingLeft", "paddingRight", "paddingTop", "paddingBottom"],
+  component: ["componentProperties", "variantProperties"],
+  children: [],
+};
 
 // 文字の書式は範囲ごとに違いうる (ノード全体の fontSize などは figma.mixed になり、どの範囲を変えても同じ値のまま) ので、範囲ごとに取る
 const TEXT_SEGMENT_FIELDS = [
@@ -97,28 +86,36 @@ const TEXT_SEGMENT_FIELDS = [
   "textWrapStyle",
 ];
 
-/** 指紋と、インスタンスならメインコンポーネントの id (指紋の比較で、メインコンポーネントの変化が映ったインスタンスを見分けるため) */
-async function signature(node) {
-  const parts = [node.type, node.name];
-  let mainId = "";
-  for (const field of FIELDS) {
+function fieldsOf(node, fields) {
+  const parts = [];
+  for (const field of fields) {
     if (field in node) parts.push(field + "=" + safeJson(node[field]));
   }
+  return parts;
+}
+
+/** 区分ごとのハッシュと、インスタンスならメインコンポーネントの id (比較で、メインコンポーネントの変化が映ったインスタンスを見分けるため) */
+async function signature(node) {
+  const extra = { name: [node.name], component: [node.type], text: [], children: [] };
+  let mainId = "";
   if (node.type === "TEXT") {
     try {
-      parts.push("segments=" + safeJson(node.getStyledTextSegments(TEXT_SEGMENT_FIELDS)));
+      extra.text.push("segments=" + safeJson(node.getStyledTextSegments(TEXT_SEGMENT_FIELDS)));
     } catch (e) {
-      parts.push("segments=?");
+      extra.text.push("segments=?");
     }
   }
   // dynamic-page では mainComponent を同期で読めない (getMainComponentAsync を使う。2026-10-28 に実測)
   if (node.type === "INSTANCE") {
     const main = await node.getMainComponentAsync();
     mainId = main ? main.id : "";
-    parts.push("main=" + mainId);
+    extra.component.push("main=" + mainId);
   }
-  if ("children" in node) parts.push("children=" + node.children.map((c) => c.id).join(","));
-  return { hash: hash(parts.join("\u0001")), mainId };
+  if ("children" in node) extra.children.push(node.children.map((c) => c.id).join(","));
+  const hashes = Object.keys(ASPECT_FIELDS).map((aspect) =>
+    hash([...(extra[aspect] || []), ...fieldsOf(node, ASPECT_FIELDS[aspect])].join("\u0001"))
+  );
+  return { hash: hashes.join("."), mainId };
 }
 
 const pages = {};
@@ -126,17 +123,17 @@ const pages = {};
 const nodes = ["document||" + hash(figma.root.children.map((p) => p.id).join(","))];
 for (const page of figma.root.children) {
   pages[page.id] = page.name;
-  // ページの名前の変更と直下の並べ替えも拾えるよう、ページも 1 つのノードにする
-  nodes.push(page.id + "||" + hash([page.name, page.children.map((c) => c.id).join(",")].join("\u0001")));
+  // ページの名前の変更と直下の並べ替えも拾えるよう、ページも 1 つのノードにする (name と children の 2 区分)
+  nodes.push(page.id + "||" + hash(page.name) + "." + hash(page.children.map((c) => c.id).join(",")));
   const stack = page.children.map((child) => [child, page.id]);
   while (stack.length > 0) {
     const [node, parentId] = stack.pop();
-    const { hash: fingerprint, mainId } = await signature(node);
-    nodes.push(node.id + "|" + parentId + "|" + fingerprint + (mainId === "" ? "" : "|" + mainId));
+    const { hash: summary, mainId } = await signature(node);
+    nodes.push(node.id + "|" + parentId + "|" + summary + (mainId === "" ? "" : "|" + mainId));
     if ("children" in node) {
       for (const child of node.children) stack.push([child, node.id]);
     }
   }
 }
-// fileKey は manifest の enablePrivatePluginApi で取れる (取れなければ null)。同名の別ファイルの指紋を取り違えないため
-return { v: 1, file: figma.root.name, fileKey: figma.fileKey ?? null, takenAt: new Date().toISOString(), ms: Date.now() - startedAt, pages, nodes };
+// fileKey は manifest の enablePrivatePluginApi で取れる (取れなければ null)。同名の別ファイルのスナップショットを取り違えないため
+return { v: 2, file: figma.root.name, fileKey: figma.fileKey ?? null, takenAt: new Date().toISOString(), ms: Date.now() - startedAt, pages, nodes };

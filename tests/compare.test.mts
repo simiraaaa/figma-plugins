@@ -112,7 +112,7 @@ function writeFingerprint(file: string, spec: FingerprintSpec = {}): string {
   const h = (id: string) => spec.hashes?.[id] ?? `h${id}`;
   const nodes = [`1:2|0:1|${h("1:2")}`, `1:3|1:2|${h("1:3")}`, `2:1|0:1|${h("2:1")}`, `I2:1;1:3|2:1|${h("I2:1;1:3")}`];
   const value = {
-    v: 1,
+    v: 2,
     file: "f",
     fileKey: spec.fileKey === undefined ? "KEY" : spec.fileKey,
     takenAt: "2026-10-28T00:00:00.000Z",
