@@ -19,6 +19,7 @@ import {
 import path from "node:path";
 import pixelmatch from "pixelmatch";
 import { PNG } from "pngjs";
+import { readBridgeMeta } from "./bridge-meta.mts";
 import { CHANGES_DIFF_FILE, cropFile, NODE_ID_LINE, reportHtml, sameChangesOf, TEXT_EXTENSIONS } from "./compare-report.mts";
 
 export interface Region {
@@ -69,6 +70,8 @@ export interface CompareSummary {
   /** 構造の差分のうち、同じ中身の変化が 2 箇所以上あるもの (多い順) */
   sameChanges: SameChange[];
   report: string;
+  /** 書き出した Figma のファイル (dev サーバーが添えた印から。after が無ければ before の印)。無ければ null で、report に Figma を開くリンクを付けない */
+  fileKey: string | null;
 }
 
 /** 比べた結果の置き場所の印。--out に既にある置き場所を消してよいかは、これに SUMMARY_MARK が入っているかで決める */
@@ -416,7 +419,20 @@ export function compareExports(beforeDir: string, afterDir: string, outDir: stri
   const same = added.length === 0 && removed.length === 0 && renamed.length === 0 && changed.length === 0;
   const report = path.join(outDir, REPORT_FILE);
   const sameChanges = changesDiff === null ? [] : sameChangesOf(outDir, changesDiff);
-  const summary: CompareSummary = { same, added, removed, renamed, changed, images, outDir, changesDiff, sameChanges, report };
+  const fileKey = (readBridgeMeta(afterDir) ?? readBridgeMeta(beforeDir))?.fileKey ?? null;
+  const summary: CompareSummary = {
+    same,
+    added,
+    removed,
+    renamed,
+    changed,
+    images,
+    outDir,
+    changesDiff,
+    sameChanges,
+    report,
+    fileKey,
+  };
   writeFile(report, reportHtml(summary, beforeDir, afterDir));
   writeFile(path.join(outDir, SUMMARY_FILE), JSON.stringify({ ...SUMMARY_MARK, ...summary }, null, 2) + "\n");
   return summary;

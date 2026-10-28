@@ -23,6 +23,7 @@ import {
 } from "node:fs";
 import http from "node:http";
 import path from "node:path";
+import { BRIDGE_META_FILE, type BridgeMeta } from "./bridge-meta.mts";
 
 /**
  * 待ち受けるポートの候補。前から順に、空いている最初のポートで起動する。
@@ -852,6 +853,11 @@ export function createDevServer(options: DevServerOptions): DevServerHandler {
       mkdirSync(path.dirname(target), { recursive: true });
       writeFileSync(target, file.data);
     }
+    const file = fileOf(seq);
+    if (file.fileKey !== undefined) {
+      const bridgeMeta: BridgeMeta = { fileKey: file.fileKey, fileName: file.fileName };
+      writeFileSync(path.join(dir, BRIDGE_META_FILE), JSON.stringify(bridgeMeta, null, 2) + "\n");
+    }
     // latest の差し替えは rename で行い、読んでいる途中で消えた状態を作らない
     const tmpLink = path.join(outDir, `.latest-${version}`);
     rmSync(tmpLink, { force: true });
@@ -862,7 +868,6 @@ export function createDevServer(options: DevServerOptions): DevServerHandler {
       .filter((n) => Number.isInteger(n))
       .sort((a, b) => b - a);
     const meta = indexMeta(files);
-    const file = fileOf(seq);
     // GET /status?file が返す各ファイルの最後の結果は、残す数を超えても消さない
     const lastOfFiles = new Set([...fileStatuses.values()].map((s) => s.version));
     if (file.fileKey !== undefined) lastOfFiles.delete(fileStatuses.get(file.fileKey)?.version ?? -1);

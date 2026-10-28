@@ -12,6 +12,7 @@ import { tmpdir } from "node:os";
 import path from "node:path";
 import { PNG } from "pngjs";
 import { compareExports, defaultCompareDir, type CompareSummary } from "../scripts/compare-lib.mts";
+import { BRIDGE_META_FILE } from "../scripts/bridge-meta.mts";
 
 interface ExportSpec {
   exportedAt?: string;
@@ -25,11 +26,16 @@ interface ExportSpec {
   svg?: string;
   /** そのほかに書くファイル (書き出しの中のパス → 中身) */
   files?: Record<string, string>;
+  /** dev サーバーが添える行き先のファイルの印 (.local-bridge.json) の fileKey。undefined なら印を書かない */
+  fileKey?: string;
 }
 
 function writeExport(dir: string, spec: ExportSpec): string {
   mkdirSync(dir, { recursive: true });
   const name = spec.name ?? "node";
+  if (spec.fileKey !== undefined) {
+    writeFileSync(path.join(dir, BRIDGE_META_FILE), JSON.stringify({ fileKey: spec.fileKey, fileName: "f" }));
+  }
   const index = { meta: { fileName: "f", exportedAt: spec.exportedAt ?? "2026-10-26T00:00:00.000Z" }, frames: [] };
   writeFileSync(path.join(dir, "index.json"), JSON.stringify(index, null, 2));
   writeFileSync(path.join(dir, `${name}.1-2.json`), JSON.stringify(spec.node ?? { name: "frame" }, null, 2) + "\n");
@@ -105,6 +111,26 @@ test("負例: 構造の json が変わると、変わったファイルに挙げ
   assert.match(text, /^-.*"name": "Instances",?$/m);
   assert.match(text, /^\+.*"name": "Instances \(new\)",?$/m);
   assert.match(readFileSync(summary.report, "utf8"), /Instances \(new\)/);
+});
+
+test("負例: 行き先のファイルの印があれば、report のノードと画像に Figma で開くリンク (figma://) を付ける", () => {
+  const node = { id: "1:2", name: "Card", children: [{ id: "1:3", name: "Title", text: "a" }] };
+  const after = { ...node, children: [{ id: "1:3", name: "Title", text: "b" }] };
+  const summary = compare(
+    { node, png: PLAIN, fileKey: "KEY" },
+    { node: after, png: { ...PLAIN, dots: [[2, 1, 250, 250, 250]] }, fileKey: "KEY" }
+  );
+  assert.equal(summary.fileKey, "KEY");
+  const report = readFileSync(summary.report, "utf8");
+  // 構造の差分の区切りに出るノード (1:3) と、画像のノード (1-2) のどちらにも付く
+  assert.match(report, /href="figma:\/\/file\/KEY\?node-id=1-3"/);
+  assert.match(report, /href="figma:\/\/file\/KEY\?node-id=1-2"/);
+});
+
+test("負例: 行き先のファイルの印が無い書き出し (Local Bridge 以外が置いたもの) には、Figma で開くリンクを付けない", () => {
+  const summary = compare({ node: { id: "1:2", name: "a" } }, { node: { id: "1:2", name: "b" } });
+  assert.equal(summary.fileKey, null);
+  assert.doesNotMatch(readFileSync(summary.report, "utf8"), /figma:\/\//);
 });
 
 test("書き出しの時刻だけが違う書き出しは、変わったところが無いと見る", () => {
