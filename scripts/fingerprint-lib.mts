@@ -8,9 +8,11 @@ import { readFileSync } from "node:fs";
 export interface Fingerprint {
   v: 1;
   file: string;
+  /** figma.fileKey。取れないプラグインでは null */
+  fileKey?: string | null;
   takenAt: string;
   pages: Record<string, string>;
-  /** "<ノードの id>|<親の id (ページ直下ならページの id)>|<指紋>" (id に | は入らない) */
+  /** "<ノードの id>|<親の id (ページ直下ならページの id。ページ自身なら空)>|<指紋>" (id に | は入らない) */
   nodes: string[];
 }
 
@@ -18,7 +20,8 @@ export interface ChangedNode {
   id: string;
   /** ノードのあるページの名前 (after に無ければ before の) */
   page: string;
-  kind: "changed" | "added" | "removed";
+  /** moved は、指紋は同じでも親が変わった (別の親やページへ移した) ノード */
+  kind: "changed" | "added" | "removed" | "moved";
 }
 
 export interface PropagatedNode extends ChangedNode {
@@ -93,6 +96,9 @@ function pageOf(id: string, entries: Map<string, Entry>, pages: Record<string, s
  * 範囲の根の指紋には子の並びが入るので、子を足す・消すと根も changed に出る (範囲の中)
  */
 export function diffFingerprints(before: Fingerprint, after: Fingerprint, insideIds: readonly string[]): FingerprintDiff {
+  if (before.fileKey != null && after.fileKey != null && before.fileKey !== after.fileKey) {
+    throw new Error(`別のファイルの指紋を比べている (before: ${before.fileKey}, after: ${after.fileKey})`);
+  }
   const b = index(before);
   const a = index(after);
   const inside = new Set(insideIds);
@@ -101,6 +107,7 @@ export function diffFingerprints(before: Fingerprint, after: Fingerprint, inside
     const prev = b.get(id);
     if (prev === undefined) changes.push({ id, page: pageOf(id, a, after.pages), kind: "added" });
     else if (prev.hash !== entry.hash) changes.push({ id, page: pageOf(id, a, after.pages), kind: "changed" });
+    else if (prev.parent !== entry.parent) changes.push({ id, page: pageOf(id, a, after.pages), kind: "moved" });
   }
   for (const id of b.keys()) {
     if (!a.has(id)) changes.push({ id, page: pageOf(id, b, before.pages), kind: "removed" });

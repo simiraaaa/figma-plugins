@@ -4,10 +4,11 @@
 //
 //   curl -s -X POST '<URL>/run?file=<fileKey>&timeout=580' -H 'X-Run-Token: <合言葉>' --data-binary @<リポ>/scripts/fingerprint.js > <保存先>.json
 //
-// 返り値: { v: 1, file, takenAt, ms, pages: { <ページ id>: <名前> }, nodes: ["<id>|<親の id>|<指紋>", ...] }
+// 返り値: { v: 1, file, fileKey, takenAt, ms, pages: { <ページ id>: <名前> }, nodes: ["<id>|<親の id>|<指紋>", ...] }
 // (ノードごとに 1 つの文字列にするのは、dev サーバーが応答を字下げつきの JSON にするので、配列だと 1 万ノードで 900 KB になるため。返り値の上限は 100 万文字)
-// 指紋は、種類・名前・表示・位置・大きさ・回転・不透明度・塗り・線・効果・角丸・レイアウト・文字・コンポーネントの property・子の並びから作る。
-// 見ていない値 (制約・書き出し設定・プラグインデータなど) の変化は拾えない。
+// ページも 1 つのノードとして入る (親は空。指紋は名前と直下の子の並び)。
+// 指紋は、種類・名前・表示・ロック・位置・大きさ・回転・不透明度・塗り・線・効果・角丸・制約・レイアウト・文字 (範囲ごとの書式を含む)・
+// スタイル・コンポーネントの property・メインコンポーネント・子の並びから作る。見ていない値 (書き出し設定・プラグインデータなど) の変化は拾えない。
 const startedAt = Date.now();
 await figma.loadAllPagesAsync();
 
@@ -43,23 +44,45 @@ const FIELDS = [
   "strokeWeight",
   "effects",
   "cornerRadius",
+  "constraints",
   "layoutMode",
+  "layoutAlign",
+  "layoutGrow",
+  "layoutPositioning",
   "itemSpacing",
   "paddingLeft",
   "paddingRight",
   "paddingTop",
   "paddingBottom",
+  "clipsContent",
   "characters",
-  "fontSize",
-  "fontName",
+  "textAlignHorizontal",
+  "textAlignVertical",
+  "textAutoResize",
+  "paragraphSpacing",
+  "paragraphIndent",
+  "fillStyleId",
+  "strokeStyleId",
+  "effectStyleId",
+  "textStyleId",
   "componentProperties",
   "variantProperties",
 ];
+
+// 文字の書式は範囲ごとに違いうる (ノード全体の fontSize などは figma.mixed になり、どの範囲を変えても同じ値のまま) ので、範囲ごとに取る
+const TEXT_SEGMENT_FIELDS = ["fontSize", "fontName", "fontWeight", "textDecoration", "textCase", "lineHeight", "letterSpacing", "fills", "textStyleId", "fillStyleId", "hyperlink"];
 
 async function signature(node) {
   const parts = [node.type, node.name];
   for (const field of FIELDS) {
     if (field in node) parts.push(field + "=" + safeJson(node[field]));
+  }
+  if (node.type === "TEXT") {
+    try {
+      parts.push("segments=" + safeJson(node.getStyledTextSegments(TEXT_SEGMENT_FIELDS)));
+    } catch (e) {
+      parts.push("segments=?");
+    }
   }
   // dynamic-page では mainComponent を同期で読めない (getMainComponentAsync を使う。2026-10-28 に実測)
   if (node.type === "INSTANCE") {
@@ -74,6 +97,8 @@ const pages = {};
 const nodes = [];
 for (const page of figma.root.children) {
   pages[page.id] = page.name;
+  // ページの名前の変更と直下の並べ替えも拾えるよう、ページも 1 つのノードにする
+  nodes.push(page.id + "||" + hash([page.name, page.children.map((c) => c.id).join(",")].join("\u0001")));
   const stack = page.children.map((child) => [child, page.id]);
   while (stack.length > 0) {
     const [node, parentId] = stack.pop();
@@ -83,4 +108,5 @@ for (const page of figma.root.children) {
     }
   }
 }
-return { v: 1, file: figma.root.name, takenAt: new Date().toISOString(), ms: Date.now() - startedAt, pages, nodes };
+// fileKey は manifest の enablePrivatePluginApi で取れる (取れなければ null)。同名の別ファイルの指紋を取り違えないため
+return { v: 1, file: figma.root.name, fileKey: figma.fileKey ?? null, takenAt: new Date().toISOString(), ms: Date.now() - startedAt, pages, nodes };

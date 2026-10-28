@@ -62,6 +62,31 @@ test("負例: 範囲の中のノードの変化がインスタンスに映った
   assert.deepEqual(diffFingerprints(unrelated, unrelatedAfter, ["1:2"]).outside, [{ id: "I2:1;1:3", page: "P1", kind: "changed" }]);
 });
 
+test("負例: 指紋が同じでも親が変わったノードは moved として出す (別のページへ移したものを含む)", () => {
+  const before = base();
+  before.pages["0:2"] = "P2";
+  const after = base();
+  after.pages["0:2"] = "P2";
+  after.nodes = after.nodes.map((line) => (line.startsWith("2:1|") ? line.replace("2:1|0:1|", "2:1|0:2|") : line));
+  const diff = diffFingerprints(before, after, ["1:2"]);
+  assert.deepEqual(diff.outside, [{ id: "2:1", page: "P2", kind: "moved" }]);
+});
+
+test("負例: ページの名前や直下の並びの変化は、ページのノード (親が空) の指紋の差として出す", () => {
+  const before = base();
+  before.nodes.push("0:1||page-hash");
+  const after = base();
+  after.nodes.push("0:1||page-hash-renamed");
+  const diff = diffFingerprints(before, after, ["1:2"]);
+  assert.deepEqual(diff.outside, [{ id: "0:1", page: "P1", kind: "changed" }]);
+});
+
+test("負例: fileKey が違う指紋 (同名の別ファイル) は比べずに断る。片方に無ければ比べる", () => {
+  const before = { ...base(), fileKey: "KEY1" };
+  assert.throws(() => diffFingerprints(before, { ...base(), fileKey: "KEY2" }, []), /別のファイルの指紋/);
+  assert.deepEqual(diffFingerprints(before, { ...base(), fileKey: null }, []).outside, []);
+});
+
 test("何も変わっていなければ inside も outside も空", () => {
   const diff = diffFingerprints(base(), base(), ["1:2"]);
   assert.deepEqual([diff.inside, diff.propagated, diff.outside], [[], [], []]);
