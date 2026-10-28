@@ -245,6 +245,17 @@ test("負例: 消えたノードとページの並び (document) には Figma �
   assert.match(readFileSync(without.report, "utf8"), /範囲の外は見ていない/);
 });
 
+test("負例: 書き出しが同じでも、スナップショットの範囲の中に変化 (非表示の子など、書き出しに映らないもの) があれば「無い」と見出しに出さない", () => {
+  const summary = compare(
+    { node: { id: "1:2" }, fileKey: "KEY" },
+    { node: { id: "1:2" }, fileKey: "KEY" },
+    { fingerprint: fingerprintPair({}, { hashes: { "1:3": "hidden-child-changed" } }) }
+  );
+  assert.equal(summary.same, true);
+  assert.deepEqual(summary.fingerprint?.inside.map((n) => n.id), ["1:3"]);
+  assert.match(readFileSync(summary.report, "utf8"), /<h1>変わったところがある<\/h1>/);
+});
+
 test("負例: 書き出しの印と別のファイルのスナップショットを渡したら、取り違えなので断る (置き場所には何も書かない)", () => {
   const root = mkdtempSync(path.join(tmpdir(), "compare-"));
   const out = path.join(root, "out");

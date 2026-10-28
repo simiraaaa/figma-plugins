@@ -534,7 +534,13 @@ export function reportHtml(summary: CompareSummary, beforeDir: string, afterDir:
     n === 0 ? "" : `<li><a href="${href}">${label}</a> <b>${n}</b></li>`;
   const fp = summary.fingerprint;
   const outsideChanged = fp !== null && fp.outside.length > 0;
-  const title = outsideChanged ? "書き出した範囲の外が変わっている" : summary.same ? "変わったところは無い" : "変わったところがある";
+  // 書き出しに映らないノード (非表示の子など) の変化はスナップショットにだけ出るので、same だけでは「無い」と言えない
+  const snapshotChanged = fp !== null && (fp.inside.length > 0 || fp.propagated.length > 0);
+  const title = outsideChanged
+    ? "書き出した範囲の外が変わっている"
+    : summary.same && !snapshotChanged
+      ? "変わったところは無い"
+      : "変わったところがある";
   const bgSwitch =
     images.length === 0
       ? ""

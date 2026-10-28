@@ -5,6 +5,8 @@
  *   npm run compare -- <before の書き出し> <after の書き出し> --out <ディレクトリ>
  *   npm run compare -- <before の書き出し> <after の書き出し> --fingerprint-before <前の json> --fingerprint-after <後の json>
  *       # ファイル全体のスナップショット (scripts/fingerprint.js の返り値) も比べ、書き出した範囲の外の変化を report の先頭に出す
+ *
+ * 終了コードは、変化の有無に関わらず 0 (判定は出力の JSON の欄で行う。fingerprint.mts とは違う)。
  */
 import path from "node:path";
 import { parseArgs } from "node:util";

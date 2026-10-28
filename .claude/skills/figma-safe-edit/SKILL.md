@@ -146,6 +146,7 @@ npm --prefix <リポ> run -s compare -- <before> <after> --fingerprint-before <�
   画像とノードには「Figma で開く」のリンクが付き、押すと Figma デスクトップがそのノードを選択して前に出る。
 - `fileKey`: 書き出した Figma のファイル。Local Bridge の書き出しでなければ `null` で、report にリンクは付かない。
 - `fingerprint`: ファイル全体の比較 (下の `inside`・`propagated`・`outside`)。スナップショットを渡していなければ `null`。
+  `same` は書き出しだけを見るので、書き出しに映らないノード (非表示の子など) の変化は `same: true` のまま `inside` に出る。
   書き出した範囲は after の `index.json` の根 (1 の `nodeIds` のうち表示されているもの)。
   スナップショットの `fileKey` が書き出しの `fileKey` と違えば、取り違えなので断る。
 
