@@ -239,6 +239,26 @@ Plugin API のコードを送ると、Local Bridge が実行して返り値を J
      返り値は JSON にして返す。
      ノードをそのまま返すと `{"id": "..."}` だけになるので、要る値を取り出してから返す。
      関数などの JSON にない値は、`JSON.stringify` と同じく `null` になるか、消える。
+   - 読み取りの script がページ・選択・表示 (`setCurrentPageAsync`・`selection`・`viewport`) を動かすなら、頭で控えて最後に戻す。
+     人が見ている画面が、AI の読み取りで別の場所に移ったままにならないようにするため。
+     動かさない script には要らない。
+     人に見せるために動かす script (「Figma の画面を目的のノードへ飛ばす」) も戻さない。
+
+     ```js
+     const saved = { page: figma.currentPage, selection: figma.currentPage.selection, zoom: figma.viewport.zoom, center: figma.viewport.center };
+     try {
+       // ここでページや表示を動かして読む
+     } finally {
+       await figma.setCurrentPageAsync(saved.page);
+       figma.currentPage.selection = saved.selection;
+       figma.viewport.zoom = saved.zoom;
+       figma.viewport.center = saved.center;
+     }
+     ```
+
+     戻したあとの `viewport.center` は、控えた値と小数点以下のわずかな差が出る (2026-10-28 に実測)。
+   - 長い書き換えが終わったことを人に知らせるには `figma.notify("...")` を使う (Figma の画面の下に出る)。
+     書き換える script の形は[書き換えの手順](../../.claude/skills/figma-safe-edit/SKILL.md)の 2 にある。
    - 成功は HTTP 200 で `{"seq": 3, "value": ...}` が返る (return しなければ `value` は `null`)。
    - 失敗は HTTP 422 で、`error` に理由が入る。理由の文で、実行したかどうかが分かる。
      - 「実行していない」: 合言葉が違う (別のファイルの合言葉を含む)・このファイルの合言葉がまだ無い (作り直したあと、このタブでまだコピーしていない)・コードを読めない (構文エラー)・別のファイル宛ての依頼が届いた (dev サーバーの振り分けの不具合。Local Bridge は依頼の fileKey が自分のファイルと違えば実行しない)。
