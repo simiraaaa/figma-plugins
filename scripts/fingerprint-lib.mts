@@ -14,7 +14,7 @@ export interface Fingerprint {
   pages: Record<string, string>;
   /**
    * "<ノードの id>|<親の id (ページ直下ならページの id。ページ自身なら空)>|<要約>[|<メインコンポーネントの id (インスタンスだけ)>]" (id に | は入らない)。
-   * 要約は区分ごとのハッシュを "." でつないだもの (ASPECTS の順。ページは name と children の 2 つ、document は children だけ)
+   * 要約は区分ごとのハッシュ (HASH_WIDTH 文字ずつ) をつないだもの (ASPECTS の順。ページは name と children の 2 つ、document は children だけ)
    */
   nodes: string[];
 }
@@ -22,6 +22,8 @@ export interface Fingerprint {
 /** 要約の区分 (fingerprint.js の ASPECT_FIELDS と同じ順)。変わったノードについて、どの区分が変わったかを出す */
 export const ASPECTS = ["name", "geometry", "look", "text", "layout", "component", "children"] as const;
 export type Aspect = (typeof ASPECTS)[number];
+/** 区分ごとのハッシュの文字数 (fingerprint.js の hash と同じ) */
+export const HASH_WIDTH = 4;
 const PAGE_ASPECTS: readonly Aspect[] = ["name", "children"];
 const DOCUMENT_ASPECTS: readonly Aspect[] = ["children"];
 const SUPPORTED_VERSION = 2;
@@ -71,11 +73,17 @@ export function readFingerprint(file: string): Fingerprint {
   return candidate as Fingerprint;
 }
 
+function chunks(summary: string): string[] {
+  const out: string[] = [];
+  for (let i = 0; i < summary.length; i += HASH_WIDTH) out.push(summary.slice(i, i + HASH_WIDTH));
+  return out;
+}
+
 /** 前後の要約を区分ごとに比べ、変わった区分を返す。区分の数が合わない (形が違う) ときは undefined */
 function changedAspects(id: string, before: string, after: string): Aspect[] | undefined {
-  const a = before.split(".");
-  const b = after.split(".");
-  if (a.length !== b.length) return undefined;
+  if (before.length !== after.length || before.length % HASH_WIDTH !== 0) return undefined;
+  const a = chunks(before);
+  const b = chunks(after);
   const names =
     id === DOCUMENT_ID
       ? DOCUMENT_ASPECTS

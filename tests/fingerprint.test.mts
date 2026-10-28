@@ -90,9 +90,9 @@ test("負例: スナップショットが同じでも親が変わったノード
 
 test("負例: ページ自体の並べ替えは、ファイル全体のノード (id は document) のスナップショットの差として出す", () => {
   const before = base();
-  before.nodes.unshift("document||order-a");
+  before.nodes.unshift("document||ORDA");
   const after = base();
-  after.nodes.unshift("document||order-b");
+  after.nodes.unshift("document||ORDB");
   const diff = diffFingerprints(before, after, ["1:2"]);
   assert.deepEqual(diff.outside, [{ id: "document", page: "", kind: "changed", aspects: ["children"] }]);
 });
@@ -131,13 +131,13 @@ test("負例: POST /run の応答のまま保存したファイルも読め、�
   assert.throws(() => readFingerprint(old), /古い形のスナップショット \(v1/);
 });
 
-test("負例: 要約が区分ごと (7 つ) のときは、変わった区分を aspects に出す。ページは name と children、document は children", () => {
+test("負例: 要約が区分ごと (4 文字 × 7) のときは、変わった区分を aspects に出す。ページは name と children、document は children", () => {
   const summary = (overrides: Partial<Record<string, string>> = {}) =>
-    ["name", "geometry", "look", "text", "layout", "component", "children"].map((a) => overrides[a] ?? `h-${a}`).join(".");
+    ["name", "geometry", "look", "text", "layout", "component", "children"].map((a) => overrides[a] ?? a.slice(0, 4).toUpperCase()).join("");
   const before = base({ "1:3": summary(), "2:1": summary() });
-  before.nodes.unshift("document||pages-a", "0:1||pname-a.pchildren-a");
-  const after = base({ "1:3": summary({ geometry: "moved", text: "edited" }), "2:1": summary({ look: "x" }) });
-  after.nodes.unshift("document||pages-b", "0:1||pname-a.pchildren-b");
+  before.nodes.unshift("document||PAGA", "0:1||PNAMCHLA");
+  const after = base({ "1:3": summary({ geometry: "MOVE", text: "EDIT" }), "2:1": summary({ look: "XXXX" }) });
+  after.nodes.unshift("document||PAGB", "0:1||PNAMCHLB");
   const diff = diffFingerprints(before, after, ["1:2"]);
   assert.deepEqual(diff.inside, [{ id: "1:3", page: "P1", kind: "changed", aspects: ["geometry", "text"] }]);
   assert.deepEqual(diff.outside, [

@@ -282,11 +282,11 @@ test("負例: --note の見立ては report の一番上 (範囲の外の変化�
 
 test("負例: 変わった区分 (aspects) があれば、report のノードに「変わった: 位置・大きさ」のように出す", () => {
   const summaryOf = (overrides: Record<string, string> = {}) =>
-    ["name", "geometry", "look", "text", "layout", "component", "children"].map((a) => overrides[a] ?? `h-${a}`).join(".");
+    ["name", "geometry", "look", "text", "layout", "component", "children"].map((a) => overrides[a] ?? a.slice(0, 4).toUpperCase()).join("");
   const summary = compare(
     { node: { id: "1:2" }, fileKey: "KEY" },
     { node: { id: "1:2" }, fileKey: "KEY" },
-    { fingerprint: fingerprintPair({ hashes: { "2:1": summaryOf() } }, { hashes: { "2:1": summaryOf({ geometry: "g", text: "t" }) } }) }
+    { fingerprint: fingerprintPair({ hashes: { "2:1": summaryOf() } }, { hashes: { "2:1": summaryOf({ geometry: "GGGG", text: "TTTT" }) } }) }
   );
   assert.deepEqual(summary.fingerprint?.outside, [{ id: "2:1", page: "P1", kind: "changed", aspects: ["geometry", "text"] }]);
   assert.match(readFileSync(summary.report, "utf8"), /<span class="tag">変わった: 位置・大きさ・文字<\/span>/);
