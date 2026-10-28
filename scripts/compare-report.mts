@@ -4,7 +4,7 @@
  */
 import { existsSync, readFileSync, statSync } from "node:fs";
 import path from "node:path";
-import { figmaNodeLink } from "./bridge-meta.mts";
+import { figmaNodeLink, isNodeId } from "./bridge-meta.mts";
 import type { CompareSummary, ImageChange, SameChange } from "./compare-lib.mts";
 
 export const TEXT_EXTENSIONS: ReadonlySet<string> = new Set([".json", ".md", ".svg", ".txt"]);
@@ -54,20 +54,20 @@ function pct(value: number, whole: number): string {
   return `${((value / whole) * 100).toFixed(3)}%`;
 }
 
-/** Figma デスクトップでそのノードを開くリンク。fileKey が無い (Local Bridge 以外が置いた書き出し) なら付けない */
+/** Figma デスクトップでそのノードを開くリンク。fileKey が無い (Local Bridge 以外が置いた書き出し) ときと、ノードの id でない (変数・スタイル) ときは付けない */
 function openInFigma(fileKey: string | null, nodeId: string): string {
-  if (fileKey === null) return "";
+  if (fileKey === null || !isNodeId(nodeId)) return "";
   return ` <a class="figma" href="${escapeHtml(figmaNodeLink(fileKey, nodeId))}">Figma で開く</a>`;
 }
 
 /**
- * 書き出しのファイル名 (<名前>.<ノード ID>.<拡張子>) からノード ID を取り出す。
- * ID の `:` は `-` になっているので、figma:// の node-id にそのまま使える形。`I1:2;3:4` のような入れ子の ID は `-` だけになって戻せないので、数字 2 つの形だけ扱う
+ * 書き出しのファイル名 (<名前>.<ノード ID>.<拡張子>) からノード ID (`12:34` の形) を取り出す。
+ * ファイル名では ID の `:` が `-` になっている。`I1:2;3:4` のような入れ子の ID は `-` だけになって戻せないので、数字 2 つの形だけ扱う
  */
 function nodeIdOfPath(rel: string): string | null {
   const stem = path.posix.basename(rel, path.posix.extname(rel));
   const id = stem.slice(stem.lastIndexOf(".") + 1);
-  return /^\d+-\d+$/.test(id) ? id : null;
+  return /^\d+-\d+$/.test(id) ? id.replace("-", ":") : null;
 }
 
 function openHint(fileKey: string | null): string {

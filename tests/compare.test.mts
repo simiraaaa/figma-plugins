@@ -154,6 +154,23 @@ test("負例: after に無いノード (消えた画像・消えたノード) �
   assert.doesNotMatch(report, /node-id=5-6"/);
 });
 
+test("負例: 片方にだけ印があっても、同じファイルの書き出しと確かめられないので、Figma で開くリンクを付けない", () => {
+  const summary = compare({ node: { id: "1:2", name: "a" }, fileKey: "KEY" }, { node: { id: "1:2", name: "b" } });
+  assert.equal(summary.fileKey, null);
+  assert.doesNotMatch(readFileSync(summary.report, "utf8"), /figma:\/\//);
+});
+
+test("負例: 変数やスタイルの id (ノードでないもの) の差分には、Figma で開くリンクを付けない", () => {
+  const variables = (value: number) => JSON.stringify({ variables: [{ id: "VariableID:1:2", name: "color", value }] }, null, 2) + "\n";
+  const summary = compare(
+    { node: { id: "1:2", name: "a" }, fileKey: "KEY", files: { "variables.json": variables(1) } },
+    { node: { id: "1:2", name: "a" }, fileKey: "KEY", files: { "variables.json": variables(2) } }
+  );
+  const report = readFileSync(summary.report, "utf8");
+  assert.match(report, /VariableID:1:2/);
+  assert.doesNotMatch(report, /figma:\/\//);
+});
+
 test("負例: 行き先のファイルの印が無い書き出し (Local Bridge 以外が置いたもの) には、Figma で開くリンクを付けない", () => {
   const summary = compare({ node: { id: "1:2", name: "a" } }, { node: { id: "1:2", name: "b" } });
   assert.equal(summary.fileKey, null);

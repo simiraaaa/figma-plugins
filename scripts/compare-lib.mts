@@ -137,12 +137,12 @@ function keyed(files: readonly string[]): Map<string, string> {
 }
 
 /**
- * report のリンクに使う fileKey。before と after で違えば (別のファイルの書き出しを比べている)、
- * どちらのノードもそのファイルに無いかもしれないので null (リンクを付けない)
+ * report のリンクに使う fileKey。before と after の両方に印があり、同じファイルのときだけ返す。
+ * 違うとき (別のファイルの書き出しを比べている) と片方に印が無いとき (同じファイルと確かめられない) は null で、リンクを付けない
  */
 function sharedFileKey(before: BridgeMeta | null, after: BridgeMeta | null): string | null {
-  if (before !== null && after !== null && before.fileKey !== after.fileKey) return null;
-  return (after ?? before)?.fileKey ?? null;
+  if (before === null || after === null || before.fileKey !== after.fileKey) return null;
+  return after.fileKey;
 }
 
 function readIndex(dir: string): void {

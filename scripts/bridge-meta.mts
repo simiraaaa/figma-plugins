@@ -26,6 +26,14 @@ export function readBridgeMeta(dir: string): BridgeMeta | null {
   }
 }
 
+/**
+ * Figma のノードの id か (`12:34`、インスタンスの中なら `I12:34;56:78`)。
+ * 書き出しの json には変数 (`VariableID:…`) やスタイル (`S:…`) の id もあり、それらは figma:// で開けない
+ */
+export function isNodeId(id: string): boolean {
+  return /^(\d+:\d+|I\d+:\d+(;\d+:\d+)+)$/.test(id);
+}
+
 /** Figma デスクトップでそのノードを開くリンク。node-id は Plugin API の id の `:` を `-` にした形 */
 export function figmaNodeLink(fileKey: string, nodeId: string): string {
   return `figma://file/${encodeURIComponent(fileKey)}?node-id=${encodeURIComponent(nodeId.replace(/:/g, "-"))}`;
