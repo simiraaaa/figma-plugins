@@ -17,6 +17,7 @@
   body.compact #toggle-size { font-size: 11px; padding: 1px 8px; }
   body.compact #error, body.compact #dev { display: none; }
   #error { color: #c62828; white-space: pre-wrap; }
+  #dev-update { color: #b26a00; margin-top: 4px; }
   #dev-log { white-space: pre-wrap; margin: 4px 0 0; max-height: 300px; overflow: auto; }
   #dev-token { font: 11px/1.5 "SF Mono", Menlo, monospace; background: #f5f5f5; border-radius: 4px; padding: 2px 6px; word-break: break-all; }
   .dev-run-actions { margin: 6px 0 0; }
@@ -31,6 +32,7 @@
   <div id="dev" hidden>
     <h2>Local Bridge (dev サーバー: <span id="dev-server">探している</span>)</h2>
     <div>このファイル: <span id="dev-file"></span></div>
+    <div id="dev-update" hidden></div>
     <div class="meta">dev サーバーのこのファイル宛ての依頼を待ち、Structure Dump と同じ書き出しをして ZIP を送る。プラグインのコードを build し直すと、このファイル宛ての最後の書き出しの依頼をもう一度書き出す。</div>
     <h2>script の実行</h2>
     <div class="meta">合言葉を渡した AI は、Plugin API の script でこのファイルを読み書きできる。合言葉はこのファイル専用で、ほかのファイルでは使えない。渡すのは、実行を任せる AI のセッションだけにする。AI に渡す文には、このファイルの名前と fileKey が入る。「合言葉を作り直す」は、ほかのタブのファイルの合言葉も無効にする。</div>
@@ -73,6 +75,8 @@ const DEV_LOG_LINES = 50;
 let devServer = null;
 /** dev サーバーを起動したリポの場所 (絶対パス)。root を返さない古い dev サーバーなら null。渡す文に埋めるので、改行などの制御文字を含む root も null にする */
 let devRoot = null;
+/** dev サーバーが確かめた、リポジトリの新しい版のコミット数。無ければ 0 (dev サーバーにつないだときの値) */
+let devUpdateBehind = 0;
 /**
  * このタブのファイル (figma.fileKey と figma.root.name) と画面 (figma.currentUser.sessionId)。
  * dev サーバーはこのファイル宛ての依頼だけを、そのファイルを先に開いた画面にだけ渡す
@@ -137,6 +141,7 @@ async function findDevServer() {
         continue;
       }
       devRoot = typeof body.root === "string" && /^\/[^\u0000-\u001f\u007f]*$/.test(body.root) ? body.root : null;
+      devUpdateBehind = Number.isInteger(body.update?.behind) && body.update.behind > 0 ? body.update.behind : 0;
       return base;
     } catch {
       // 待ち受けていない・dev サーバーでない相手 (JSON を返さない)
@@ -168,6 +173,16 @@ function askToken(renew) {
     const message = { type: renew ? "token-renew" : "token-get", id, candidate: randomHex(16) };
     parent.postMessage({ pluginMessage: message }, "*");
   });
+}
+
+/** dev サーバーが新しい版を見つけていれば、画面に pull と build を促す行を出す (文は dev サーバーの端末と同じ内容) */
+function showRepoUpdate() {
+  const line = document.getElementById("dev-update");
+  line.hidden = devUpdateBehind === 0;
+  if (devUpdateBehind === 0) return;
+  line.textContent =
+    `リポジトリに新しい版がある (${devUpdateBehind} コミット)。clone したディレクトリで git pull && npm install && npm run build を実行し、dev サーバーを起動し直す`;
+  devLog(`リポジトリに新しい版がある (${devUpdateBehind} コミット)`);
 }
 
 function showRunToken(token) {
@@ -292,6 +307,7 @@ async function localBridge() {
         devServer = await findDevServer();
         document.getElementById("dev-server").textContent = devServer;
         devLog(`dev サーバーにつないだ: ${devServer}`);
+        showRepoUpdate();
       }
       const query = new URLSearchParams({ file: devFile.key, name: devFile.name, launch: launchId, session: devFile.session });
       if (server !== null) {
