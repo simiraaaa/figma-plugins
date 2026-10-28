@@ -21,6 +21,7 @@ import pixelmatch from "pixelmatch";
 import { PNG } from "pngjs";
 import { type BridgeMeta, readBridgeMeta } from "./bridge-meta.mts";
 import { CHANGES_DIFF_FILE, cropFile, NODE_ID_LINE, reportHtml, sameChangesOf, TEXT_EXTENSIONS } from "./compare-report.mts";
+import { diffFingerprints, type Fingerprint, type FingerprintDiff, readFingerprint } from "./fingerprint-lib.mts";
 
 export interface Region {
   x: number;
@@ -72,6 +73,16 @@ export interface CompareSummary {
   report: string;
   /** 書き出した Figma のファイル (dev サーバーが添えた印から。after が無ければ before の印)。無ければ null で、report に Figma を開くリンクを付けない */
   fileKey: string | null;
+  /**
+   * ファイル全体のスナップショット (scripts/fingerprint.js) の前後の比較。書き出した範囲は after の index.json の根 (一番上の sections と frames)。
+   * スナップショットを渡さなければ null で、範囲の外は見ていない
+   */
+  fingerprint: FingerprintDiff | null;
+}
+
+export interface CompareOptions {
+  /** 書き換えの前後に取ったファイル全体のスナップショット (POST /run の応答を保存したファイル) */
+  fingerprint?: { before: string; after: string };
 }
 
 /** 比べた結果の置き場所の印。--out に既にある置き場所を消してよいかは、これに SUMMARY_MARK が入っているかで決める */
@@ -145,14 +156,46 @@ function sharedFileKey(before: BridgeMeta | null, after: BridgeMeta | null): str
   return after.fileKey;
 }
 
-function readIndex(dir: string): void {
+interface ExportIndex {
+  sections?: { id?: unknown }[];
+  frames?: { id?: unknown }[];
+}
+
+function readIndex(dir: string): ExportIndex {
   const file = path.join(dir, "index.json");
   if (!existsSync(file)) throw new Error(`書き出しの置き場所でない (index.json が無い): ${dir}`);
   try {
-    JSON.parse(readFileSync(file, "utf8"));
+    return JSON.parse(readFileSync(file, "utf8")) as ExportIndex;
   } catch (e) {
     throw new Error(`index.json を読めない: ${file} (${e instanceof Error ? e.message : String(e)})`);
   }
+}
+
+/** 書き出した範囲の根。index.json の一番上の sections と frames は、/export の nodeIds のうち表示されているもの (入れ子は子孫) */
+function exportRootIds(index: ExportIndex): string[] {
+  return [...(index.sections ?? []), ...(index.frames ?? [])]
+    .map((entry) => entry.id)
+    .filter((id): id is string => typeof id === "string");
+}
+
+/**
+ * 前後のスナップショットを比べる。書き出しの印と別のファイルのスナップショットなら、取り違えなので断る
+ * (前後で別のファイルなら diffFingerprints が断る)
+ */
+function compareFingerprints(
+  files: { before: string; after: string },
+  insideIds: readonly string[],
+  fileKey: string | null
+): FingerprintDiff {
+  const before = readFingerprint(files.before);
+  const after = readFingerprint(files.after);
+  for (const fp of [before, after]) assertSameFile(fp, fileKey);
+  return diffFingerprints(before, after, insideIds);
+}
+
+function assertSameFile(fp: Fingerprint, fileKey: string | null): void {
+  if (fileKey === null || fp.fileKey == null || fp.fileKey === fileKey) return;
+  throw new Error(`書き出し (${fileKey}) と別のファイルのスナップショット (${fp.fileKey}) を渡している`);
 }
 
 /** 書き出しの時刻は書き出すたびに変わるので、比べる前に外す */
@@ -382,9 +425,13 @@ function writeTextDiff(outDir: string): string {
  * changes.diff・report.html・summary.json を書く。
  * PNG は画素で比べ、色が 1 つでも違う画素を赤く塗った差分画像を作る (書き出しの符号化が違うだけなら変わっていないと見る)
  */
-export function compareExports(beforeDir: string, afterDir: string, outDir: string): CompareSummary {
+export function compareExports(beforeDir: string, afterDir: string, outDir: string, options: CompareOptions = {}): CompareSummary {
   readIndex(beforeDir);
-  readIndex(afterDir);
+  const afterIndex = readIndex(afterDir);
+  const fileKey = sharedFileKey(readBridgeMeta(beforeDir), readBridgeMeta(afterDir));
+  // 置き場所を消す前に読み、スナップショットが読めなければ何も書かずに止める
+  const fingerprint =
+    options.fingerprint === undefined ? null : compareFingerprints(options.fingerprint, exportRootIds(afterIndex), fileKey);
   prepareOutDir(outDir, [beforeDir, afterDir]);
 
   const beforeFiles = keyed(listFiles(beforeDir));
@@ -428,7 +475,6 @@ export function compareExports(beforeDir: string, afterDir: string, outDir: stri
   const same = added.length === 0 && removed.length === 0 && renamed.length === 0 && changed.length === 0;
   const report = path.join(outDir, REPORT_FILE);
   const sameChanges = changesDiff === null ? [] : sameChangesOf(outDir, changesDiff);
-  const fileKey = sharedFileKey(readBridgeMeta(beforeDir), readBridgeMeta(afterDir));
   const summary: CompareSummary = {
     same,
     added,
@@ -441,6 +487,7 @@ export function compareExports(beforeDir: string, afterDir: string, outDir: stri
     sameChanges,
     report,
     fileKey,
+    fingerprint,
   };
   writeFile(report, reportHtml(summary, beforeDir, afterDir));
   writeFile(path.join(outDir, SUMMARY_FILE), JSON.stringify({ ...SUMMARY_MARK, ...summary }, null, 2) + "\n");
