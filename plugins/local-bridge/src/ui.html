@@ -194,7 +194,11 @@ function showRepoUpdate() {
     line.textContent =
       `リポジトリに新しい版がある (${devUpdateBehind} コミット)。clone したディレクトリで git pull && npm install && npm run build を実行し、dev サーバーを起動し直す`;
   }
-  if (devUpdateBehind !== shownUpdateBehind && devUpdateBehind !== 0) devLog(`リポジトリに新しい版がある (${devUpdateBehind} コミット)`);
+  if (devUpdateBehind !== shownUpdateBehind && devUpdateBehind !== 0) {
+    devLog(`リポジトリに新しい版がある (${devUpdateBehind} コミット)`);
+    // 小さくした画面 (高さ 32 px) には収まらないので、新しく分かったときだけ広げる (人がまた小さくしたら、次に数が変わるまで広げない)
+    setCompact(false);
+  }
   shownUpdateBehind = devUpdateBehind;
 }
 
