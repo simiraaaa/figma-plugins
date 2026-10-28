@@ -338,6 +338,43 @@ Plugin API のコードを送ると、Local Bridge が実行して返り値を J
   ブラウザで開いたサイトの sandbox の iframe から、依頼 (script のコードと合言葉を含む) を読み、結果を差し替えられる余地が残る (読んだ合言葉で `/run` は呼べない)。
   同じ iframe が、まだ持ち主のいない fileKey を名乗って `/next` を聞き続けると、そのファイルの持ち主になり、あとから開いた正しい Local Bridge が 409 で締め出される余地も残る。
 
+### Figma の画面を目的のノードへ飛ばす
+
+人に「Button のテーブルを開いて」のように頼まれたら、AI は Figma のリンクを OS で開く。
+リンクを開くと、Figma が前に出てそのファイルのタブに切り替わり、ノードのあるページに移り、ノードを選択して画面に収める (2026-10-28 に macOS の Figma デスクトップで、別のタブを前に出した状態から実測)。
+Local Bridge が繋がっていなくても、fileKey とノードの id が分かっていれば使える。
+
+1. ノードの id を調べる。人が Figma のリンクを渡していれば `node-id=` の値を使う。
+   名前で頼まれたときは、script の実行で探す。
+
+   ```sh
+   curl -s -X POST 'localhost:47717/run?file=<fileKey>' -H 'X-Run-Token: <合言葉>' \
+     --data-binary 'const page = figma.root.children.find((p) => p.name === "Button"); return page.findOne((n) => n.type === "COMPONENT_SET" && n.name === "Button").id;'
+   ```
+
+2. リンクを OS で開く。id の `:` は `-` にする (`9194:16582` なら `9194-16582`)。
+
+   ```sh
+   open 'figma://file/<fileKey>?node-id=<id>'
+   ```
+
+3. 飛んだかを script の実行で確かめる (`open` は Figma が受け取ったかどうかを返さない)。
+
+   ```sh
+   curl -s -X POST 'localhost:47717/run?file=<fileKey>' -H 'X-Run-Token: <合言葉>' \
+     --data-binary 'return { page: figma.currentPage.name, selection: figma.currentPage.selection.map((n) => n.id) };'
+   ```
+
+4. 飛んでいなければ、script の実行でページ・選択・表示を動かし、Figma を前に出すのは人に頼む (Plugin API ではウィンドウを前に出せない)。
+
+   ```sh
+   curl -s -X POST 'localhost:47717/run?file=<fileKey>' -H 'X-Run-Token: <合言葉>' \
+     --data-binary 'const node = await figma.getNodeByIdAsync("<id>"); let page = node; while (page.type !== "PAGE") page = page.parent; await figma.setCurrentPageAsync(page); figma.currentPage.selection = [node]; figma.viewport.scrollAndZoomIntoView([node]); return figma.currentPage.name;'
+   ```
+
+`open` は macOS のコマンド。
+Windows は未確認。
+
 ## 未確認の前提 (Figma 実機での動作確認推奨)
 
 - 終わらない script (同期の無限ループ) を送ったとき、Local Bridge を閉じて止められること
