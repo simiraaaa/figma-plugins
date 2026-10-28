@@ -57,6 +57,15 @@ curl -s -X POST '<URL>/export?file=<fileKey>&timeout=110' -d '{"nodeIds":["<id>"
 
 応答の `dir` を before として控える。
 大きいノードで時間が掛かるときの待ち方は、README の「使い方」の 3 にある。
+
+続けて、ファイル全体のノードの指紋を取り、保存する (書き出した範囲の外を script が変えていないかを 3 で確かめるため)。
+1 万ノードのファイルで 3 秒ほど、返り値は 500 KB ほど (2026-10-28 に実測)。
+
+```sh
+curl -s -X POST '<URL>/run?file=<fileKey>&timeout=580' -H 'X-Run-Token: <合言葉>' --data-binary @<リポ>/scripts/fingerprint.js > <書き出しの置き場所>/fingerprint/<seq>.json
+```
+
+`error` が返ったら (ノードが多すぎて返り値が上限を超えた、など)、指紋なしで進み、範囲の外は確かめられないことを人に伝える。
 書き出せなかったとき (HTTP 422・503・504) は、書き換えに進まない。
 README の「使い方」に従って書き出し直す。
 
@@ -135,6 +144,25 @@ npm --prefix <リポ> run -s compare -- <before> <after>
 書き出しの応答に `warnings` があれば、比べた結果を使う前に見る。
 画面がスリープしているあいだの書き出しは、警告つきで画像が欠けることがある。
 普段は出ない警告があれば、人に画面を起こしてもらい、書き出し直して比べ直す。
+
+1 で指紋を取っていれば、もう一度取って比べ、書き出した範囲の外の変化を見る。
+`--inside` には 1 の `nodeIds` を渡す。
+
+```sh
+curl -s -X POST '<URL>/run?file=<fileKey>&timeout=580' -H 'X-Run-Token: <合言葉>' --data-binary @<リポ>/scripts/fingerprint.js > <書き出しの置き場所>/fingerprint/<seq>.json
+npm --prefix <リポ> run -s fingerprint -- diff <前の指紋> <後の指紋> --inside <id>[,<id>...]
+```
+
+- `inside`: 範囲の中で変わったノード。書き出しの比較と同じものを指すはず。
+- `propagated`: 範囲の中のノードがメインコンポーネントの中にあり、その変化がインスタンスに映ったもの (`from` が元のノード)。
+  範囲の外にあるが、範囲の中の書き換えの結果。
+  映った先の数とページを人に伝え、そのコンポーネントを変えてよかったかを確かめる (2026-10-28 の実測では、Button の中のレイヤー名 1 つで 4 ページ 42 個のインスタンスが変わった)。
+- `outside`: それ以外の、範囲の外の変化。
+  空でなければ script が意図しない場所を変えている。
+  4 に進む (2 で成功以外が返っていれば、分けた結果を人に伝える)。
+
+指紋は種類・名前・表示・位置・大きさ・塗り・線・効果・角丸・レイアウト・文字・コンポーネントの property・子の並びから作る (`scripts/fingerprint.js` の冒頭)。
+見ていない値の変化は拾えない。
 
 before と after が `same: true` のときは、script の返り値で値が変わったかを見る。
 
