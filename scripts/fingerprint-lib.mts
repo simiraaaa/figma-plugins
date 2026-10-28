@@ -12,7 +12,7 @@ export interface Fingerprint {
   fileKey?: string | null;
   takenAt: string;
   pages: Record<string, string>;
-  /** "<ノードの id>|<親の id (ページ直下ならページの id。ページ自身なら空)>|<指紋>" (id に | は入らない) */
+  /** "<ノードの id>|<親の id (ページ直下ならページの id。ページ自身なら空)>|<指紋>[|<メインコンポーネントの id (インスタンスだけ)>]" (id に | は入らない) */
   nodes: string[];
 }
 
@@ -57,13 +57,15 @@ export function readFingerprint(file: string): Fingerprint {
 interface Entry {
   parent: string;
   hash: string;
+  /** インスタンスならメインコンポーネントの id。それ以外は空 */
+  main: string;
 }
 
 function index(fp: Fingerprint): Map<string, Entry> {
   return new Map(
     fp.nodes.map((line) => {
-      const [id, parent, hash] = line.split("|");
-      return [id, { parent, hash }];
+      const [id, parent, hash, main = ""] = line.split("|");
+      return [id, { parent, hash, main }];
     })
   );
 }
@@ -118,7 +120,8 @@ export function diffFingerprints(before: Fingerprint, after: Fingerprint, inside
   const propagated: PropagatedNode[] = [];
   const outside: ChangedNode[] = [];
   for (const change of changes.filter((c) => !within(c))) {
-    const from = propagatedFrom(change.id, insideIdsChanged);
+    const entry = (change.kind === "removed" ? b : a).get(change.id);
+    const from = propagatedFrom(change.id, entry?.main ?? "", insideIdsChanged);
     if (from === null) outside.push(change);
     else propagated.push({ ...change, from });
   }
@@ -131,9 +134,14 @@ export function diffFingerprints(before: Fingerprint, after: Fingerprint, inside
   };
 }
 
-/** インスタンスの中のノードの id (`I<インスタンス>;…;<元のノード>`) の元のノードが、範囲の中で変わったノードなら、その id */
-function propagatedFrom(id: string, insideIdsChanged: ReadonlySet<string>): string | null {
-  if (!id.startsWith("I")) return null;
-  const origin = id.slice(id.lastIndexOf(";") + 1);
-  return insideIdsChanged.has(origin) ? origin : null;
+/**
+ * 範囲の中で変わったノードが映った先なら、その元のノードの id。
+ * インスタンスの中のノード (`I<インスタンス>;…;<元のノード>`) は元のノードで、インスタンス本体 (メインコンポーネントに子を足す・消すと本体の子の並びが変わる) はメインコンポーネントで見る
+ */
+function propagatedFrom(id: string, main: string, insideIdsChanged: ReadonlySet<string>): string | null {
+  if (id.startsWith("I")) {
+    const origin = id.slice(id.lastIndexOf(";") + 1);
+    if (insideIdsChanged.has(origin)) return origin;
+  }
+  return main !== "" && insideIdsChanged.has(main) ? main : null;
 }

@@ -62,6 +62,22 @@ test("負例: 範囲の中のノードの変化がインスタンスに映った
   assert.deepEqual(diffFingerprints(unrelated, unrelatedAfter, ["1:2"]).outside, [{ id: "I2:1;1:3", page: "P1", kind: "changed" }]);
 });
 
+test("負例: メインコンポーネントに子を足すと変わるインスタンス本体は、メインコンポーネントが範囲の中で変わっていれば propagated", () => {
+  // 1:2 がメインコンポーネント、2:1 がそのインスタンス (4 つ目の欄がメインコンポーネントの id)
+  const before = base();
+  before.nodes = before.nodes.map((line) => (line.startsWith("2:1|") ? `${line}|1:2` : line));
+  const after = base({ "1:2": "child-added" });
+  after.nodes = after.nodes.map((line) => (line.startsWith("2:1|") ? "2:1|0:1|body-changed|1:2" : line));
+  const diff = diffFingerprints(before, after, ["1:2"]);
+  assert.deepEqual(diff.inside, [{ id: "1:2", page: "P1", kind: "changed" }]);
+  assert.deepEqual(diff.propagated, [{ id: "2:1", page: "P1", kind: "changed", from: "1:2" }]);
+  assert.deepEqual(diff.outside, []);
+  // メインコンポーネントが変わっていなければ、インスタンス本体の変化は outside
+  const unrelatedAfter = base();
+  unrelatedAfter.nodes = unrelatedAfter.nodes.map((line) => (line.startsWith("2:1|") ? "2:1|0:1|body-changed|1:2" : line));
+  assert.deepEqual(diffFingerprints(before, unrelatedAfter, ["1:2"]).outside, [{ id: "2:1", page: "P1", kind: "changed" }]);
+});
+
 test("負例: 指紋が同じでも親が変わったノードは moved として出す (別のページへ移したものを含む)", () => {
   const before = base();
   before.pages["0:2"] = "P2";
