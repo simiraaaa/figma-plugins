@@ -47,6 +47,7 @@ const FIELDS = [
   "effects",
   "cornerRadius",
   "vectorPaths",
+  "vectorNetwork",
   "arcData",
   "pointCount",
   "innerRadius",
