@@ -196,7 +196,7 @@ test("負例: after に無いノード (消えた画像・消えたノード) �
   assert.doesNotMatch(report, /node-id=5-6"/);
 });
 
-test("負例: 全体スナップショットを渡すと、範囲の外 → 映った先 → 範囲の中の順で report の先頭に出し、summary にも入れる", () => {
+test("負例: 全体スナップショットを渡すと、範囲の外 → 映った先の順で report の先頭に出し (範囲の中は載せない)、summary には 3 つとも入れる", () => {
   const node = { id: "1:2", name: "Card", children: [{ id: "1:3", name: "Title", text: "a" }] };
   const after = { ...node, children: [{ id: "1:3", name: "Title", text: "b" }] };
   // 範囲 (1:2) の中の 1:3 が変わり、それがインスタンス I2:1;1:3 に映り、範囲の外の 2:1 も変わった
@@ -217,8 +217,9 @@ test("負例: 全体スナップショットを渡すと、範囲の外 → 映�
     return i;
   };
   assert.ok(at('id="outside"') < at('id="propagated"'), "範囲の外が映った先より先");
-  assert.ok(at('id="propagated"') < at('id="inside"'), "映った先が範囲の中より先");
-  assert.ok(at('id="inside"') < at('id="text"'), "ファイル全体の比較が構造の差分より先");
+  assert.ok(at('id="propagated"') < at('id="text"'), "範囲の外の変化が構造の差分より先");
+  // 範囲の中の変化は意図したもので、画像と構造の差分に出るので、先頭には載せない
+  assert.doesNotMatch(report, /id="inside"/);
   // 範囲の外のノードにも Figma で開くリンクが付く (入れ子の id の ; は URL の符号化)
   assert.match(report, /href="figma:\/\/file\/KEY\?node-id=2-1"/);
   assert.match(report, /node-id=I2-1%3B1-3"/);

@@ -388,16 +388,16 @@ function fingerprintGroup(id: string, title: string, hint: string, nodes: readon
   return `<div id="${id}" class="group"><p><b>${title} ${nodes.length}</b></p><p class="hint">${hint}</p>${body}</div>`;
 }
 
-/** 範囲の外 → 映った先 → 範囲の中の順。先に見るべきものを上に置く */
+/** 範囲の外 → 映った先の順。範囲の中の変化は意図したもので、下の画像と構造の差分に出るので載せない (summary.json の inside にはある) */
 function fingerprintSection(diff: FingerprintDiff | null, fileKey: string | null): string {
   if (diff === null) {
-    return `<section id="fingerprint"><h2>ファイル全体の比較</h2>
+    return `<section id="fingerprint"><h2>書き出した範囲の外の変化</h2>
 <p class="hint">前後の全体スナップショットを渡していないので、書き出した範囲の外は見ていない (compare に --fingerprint-before と --fingerprint-after を渡すと出る)。</p></section>`;
   }
-  return `<section id="fingerprint"><h2>ファイル全体の比較 (全体スナップショット)</h2>
+  return `<section id="fingerprint"><h2>書き出した範囲の外の変化 (全体スナップショット)</h2>
 <p class="hint">ファイル全体のノード (${diff.nodes.before.toLocaleString("en-US")} → ${diff.nodes.after.toLocaleString(
     "en-US"
-  )}) の前後を比べ、書き出した範囲の外で変わったものを先に出す。${openHint(fileKey)}</p>
+  )}) の前後を比べたもの。書き出した範囲の中の変化 (${diff.inside.length}) は、下の画像と構造の差分で見る。${openHint(fileKey)}</p>
 ${fingerprintGroup(
   "outside",
   "書き出した範囲の外で変わったノード",
@@ -412,7 +412,6 @@ ${fingerprintGroup(
   diff.propagated,
   fileKey
 )}
-${fingerprintGroup("inside", "書き出した範囲の中で変わったノード", "下の画像と構造の差分に出るもの。", diff.inside, fileKey)}
 </section>`;
 }
 
@@ -560,7 +559,6 @@ export function reportHtml(summary: CompareSummary, beforeDir: string, afterDir:
 <ul class="counts">
 ${fp === null ? "" : count("範囲の外で変わったノード", fp.outside.length, "#outside")}
 ${fp === null ? "" : count("インスタンスに映ったノード", fp.propagated.length, "#propagated")}
-${fp === null ? "" : count("範囲の中で変わったノード", fp.inside.length, "#inside")}
 ${count("見た目が変わった画像", images.length, "#images")}
 ${count("構造の差分があるファイル", textFiles, "#text")}
 ${count("足された", summary.added.length, "#files")}
