@@ -32,6 +32,8 @@ interface ExportSpec {
   blankPngs?: string[];
   /** index.json の一番上の frames に載せる id (書き出した範囲の根)。既定は 1:2 */
   rootIds?: string[];
+  /** index.json の meta.scope。ページを書き出したときは page:<ページ名> */
+  scope?: string;
 }
 
 function writeExport(dir: string, spec: ExportSpec): string {
@@ -41,7 +43,8 @@ function writeExport(dir: string, spec: ExportSpec): string {
     writeFileSync(path.join(dir, BRIDGE_META_FILE), JSON.stringify({ fileKey: spec.fileKey, fileName: "f" }));
   }
   const frames = (spec.rootIds ?? ["1:2"]).map((id) => ({ id }));
-  const index = { meta: { fileName: "f", exportedAt: spec.exportedAt ?? "2026-10-26T00:00:00.000Z" }, sections: [], frames };
+  const meta = { fileName: "f", exportedAt: spec.exportedAt ?? "2026-10-26T00:00:00.000Z", scope: spec.scope ?? "nodes" };
+  const index = { meta, sections: [], frames };
   writeFileSync(path.join(dir, "index.json"), JSON.stringify(index, null, 2));
   writeFileSync(path.join(dir, `${name}.1-2.json`), JSON.stringify(spec.node ?? { name: "frame" }, null, 2) + "\n");
   if (spec.png) {
@@ -270,6 +273,53 @@ test("負例: 書き出しの印と別のファイルのスナップショット
     /別のファイルのスナップショット/
   );
   assert.equal(existsSync(out), false);
+  // 前後の書き出しが別のファイル (印が KEY1 と KEY2) でも、それぞれの印と照らして断る
+  assert.throws(
+    () =>
+      compare({ fileKey: "KEY1" }, { fileKey: "KEY2" }, { fingerprint: fingerprintPair({ fileKey: "KEY1" }, { fileKey: "KEY1" }) }),
+    /別のファイルのスナップショット \(KEY1\)/
+  );
+});
+
+test("負例: ページを書き出したときは、ページ自身を範囲の根にする (直下のノードを消しても outside に出さない)。同じ名前のページが 2 つなら --inside を求める", () => {
+  // ページ P1 (0:1) を書き出した。after の根は残った直下のノード (1:2) だけで、消した 2:1 とページ自身は載らない
+  const pageLine = (hash: string) => `0:1||${hash}`;
+  const fingerprint = fingerprintPair(
+    { nodes: (nodes) => [pageLine("children-a"), ...nodes] },
+    { nodes: (nodes) => [pageLine("children-b"), ...nodes.filter((line) => !line.startsWith("2:1|") && !line.startsWith("I2:1;"))] }
+  );
+  const summary = compare(
+    { fileKey: "KEY", scope: "page:P1", rootIds: ["1:2", "2:1"] },
+    { fileKey: "KEY", scope: "page:P1", rootIds: ["1:2"] },
+    { fingerprint }
+  );
+  assert.deepEqual(summary.fingerprint?.outside, []);
+  assert.deepEqual(
+    summary.fingerprint?.inside.map((n) => [n.id, n.kind]),
+    [
+      ["0:1", "changed"],
+      ["2:1", "removed"],
+      ["I2:1;1:3", "removed"],
+    ]
+  );
+  // --inside を渡せば index.json を見ない
+  const explicit = compare(
+    { fileKey: "KEY", scope: "page:P1", rootIds: ["1:2", "2:1"] },
+    { fileKey: "KEY", scope: "page:P1", rootIds: ["1:2"] },
+    { fingerprint, inside: ["1:2"] }
+  );
+  assert.deepEqual(explicit.fingerprint?.inside, []);
+  assert.equal(explicit.fingerprint?.outside.length, 3);
+  const twoPages = fingerprintPair({}, { hashes: { "1:3": "x" } });
+  for (const file of [twoPages.before, twoPages.after]) {
+    const parsed = JSON.parse(readFileSync(file, "utf8")) as { value: { pages: Record<string, string> } };
+    parsed.value.pages["0:2"] = "P1";
+    writeFileSync(file, JSON.stringify(parsed));
+  }
+  assert.throws(
+    () => compare({ fileKey: "KEY", scope: "page:P1" }, { fileKey: "KEY", scope: "page:P1" }, { fingerprint: twoPages }),
+    /同じ名前のページが 2 件/
+  );
 });
 
 test("負例: 片方にだけ印があっても、同じファイルの書き出しと確かめられないので、Figma で開くリンクを付けない", () => {

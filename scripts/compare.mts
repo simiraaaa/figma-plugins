@@ -5,6 +5,7 @@
  *   npm run compare -- <before の書き出し> <after の書き出し> --out <ディレクトリ>
  *   npm run compare -- <before の書き出し> <after の書き出し> --fingerprint-before <前の json> --fingerprint-after <後の json>
  *       # ファイル全体のスナップショット (scripts/fingerprint.js の返り値) も比べ、書き出した範囲の外の変化を report の先頭に出す
+ *       # 書き出した範囲は after の index.json から決める。--inside <id>[,<id>...] で指定もできる
  *
  * 終了コードは、変化の有無に関わらず 0 (判定は出力の JSON の欄で行う。fingerprint.mts とは違う)。
  */
@@ -13,10 +14,15 @@ import { parseArgs } from "node:util";
 import { compareExports, defaultCompareDir, isDirectory } from "./compare-lib.mts";
 
 const USAGE =
-  "使い方: npm run compare -- <before の書き出しのディレクトリ> <after の書き出しのディレクトリ> [--out <ディレクトリ>] [--fingerprint-before <前の json> --fingerprint-after <後の json>]";
+  "使い方: npm run compare -- <before の書き出しのディレクトリ> <after の書き出しのディレクトリ> [--out <ディレクトリ>] [--fingerprint-before <前の json> --fingerprint-after <後の json> [--inside <id>[,<id>...]]]";
 const { values, positionals } = parseArgs({
   allowPositionals: true,
-  options: { out: { type: "string" }, "fingerprint-before": { type: "string" }, "fingerprint-after": { type: "string" } },
+  options: {
+    out: { type: "string" },
+    "fingerprint-before": { type: "string" },
+    "fingerprint-after": { type: "string" },
+    inside: { type: "string" },
+  },
 });
 const fpBefore = values["fingerprint-before"];
 const fpAfter = values["fingerprint-after"];
@@ -30,4 +36,8 @@ const [beforeDir, afterDir] = positionals.map((p) => path.resolve(p));
 const outDir = path.resolve(values.out ?? defaultCompareDir(beforeDir, afterDir));
 const fingerprint =
   fpBefore === undefined || fpAfter === undefined ? undefined : { before: path.resolve(fpBefore), after: path.resolve(fpAfter) };
-console.log(JSON.stringify(compareExports(beforeDir, afterDir, outDir, { fingerprint }), null, 2));
+const inside = values.inside
+  ?.split(",")
+  .map((s) => s.trim())
+  .filter((s) => s !== "");
+console.log(JSON.stringify(compareExports(beforeDir, afterDir, outDir, { fingerprint, inside }), null, 2));

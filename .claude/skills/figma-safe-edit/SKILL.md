@@ -147,7 +147,8 @@ npm --prefix <リポ> run -s compare -- <before> <after> --fingerprint-before <�
 - `fileKey`: 書き出した Figma のファイル。Local Bridge の書き出しでなければ `null` で、report にリンクは付かない。
 - `fingerprint`: ファイル全体の比較 (下の `inside`・`propagated`・`outside`)。スナップショットを渡していなければ `null`。
   `same` は書き出しだけを見るので、書き出しに映らないノード (非表示の子など) の変化は `same: true` のまま `inside` に出る。
-  書き出した範囲は after の `index.json` の根 (1 の `nodeIds` のうち表示されているもの)。
+  書き出した範囲は after の `index.json` の根 (1 の `nodeIds` のうち表示されているもの。ページを書き出したならそのページ)。
+  同じ名前のページが 2 つ以上あって決められないときは、`--inside <id>[,<id>...]` で 1 の `nodeIds` を渡す。
   スナップショットの `fileKey` が書き出しの `fileKey` と違えば、取り違えなので断る。
 
 書き出しの応答に `warnings` があれば、比べた結果を使う前に見る。

@@ -74,7 +74,7 @@ export interface CompareSummary {
   /** 書き出した Figma のファイル (dev サーバーが添えた印から。after が無ければ before の印)。無ければ null で、report に Figma を開くリンクを付けない */
   fileKey: string | null;
   /**
-   * ファイル全体のスナップショット (scripts/fingerprint.js) の前後の比較。書き出した範囲は after の index.json の根 (一番上の sections と frames)。
+   * ファイル全体のスナップショット (scripts/fingerprint.js) の前後の比較。書き出した範囲は CompareOptions.inside か、after の index.json から決めた根。
    * スナップショットを渡さなければ null で、範囲の外は見ていない
    */
   fingerprint: FingerprintDiff | null;
@@ -83,6 +83,8 @@ export interface CompareSummary {
 export interface CompareOptions {
   /** 書き換えの前後に取ったファイル全体のスナップショット (POST /run の応答を保存したファイル) */
   fingerprint?: { before: string; after: string };
+  /** 書き出した範囲の根の id。省略すると after の index.json から決める (/export の nodeIds か、ページを書き出したならそのページ) */
+  inside?: string[];
 }
 
 /** 比べた結果の置き場所の印。--out に既にある置き場所を消してよいかは、これに SUMMARY_MARK が入っているかで決める */
@@ -157,9 +159,13 @@ function sharedFileKey(before: BridgeMeta | null, after: BridgeMeta | null): str
 }
 
 interface ExportIndex {
+  meta?: { scope?: unknown };
   sections?: { id?: unknown }[];
   frames?: { id?: unknown }[];
 }
+
+/** ページを書き出したときの index.json の meta.scope (plugins/local-bridge/src/code.ts の devTarget) */
+const PAGE_SCOPE_PREFIX = "page:";
 
 function readIndex(dir: string): ExportIndex {
   const file = path.join(dir, "index.json");
@@ -171,8 +177,22 @@ function readIndex(dir: string): ExportIndex {
   }
 }
 
-/** 書き出した範囲の根。index.json の一番上の sections と frames は、/export の nodeIds のうち表示されているもの (入れ子は子孫) */
-function exportRootIds(index: ExportIndex): string[] {
+/**
+ * 書き出した範囲の根。index.json の一番上の sections と frames は、/export の nodeIds のうち表示されているもの (入れ子は子孫)。
+ * ページを書き出したときの根はページ直下のノードで、ページ自身と消した子が入らないので、スナップショットの pages から名前でページの id を引く
+ */
+function exportRootIds(index: ExportIndex, after: Fingerprint): string[] {
+  const scope = index.meta?.scope;
+  if (typeof scope === "string" && scope.startsWith(PAGE_SCOPE_PREFIX)) {
+    const name = scope.slice(PAGE_SCOPE_PREFIX.length);
+    const ids = Object.entries(after.pages)
+      .filter(([, pageName]) => pageName === name)
+      .map(([id]) => id);
+    if (ids.length !== 1) {
+      throw new Error(`書き出したページ「${name}」の id を決められない (同じ名前のページが ${ids.length} 件)。--inside でページの id を渡す`);
+    }
+    return ids;
+  }
   return [...(index.sections ?? []), ...(index.frames ?? [])]
     .map((entry) => entry.id)
     .filter((id): id is string => typeof id === "string");
@@ -180,22 +200,24 @@ function exportRootIds(index: ExportIndex): string[] {
 
 /**
  * 前後のスナップショットを比べる。書き出しの印と別のファイルのスナップショットなら、取り違えなので断る
- * (前後で別のファイルなら diffFingerprints が断る)
+ * (前後それぞれの印と照らす。前後で別のファイルなら diffFingerprints が断る)
  */
 function compareFingerprints(
   files: { before: string; after: string },
-  insideIds: readonly string[],
-  fileKey: string | null
+  metas: { before: BridgeMeta | null; after: BridgeMeta | null },
+  afterIndex: ExportIndex,
+  insideIds: readonly string[] | undefined
 ): FingerprintDiff {
   const before = readFingerprint(files.before);
   const after = readFingerprint(files.after);
-  for (const fp of [before, after]) assertSameFile(fp, fileKey);
-  return diffFingerprints(before, after, insideIds);
+  assertSameFile(before, metas.before);
+  assertSameFile(after, metas.after);
+  return diffFingerprints(before, after, insideIds ?? exportRootIds(afterIndex, after));
 }
 
-function assertSameFile(fp: Fingerprint, fileKey: string | null): void {
-  if (fileKey === null || fp.fileKey == null || fp.fileKey === fileKey) return;
-  throw new Error(`書き出し (${fileKey}) と別のファイルのスナップショット (${fp.fileKey}) を渡している`);
+function assertSameFile(fp: Fingerprint, meta: BridgeMeta | null): void {
+  if (meta === null || fp.fileKey == null || fp.fileKey === meta.fileKey) return;
+  throw new Error(`書き出し (${meta.fileKey}) と別のファイルのスナップショット (${fp.fileKey}) を渡している`);
 }
 
 /** 書き出しの時刻は書き出すたびに変わるので、比べる前に外す */
@@ -428,10 +450,11 @@ function writeTextDiff(outDir: string): string {
 export function compareExports(beforeDir: string, afterDir: string, outDir: string, options: CompareOptions = {}): CompareSummary {
   readIndex(beforeDir);
   const afterIndex = readIndex(afterDir);
-  const fileKey = sharedFileKey(readBridgeMeta(beforeDir), readBridgeMeta(afterDir));
+  const metas = { before: readBridgeMeta(beforeDir), after: readBridgeMeta(afterDir) };
+  const fileKey = sharedFileKey(metas.before, metas.after);
   // 置き場所を消す前に読み、スナップショットが読めなければ何も書かずに止める
   const fingerprint =
-    options.fingerprint === undefined ? null : compareFingerprints(options.fingerprint, exportRootIds(afterIndex), fileKey);
+    options.fingerprint === undefined ? null : compareFingerprints(options.fingerprint, metas, afterIndex, options.inside);
   prepareOutDir(outDir, [beforeDir, afterDir]);
 
   const beforeFiles = keyed(listFiles(beforeDir));
