@@ -4,6 +4,7 @@
  */
 import { existsSync, readFileSync, statSync } from "node:fs";
 import path from "node:path";
+import { figmaNodeLink, isNodeId } from "./bridge-meta.mts";
 import type { CompareSummary, ImageChange, SameChange } from "./compare-lib.mts";
 
 export const TEXT_EXTENSIONS: ReadonlySet<string> = new Set([".json", ".md", ".svg", ".txt"]);
@@ -53,6 +54,31 @@ function pct(value: number, whole: number): string {
   return `${((value / whole) * 100).toFixed(3)}%`;
 }
 
+/** Figma デスクトップでそのノードを開くリンク。fileKey が無い (Local Bridge 以外が置いた書き出し) ときと、ノードの id でない (変数・スタイル) ときは付けない */
+function openInFigma(fileKey: string | null, nodeId: string): string {
+  if (fileKey === null || !isNodeId(nodeId)) return "";
+  return ` <a class="figma" href="${escapeHtml(figmaNodeLink(fileKey, nodeId))}">Figma で開く</a>`;
+}
+
+/**
+ * 書き出しのファイル名 (<名前>.<ノード ID>.<拡張子>) からノード ID (`12:34` の形) を取り出す。
+ * ファイル名では ID の `:` が `-` になっている。`I1:2;3:4` のような入れ子の ID は `-` だけになって戻せないので、数字 2 つの形だけ扱う
+ */
+function nodeIdOfPath(rel: string): string | null {
+  const stem = path.posix.basename(rel, path.posix.extname(rel));
+  const id = stem.slice(stem.lastIndexOf(".") + 1);
+  return /^\d+-\d+$/.test(id) ? id.replace("-", ":") : null;
+}
+
+function openHint(fileKey: string | null): string {
+  return fileKey === null ? "" : "「Figma で開く」を押すと、Figma デスクトップがそのノードを選択して前に出る。";
+}
+
+function openImageInFigma(fileKey: string | null, rel: string): string {
+  const id = nodeIdOfPath(rel);
+  return id === null ? "" : openInFigma(fileKey, id);
+}
+
 // ---------------------------------------------------------------------------
 // 画像
 // ---------------------------------------------------------------------------
@@ -84,7 +110,9 @@ function regionMap(image: ImageChange): string {
 
 function imageArticle(image: ImageChange, index: number, summary: CompareSummary): string {
   const id = `img-${index + 1}`;
-  const title = `<h3><code>${escapeHtml(image.file)}</code></h3>`;
+  // 消えた画像のノードは after に無く、Figma で開けない
+  const link = summary.removed.includes(image.file) ? "" : openImageInFigma(summary.fileKey, image.file);
+  const title = `<h3><code>${escapeHtml(image.file)}</code>${link}</h3>`;
   if (summary.added.includes(image.file) || summary.removed.includes(image.file)) {
     const added = summary.added.includes(image.file);
     const row = added
@@ -175,31 +203,43 @@ function splitDiff(text: string): FileDiff[] {
   return files.filter((f) => f.file !== "");
 }
 
-/** 構造の json の写しから、ノード ID と名前の対応を集める (差分の区切りの行にノードの名前を出すため) */
-function nodeNames(outDir: string, file: string): Map<string, string> {
-  const names = new Map<string, string>();
-  const walk = (value: unknown): void => {
-    if (Array.isArray(value)) value.forEach(walk);
+/** 構造の json の写しから集めた、そのファイルのノードの索引 */
+interface NodeIndex {
+  /** ノード ID と名前の対応 (before と after の両方から。差分の区切りの行にノードの名前を出すため) */
+  names: Map<string, string>;
+  /** after の書き出しにあるノード ID。無いノード (消えたもの) は Figma で開けないのでリンクを付けない */
+  afterIds: Set<string>;
+}
+
+function nodeIndex(outDir: string, file: string): NodeIndex {
+  const index: NodeIndex = { names: new Map(), afterIds: new Set() };
+  const walk = (value: unknown, after: boolean): void => {
+    if (Array.isArray(value)) value.forEach((v) => walk(v, after));
     else if (typeof value === "object" && value !== null) {
       const record = value as Record<string, unknown>;
-      if (typeof record.id === "string" && typeof record.name === "string") names.set(record.id, record.name);
-      Object.values(record).forEach(walk);
+      if (typeof record.id === "string") {
+        if (typeof record.name === "string") index.names.set(record.id, record.name);
+        if (after) index.afterIds.add(record.id);
+      }
+      Object.values(record).forEach((v) => walk(v, after));
     }
   };
-  for (const side of ["before", "after"]) {
+  for (const side of ["before", "after"] as const) {
     const copy = path.join(outDir, side, file);
     if (!file.endsWith(".json") || !existsSync(copy)) continue;
     try {
-      walk(JSON.parse(readFileSync(copy, "utf8")));
+      walk(JSON.parse(readFileSync(copy, "utf8")), side === "after");
     } catch {
       // 名前を出せないだけで、差分はそのまま載せられる
     }
   }
-  return names;
+  return index;
 }
 
-function nodeLabel(nodeId: string | null, names: Map<string, string>): string {
-  return nodeId === null ? "" : `${escapeHtml(names.get(nodeId) ?? "")} <code>${escapeHtml(nodeId)}</code>`;
+function nodeLabel(nodeId: string | null, index: NodeIndex, fileKey: string | null): string {
+  if (nodeId === null) return "";
+  const link = index.afterIds.has(nodeId) ? openInFigma(fileKey, nodeId) : "";
+  return `${escapeHtml(index.names.get(nodeId) ?? "")} <code>${escapeHtml(nodeId)}</code>${link}`;
 }
 
 function changeLine(line: string): string {
@@ -207,13 +247,13 @@ function changeLine(line: string): string {
   return `<span class="${cls}">${escapeHtml(line)}</span>`;
 }
 
-function hunkBlock(hunk: Hunk, names: Map<string, string>): string {
-  const node = hunk.nodeId === null ? "" : ` <span class="node">${nodeLabel(hunk.nodeId, names)}</span>`;
+function hunkBlock(hunk: Hunk, index: NodeIndex, fileKey: string | null): string {
+  const node = hunk.nodeId === null ? "" : ` <span class="node">${nodeLabel(hunk.nodeId, index, fileKey)}</span>`;
   return `<span class="hunk">${escapeHtml(hunk.header)}${node}</span>${hunk.lines.map(changeLine).join("")}`;
 }
 
 /** 足した・消した行の中身 (字下げを除く) が同じ区切りを、同じ変化としてまとめる。2 箇所以上のものだけ、多い順に返す */
-function groupSameChanges(files: readonly FileDiff[], names: ReadonlyMap<string, Map<string, string>>): SameChange[] {
+function groupSameChanges(files: readonly FileDiff[], indexes: ReadonlyMap<string, NodeIndex>): SameChange[] {
   const groups = new Map<string, SameChange>();
   // SVG のコードは閉じておく約束なので、まとめにも出さない
   for (const file of files.filter((f) => !f.file.toLowerCase().endsWith(".svg"))) {
@@ -223,8 +263,10 @@ function groupSameChanges(files: readonly FileDiff[], names: ReadonlyMap<string,
       const key = changes.map((l) => l[0] + l.slice(1).trim()).join("\n");
       const group = groups.get(key) ?? { count: 0, lines: changes, places: [] };
       group.count++;
-      const name = hunk.nodeId === null ? null : (names.get(file.file)!.get(hunk.nodeId) ?? null);
-      group.places.push({ file: file.file, nodeId: hunk.nodeId, name });
+      const index = indexes.get(file.file)!;
+      const name = hunk.nodeId === null ? null : (index.names.get(hunk.nodeId) ?? null);
+      const inAfter = hunk.nodeId !== null && index.afterIds.has(hunk.nodeId);
+      group.places.push({ file: file.file, nodeId: hunk.nodeId, name, inAfter });
       groups.set(key, group);
     }
   }
@@ -234,29 +276,33 @@ function groupSameChanges(files: readonly FileDiff[], names: ReadonlyMap<string,
 /** changes.diff から同じ変化のまとめを作る (summary.json と report の両方で使う)。report に載せきれない大きな差分でも作る */
 export function sameChangesOf(outDir: string, changesDiff: string): SameChange[] {
   const files = splitDiff(readFileSync(changesDiff, "utf8"));
-  const names = new Map(files.map((f) => [f.file, nodeNames(outDir, f.file)]));
-  return groupSameChanges(files, names);
+  const indexes = new Map(files.map((f) => [f.file, nodeIndex(outDir, f.file)]));
+  return groupSameChanges(files, indexes);
 }
 
-function groupSection(groups: readonly SameChange[]): string {
+function groupSection(groups: readonly SameChange[], fileKey: string | null): string {
   if (groups.length === 0) return "";
   return `<h3>同じ変化のまとめ</h3>
 <p class="hint">同じ中身の変化 (足した・消した行が同じもの) をまとめ、多い順に並べる。場所を開くと、どのノードかが分かる。</p>
-${groups.slice(0, MAX_GROUPS).map(groupBlock).join("\n")}${
+${groups
+  .slice(0, MAX_GROUPS)
+  .map((g) => groupBlock(g, fileKey))
+  .join("\n")}${
     groups.length > MAX_GROUPS
       ? `<p class="hint">ほかに ${groups.length - MAX_GROUPS} 種類ある (全部は summary.json の sameChanges)。</p>`
       : ""
   }`;
 }
 
-function groupBlock(group: SameChange): string {
+function groupBlock(group: SameChange, fileKey: string | null): string {
   const places = group.places
-    .map(
-      (p) =>
-        `<li>${p.nodeId === null ? "(ノード不明)" : `${escapeHtml(p.name ?? "")} <code>${escapeHtml(p.nodeId)}</code>`} <span class="file">${escapeHtml(
-          p.file
-        )}</span></li>`
-    )
+    .map((p) => {
+      const node =
+        p.nodeId === null
+          ? "(ノード不明)"
+          : `${escapeHtml(p.name ?? "")} <code>${escapeHtml(p.nodeId)}</code>${p.inAfter ? openInFigma(fileKey, p.nodeId) : ""}`;
+      return `<li>${node} <span class="file">${escapeHtml(p.file)}</span></li>`;
+    })
     .join("");
   const head = group.lines.slice(0, GROUP_PREVIEW_LINES).map(changeLine).join("");
   const rest =
@@ -270,7 +316,7 @@ function groupBlock(group: SameChange): string {
 <details><summary>場所</summary><ul>${places}</ul></details></div>`;
 }
 
-function fileDiffBlock(diff: FileDiff, names: Map<string, string>, openAll: boolean): string {
+function fileDiffBlock(diff: FileDiff, index: NodeIndex, openAll: boolean, fileKey: string | null): string {
   const isSvg = diff.file.toLowerCase().endsWith(".svg");
   const long = diff.lineCount > OPEN_DIFF_MAX_LINES;
   const open = openAll && !isSvg && !long;
@@ -278,7 +324,7 @@ function fileDiffBlock(diff: FileDiff, names: Map<string, string>, openAll: bool
   return `<details class="file"${open ? " open" : ""}><summary><code>${escapeHtml(diff.file)}</code> <span class="add">+${
     diff.added
   }</span> <span class="del">-${diff.removed}</span> <span class="note">${diff.hunks.length} 箇所${note === "" ? "" : ` ・ ${note}`}</span></summary>
-<pre>${diff.hunks.map((h) => hunkBlock(h, names)).join("")}</pre></details>`;
+<pre>${diff.hunks.map((h) => hunkBlock(h, index, fileKey)).join("")}</pre></details>`;
 }
 
 function textSection(summary: CompareSummary): string {
@@ -286,21 +332,21 @@ function textSection(summary: CompareSummary): string {
   const size = statSync(summary.changesDiff).size;
   if (size > REPORT_TEXT_DIFF_MAX) {
     return `<section id="text"><h2>構造の差分</h2>
-${groupSection(summary.sameChanges)}
+${groupSection(summary.sameChanges, summary.fileKey)}
 <p>ファイルごとの差分は大きい (${Math.round(size / 1024)} KB) ので載せていない。<a href="${CHANGES_DIFF_FILE}">${CHANGES_DIFF_FILE}</a> を開く。</p></section>`;
   }
   const files = splitDiff(readFileSync(summary.changesDiff, "utf8"));
-  const names = new Map(files.map((f) => [f.file, nodeNames(summary.outDir, f.file)]));
+  const indexes = new Map(files.map((f) => [f.file, nodeIndex(summary.outDir, f.file)]));
   const groups = summary.sameChanges;
   const totalLines = files.reduce((n, f) => n + f.lineCount, 0);
   const openAll = files.length <= OPEN_FILES_MAX && totalLines <= OPEN_TOTAL_LINES_MAX;
-  const groupsHtml = groups.length === 0 ? "" : `${groupSection(groups)}\n<h3>ファイルごとの差分</h3>`;
+  const groupsHtml = groups.length === 0 ? "" : `${groupSection(groups, summary.fileKey)}\n<h3>ファイルごとの差分</h3>`;
   return `<section id="text"><h2>構造の差分</h2>
 <p class="hint">${
     openAll ? "SVG のコードと長い差分は閉じてある。" : "ファイルや行が多いので、全部閉じてある。"
-  }見出しを押すと開く。区切りの行には、変わった箇所の直前に始まるノードの名前と ID が出る。全部は <a href="${CHANGES_DIFF_FILE}">${CHANGES_DIFF_FILE}</a></p>
+  }見出しを押すと開く。区切りの行には、変わった箇所の直前に始まるノードの名前と ID が出る。${openHint(summary.fileKey)}全部は <a href="${CHANGES_DIFF_FILE}">${CHANGES_DIFF_FILE}</a></p>
 ${groupsHtml}
-${files.map((f) => fileDiffBlock(f, names.get(f.file)!, openAll)).join("\n")}</section>`;
+${files.map((f) => fileDiffBlock(f, indexes.get(f.file)!, openAll, summary.fileKey)).join("\n")}</section>`;
 }
 
 // ---------------------------------------------------------------------------
@@ -373,6 +419,7 @@ const STYLE = `
   pre .node, .group li { color: var(--fg); }
   pre .node { font-weight: 600; }
   pre .node code { color: var(--muted); font-weight: normal; }
+  a.figma { font-weight: normal; color: var(--muted); font-size: 12px; }
   footer { color: var(--muted); padding: 16px; border-top: 1px solid var(--line); }
   @media (max-width: 760px) { .row, .overview { flex-direction: column; } .map { position: static; flex-basis: auto; width: 100%; } .regions { grid-template-columns: 1fr; } }
 `;
@@ -444,7 +491,7 @@ ${
   images.length === 0
     ? ""
     : `<section id="images"><h2>見た目が変わった画像 (違う画素の多い順)</h2>
-<p class="hint">離れた所の変化は、1 箇所ずつ切り出して並べる。左の図の枠の番号が、切り出しの番号。画像を押すと原寸で開く。</p>
+<p class="hint">離れた所の変化は、1 箇所ずつ切り出して並べる。左の図の枠の番号が、切り出しの番号。画像を押すと原寸で開く。${openHint(summary.fileKey)}</p>
 <div class="grid">${cards}</div>
 ${images.map((image, i) => imageArticle(image, i, summary)).join("\n")}
 </section>`

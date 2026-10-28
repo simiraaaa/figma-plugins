@@ -36,6 +36,7 @@ import {
   type StatusReply,
 } from "../scripts/dev-server-lib.mts";
 import { releaseManifest } from "../scripts/release-lib.mts";
+import { BRIDGE_META_FILE } from "../scripts/bridge-meta.mts";
 // 実行するのは esbuild 産物、型は同じソースから取る(産物側は型を持たない)
 import * as zipDist from "../plugins/structure-dump/dist/zip.mjs";
 const { buildZip, utf8Encode } =
@@ -458,6 +459,20 @@ test("status?after は新しい結果が届くまで待つ (build で走り直�
     const res = await waiting;
     assert.equal(res.status, 200);
     assert.equal((await json<DevStatus>(res)).version, 2);
+  } finally {
+    close();
+  }
+});
+
+test("負例: 書き出しの展開先に、行き先のファイルの印 (.local-bridge.json) を添える", async () => {
+  const { base, close } = await startServer();
+  try {
+    const polled = pluginNext(base);
+    const exported = fetch(`${base}/export?file=${FILE}`, { method: "POST", body: "" });
+    await pluginPost(base, "result", await json<Next>(polled), sampleZip());
+    const status = await json<DevStatus>(exported);
+    const meta = JSON.parse(readFileSync(path.join(status.dir as string, BRIDGE_META_FILE), "utf8")) as Record<string, unknown>;
+    assert.deepEqual(meta, { fileKey: FILE_A.key, fileName: FILE_A.name });
   } finally {
     close();
   }

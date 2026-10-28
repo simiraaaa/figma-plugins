@@ -19,6 +19,7 @@ import {
 import path from "node:path";
 import pixelmatch from "pixelmatch";
 import { PNG } from "pngjs";
+import { type BridgeMeta, readBridgeMeta } from "./bridge-meta.mts";
 import { CHANGES_DIFF_FILE, cropFile, NODE_ID_LINE, reportHtml, sameChangesOf, TEXT_EXTENSIONS } from "./compare-report.mts";
 
 export interface Region {
@@ -51,8 +52,8 @@ export interface SameChange {
   count: number;
   /** 足した・消した行 (diff -u の + と - の行) */
   lines: string[];
-  /** 箇所ごとのファイルと、変わった箇所の直前に始まるノード (diff -F で分かったもの) */
-  places: { file: string; nodeId: string | null; name: string | null }[];
+  /** 箇所ごとのファイルと、変わった箇所の直前に始まるノード (diff -F で分かったもの)。inAfter は、そのノードが after の書き出しにあるか (無ければ Figma で開けない) */
+  places: { file: string; nodeId: string | null; name: string | null; inAfter: boolean }[];
 }
 
 export interface CompareSummary {
@@ -69,6 +70,8 @@ export interface CompareSummary {
   /** 構造の差分のうち、同じ中身の変化が 2 箇所以上あるもの (多い順) */
   sameChanges: SameChange[];
   report: string;
+  /** 書き出した Figma のファイル (dev サーバーが添えた印から。after が無ければ before の印)。無ければ null で、report に Figma を開くリンクを付けない */
+  fileKey: string | null;
 }
 
 /** 比べた結果の置き場所の印。--out に既にある置き場所を消してよいかは、これに SUMMARY_MARK が入っているかで決める */
@@ -131,6 +134,15 @@ function keyed(files: readonly string[]): Map<string, string> {
   const count = new Map<string, number>();
   for (const rel of files) count.set(pairKey(rel), (count.get(pairKey(rel)) ?? 0) + 1);
   return new Map(files.map((rel) => [count.get(pairKey(rel)) === 1 ? pairKey(rel) : rel, rel]));
+}
+
+/**
+ * report のリンクに使う fileKey。before と after の両方に印があり、同じファイルのときだけ返す。
+ * 違うとき (別のファイルの書き出しを比べている) と片方に印が無いとき (同じファイルと確かめられない) は null で、リンクを付けない
+ */
+function sharedFileKey(before: BridgeMeta | null, after: BridgeMeta | null): string | null {
+  if (before === null || after === null || before.fileKey !== after.fileKey) return null;
+  return after.fileKey;
 }
 
 function readIndex(dir: string): void {
@@ -416,7 +428,20 @@ export function compareExports(beforeDir: string, afterDir: string, outDir: stri
   const same = added.length === 0 && removed.length === 0 && renamed.length === 0 && changed.length === 0;
   const report = path.join(outDir, REPORT_FILE);
   const sameChanges = changesDiff === null ? [] : sameChangesOf(outDir, changesDiff);
-  const summary: CompareSummary = { same, added, removed, renamed, changed, images, outDir, changesDiff, sameChanges, report };
+  const fileKey = sharedFileKey(readBridgeMeta(beforeDir), readBridgeMeta(afterDir));
+  const summary: CompareSummary = {
+    same,
+    added,
+    removed,
+    renamed,
+    changed,
+    images,
+    outDir,
+    changesDiff,
+    sameChanges,
+    report,
+    fileKey,
+  };
   writeFile(report, reportHtml(summary, beforeDir, afterDir));
   writeFile(path.join(outDir, SUMMARY_FILE), JSON.stringify({ ...SUMMARY_MARK, ...summary }, null, 2) + "\n");
   return summary;

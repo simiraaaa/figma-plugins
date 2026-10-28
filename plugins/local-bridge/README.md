@@ -66,6 +66,8 @@ Figma への取り込みは[リポルート README の共通手順](../../README
 
    - 結果は `<置き場所>/results/<version>/` に展開し、`<置き場所>/latest` がいちばん新しく成功した結果を指す。
      中身は Structure Dump の [ZIP の中身](../structure-dump/README.md#zip-の中身-schema-dump-v3)と同じで、まず `README.md` を読む。
+     dev サーバーはそこに、行き先のファイルの印 `.local-bridge.json` (`fileKey`・`fileName`) を添える。
+     `npm run compare` はこれを読み、report のノードに Figma で開くリンク (`figma://file/<fileKey>?node-id=<id>`) を付ける (下の「Figma の画面を目的のノードへ飛ばす」)。
      `version` と依頼の番号 `seq` は、dev サーバーを起動し直しても前回の続きから振る。結果は新しいほうから 20 個残す (ただし各ファイルの最後の結果は、20 個より古くても `GET /status?file=` が指すので消さない。これは dev サーバーが動いているあいだだけで、起動し直すと `status.json` にある最後の 1 件のファイルの分しか覚えていない)。
    - 本文の `images` で、書き出す中身を選べる。省くと `both` と同じ。
      - `both`: 構造と画像の両方。Structure Dump のメニューから書き出したものと同じ。
