@@ -81,8 +81,28 @@ README の「使い方」に従って書き出し直す。
 - セクションの直下にある、フレーム・インスタンス・コンポーネント・グループ以外のノード (文字・図形・コンポーネントセットなど): 構造の差分は出るが、画像は出ない。
   画像も見たいなら、セクションでなくそのノードを書き出す。
 - メインコンポーネント・スタイル・変数: 使っている別の場所 (インスタンス・ほかのページ) も変わる。
-  変わる先も `nodeIds` に入れる。
-  入れきれないなら、確かめられない範囲があることを人に伝える。
+  変わる先も `nodeIds` に入れ、画像の差分で見られるようにする (3 の全体スナップショットは id しか出さない)。
+  メインコンポーネントなら、下の script でインスタンスを含むページ直下 (セクションの中ならセクション直下) のフレームを探す (`<id>` はコンポーネントかコンポーネントセットの id)。
+  返った id を `nodeIds` に足す。
+  多いとき (目安 20 を超える) は、ページごとに 1 つずつなど代表を選び、残りは確かめられないことを人に伝える。
+  スタイル・変数は使っている場所を Plugin API で探せないので、人に聞くか、確かめられない範囲があることを伝える。
+
+  ```js
+  const target = await figma.getNodeByIdAsync("<id>");
+  const mains = new Set(target.type === "COMPONENT_SET" ? target.children.map((c) => c.id) : [target.id]);
+  await figma.loadAllPagesAsync();
+  const tops = new Map();
+  for (const page of figma.root.children) {
+    for (const instance of page.findAllWithCriteria({ types: ["INSTANCE"] })) {
+      const main = await instance.getMainComponentAsync();
+      if (!main || !mains.has(main.id)) continue;
+      let top = instance;
+      while (top.parent && top.parent.type !== "PAGE" && top.parent.type !== "SECTION") top = top.parent;
+      tops.set(top.id, page.name + " / " + top.name);
+    }
+  }
+  return [...tops].map(([id, name]) => id + " " + name);
+  ```
 
 ## 2. 書き換える
 
@@ -140,7 +160,7 @@ npm --prefix <リポ> run -s compare -- <before> <after> --fingerprint-before <�
   差分の区切りの行 (`@@`) の後ろに、変わった箇所の直前に始まるノードの ID が出る (子を消した箇所では、直前の兄弟などを指すことがある)。
 - `sameChanges`: 構造の差分のうち、同じ中身の変化が 2 箇所以上あるもの (多い順。箇所の数・足した行と消した行・どのノードか)
 - `report`: 人が見る HTML。
-  先頭に書き出した範囲の外の変化 (下の `fingerprint` の `outside` と `propagated`) を、範囲の外 → インスタンスに映ったものの順で出す (`inside` は意図した変化なので載せない)。
+  先頭に AI の見立て (`--note` を渡したとき) と、書き出した範囲の外の変化 (下の `fingerprint` の `outside` と `propagated`) を、範囲の外 → インスタンスに映ったものの順で出す (`inside` は意図した変化なので載せない)。
   続けて、変わった箇所を 1 つずつ切り出した before・after・差分 (色が違う画素を赤くしたもの) の画像 (範囲が広い箇所と 31 箇所目からは、全体の画像で見る) と、どこが変わったかを枠で示した全体図を並べる。
   構造の差分は同じ中身の変化をまとめて箇所の数を出し、ファイルごとに畳んで並べる。
   画像とノードには「Figma で開く」のリンクが付き、押すと Figma デスクトップがそのノードを選択して前に出る。
@@ -150,6 +170,7 @@ npm --prefix <リポ> run -s compare -- <before> <after> --fingerprint-before <�
   書き出した範囲は after の `index.json` の根 (1 の `nodeIds` のうち表示されているもの。ページを書き出したならそのページ)。
   同じ名前のページが 2 つ以上あって決められないときは、`--inside <id>[,<id>...]` で 1 の `nodeIds` を渡す。
   スナップショットの `fileKey` が書き出しの `fileKey` と違えば、取り違えなので断る。
+- `note`: `--note` で渡した見立ての文 (渡していなければ `null`)。
 
 書き出しの応答に `warnings` があれば、比べた結果を使う前に見る。
 画面がスリープしているあいだの書き出しは、警告つきで画像が欠けることがある。
@@ -171,6 +192,46 @@ npm --prefix <リポ> run -s compare -- <before> <after> --fingerprint-before <�
   後者の例は、インスタンスが広がって同じ自動レイアウトの隣のノードの位置が変わること (2026-10-28 の実測では、Button のメインコンポーネントに子を 1 つ足すと、`propagated` 84 件のほかに隣のノードが 14 件 `outside` に出た)。
   どちらかは id を見て自分で分け、両方とも人に伝える。
   script のミスと分かったものは 4 に進む (2 で成功以外が返っていれば、分けた結果を人に伝える)。
+- `aspects`: `changed` のノードで変わった区分 (`name` 名前・`geometry` 位置と大きさ・`look` 見た目・`text` 文字・`layout` 自動レイアウトの設定・`component` 種類と property・`children` 子の並び)。
+  見立ての手がかりにする。
+
+`outside` が空でないときと、`propagated` に script が触った id が混ざるときは、id を並べただけでは人に意味が伝わらないので、見立てを書いて report の先頭に載せる。
+
+1. 変わったノードを script で読む (`<id>` は `outside` の id。多ければ代表を選ぶ)。
+
+   ```js
+   await figma.loadAllPagesAsync();
+   const out = [];
+   for (const id of ["<id>", "<id>"]) {
+     const node = await figma.getNodeByIdAsync(id);
+     if (!node) { out.push(id + " (無い)"); continue; }
+     const chain = [];
+     for (let p = node.parent; p && p.type !== "DOCUMENT"; p = p.parent) {
+       chain.unshift(p.name + ("layoutMode" in p && p.layoutMode !== "NONE" ? " [" + p.layoutMode + "]" : ""));
+     }
+     out.push(id + " " + node.type + " " + node.name + " @ " + chain.join(" / ") + " x=" + node.x + " y=" + node.y + " w=" + node.width + " h=" + node.height);
+   }
+   return out;
+   ```
+
+2. 同じ原因のまとまりごとに分けて書く。
+   原因は script が触った id との関係 (触ったノードの自動レイアウトの兄弟か・そのインスタンスか) と `aspects` から決める。
+   決められないものは「説明がつかない」にし、他の人の変更の疑いとして書く (自分のものと決めない)。
+   型は次のとおり (空行で段落、行の頭の `- ` で箇条書き。HTML は書けない)。
+
+   ```
+   想定外の変化は <件数> ノード (<まとまりの数> 種類)。
+
+   - <ページ> / <親> の <名前> ×<件数>: <変わった区分 (位置など)>。原因: <何がどうなったから>。<うちらの書き換えの影響 | script のミス | 説明がつかない (他の人の変更かも)>
+
+   結論: <戻す | 戻さない | 人に確かめる> (<理由>)。
+   ```
+
+3. 見立てを書いたファイルを書き出しの置き場所の下の `note/<seq>.md` に置き (比べた結果の置き場所の中には置かない。やり直すと消える)、`compare` に `--note <そのファイル>` を足してやり直す。
+   見立てを書き直したら、また `compare` をやり直す。
+4. report を人に見せ、結論を伝える。
+   「script のミス」があれば、この手順書の 4 (問題があれば戻す) に進む。
+   「説明がつかない」があれば、4 に進まず人に確かめる。
 
 複製したファイルで実測した (2026-10-28): ページの並べ替えは `document`、範囲の外の文字の配置だけの変更はその TEXT、メインコンポーネントへの子の追加は本体とインスタンスが、それぞれ `outside`・`propagated` に出た。
 
