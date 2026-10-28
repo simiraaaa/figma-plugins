@@ -17,6 +17,9 @@
   body.compact #toggle-size { font-size: 11px; padding: 1px 8px; }
   body.compact #error, body.compact #dev { display: none; }
   #error { color: #c62828; white-space: pre-wrap; }
+  /* 小さくした画面でも見えるよう、#dev の外に置く (body.compact で隠すのは #error と #dev だけ) */
+  #dev-update { color: #b26a00; margin-top: 4px; }
+  body.compact #dev-update { margin-top: 0; font-size: 11px; }
   #dev-log { white-space: pre-wrap; margin: 4px 0 0; max-height: 300px; overflow: auto; }
   #dev-token { font: 11px/1.5 "SF Mono", Menlo, monospace; background: #f5f5f5; border-radius: 4px; padding: 2px 6px; word-break: break-all; }
   .dev-run-actions { margin: 6px 0 0; }
@@ -28,6 +31,7 @@
     <button id="toggle-size">小さくする</button>
   </div>
   <div id="error"></div>
+  <div id="dev-update" hidden></div>
   <div id="dev" hidden>
     <h2>Local Bridge (dev サーバー: <span id="dev-server">探している</span>)</h2>
     <div>このファイル: <span id="dev-file"></span></div>
@@ -73,6 +77,12 @@ const DEV_LOG_LINES = 50;
 let devServer = null;
 /** dev サーバーを起動したリポの場所 (絶対パス)。root を返さない古い dev サーバーなら null。渡す文に埋めるので、改行などの制御文字を含む root も null にする */
 let devRoot = null;
+/** dev サーバーが確かめた、リポジトリの新しい版のコミット数。無ければ 0 (つないだときと、その後 UPDATE_POLL_MS ごとに GET /hello で読み直す) */
+let devUpdateBehind = 0;
+/** 画面に出している新しい版のコミット数。変わったときだけ記録に出す */
+let shownUpdateBehind = 0;
+/** dev サーバーは起動の直後と 6 時間ごとに新しい版を確かめるので、つないだあとも GET /hello を読み直して画面に反映する間隔 */
+const UPDATE_POLL_MS = 60 * 1000;
 /**
  * このタブのファイル (figma.fileKey と figma.root.name) と画面 (figma.currentUser.sessionId)。
  * dev サーバーはこのファイル宛ての依頼だけを、そのファイルを先に開いた画面にだけ渡す
@@ -137,6 +147,7 @@ async function findDevServer() {
         continue;
       }
       devRoot = typeof body.root === "string" && /^\/[^\u0000-\u001f\u007f]*$/.test(body.root) ? body.root : null;
+      devUpdateBehind = updateBehindOf(body);
       return base;
     } catch {
       // 待ち受けていない・dev サーバーでない相手 (JSON を返さない)
@@ -169,6 +180,40 @@ function askToken(renew) {
     parent.postMessage({ pluginMessage: message }, "*");
   });
 }
+
+/** GET /hello の本文から、新しい版のコミット数を読む。無ければ 0 */
+function updateBehindOf(hello) {
+  return Number.isInteger(hello.update?.behind) && hello.update.behind > 0 ? hello.update.behind : 0;
+}
+
+/** dev サーバーが新しい版を見つけていれば、画面に pull と build を促す行を出す (文は dev サーバーの端末と同じ内容) */
+function showRepoUpdate() {
+  const line = document.getElementById("dev-update");
+  line.hidden = devUpdateBehind === 0;
+  if (devUpdateBehind !== 0) {
+    line.textContent =
+      `リポジトリに新しい版がある (${devUpdateBehind} コミット)。clone したディレクトリで git pull && npm install && npm run build を実行し、dev サーバーを起動し直す`;
+  }
+  if (devUpdateBehind !== shownUpdateBehind && devUpdateBehind !== 0) {
+    devLog(`リポジトリに新しい版がある (${devUpdateBehind} コミット)`);
+    // 小さくした画面 (高さ 32 px) には収まらないので、新しく分かったときだけ広げる (人がまた小さくしたら、次に数が変わるまで広げない)
+    setCompact(false);
+  }
+  shownUpdateBehind = devUpdateBehind;
+}
+
+/** つないだままの画面にも、dev サーバーがあとから見つけた新しい版が届くよう、GET /hello を読み直す。つながっていなければ何もしない */
+async function pollRepoUpdate() {
+  if (devServer === null) return;
+  try {
+    const res = await fetch(`${devServer}/hello`, { signal: AbortSignal.timeout(DEV_PROBE_TIMEOUT_MS) });
+    devUpdateBehind = updateBehindOf(await res.json());
+    showRepoUpdate();
+  } catch {
+    // dev サーバーが止まっているときは、依頼を待つ側が別に気づいて記録する
+  }
+}
+setInterval(pollRepoUpdate, UPDATE_POLL_MS);
 
 function showRunToken(token) {
   document.getElementById("dev-token").textContent = token;
@@ -292,6 +337,7 @@ async function localBridge() {
         devServer = await findDevServer();
         document.getElementById("dev-server").textContent = devServer;
         devLog(`dev サーバーにつないだ: ${devServer}`);
+        showRepoUpdate();
       }
       const query = new URLSearchParams({ file: devFile.key, name: devFile.name, launch: launchId, session: devFile.session });
       if (server !== null) {

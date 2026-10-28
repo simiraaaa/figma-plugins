@@ -24,6 +24,7 @@ import {
 import http from "node:http";
 import path from "node:path";
 import { BRIDGE_META_FILE, type BridgeMeta } from "./bridge-meta.mts";
+import type { RepoUpdate } from "./update-check.mts";
 
 /**
  * 待ち受けるポートの候補。前から順に、空いている最初のポートで起動する。
@@ -324,6 +325,8 @@ export interface DevServerOptions {
   outDir: string;
   /** dev サーバーを起動したリポの場所 (絶対パス)。GET /hello で返し、Local Bridge は AI に渡す文の README などをこれで指す */
   root?: string;
+  /** リポジトリに新しい版があるかの最新の確かめ (scripts/update-check.mts)。まだ確かめていなければ null。GET /hello で Local Bridge に知らせる */
+  repoUpdate?: () => RepoUpdate | null;
   keepResults?: number;
   pluginStaleMs?: number;
   processingStaleMs?: number;
@@ -1136,8 +1139,13 @@ export function createDevServer(options: DevServerOptions): DevServerHandler {
     }
 
     if (route === "GET /hello") {
-      const hello = { app: DEV_SERVER_APP, protocol: DEV_SERVER_PROTOCOL };
-      send(res, 200, options.root === undefined ? hello : { ...hello, root: options.root });
+      const update = options.repoUpdate?.() ?? null;
+      send(res, 200, {
+        app: DEV_SERVER_APP,
+        protocol: DEV_SERVER_PROTOCOL,
+        ...(options.root === undefined ? {} : { root: options.root }),
+        ...(update?.kind === "behind" ? { update: { behind: update.behind } } : {}),
+      });
       return;
     }
 

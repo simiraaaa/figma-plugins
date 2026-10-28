@@ -37,6 +37,7 @@ import {
 } from "../scripts/dev-server-lib.mts";
 import { releaseManifest } from "../scripts/release-lib.mts";
 import { BRIDGE_META_FILE } from "../scripts/bridge-meta.mts";
+import type { RepoUpdate } from "../scripts/update-check.mts";
 // 実行するのは esbuild 産物、型は同じソースから取る(産物側は型を持たない)
 import * as zipDist from "../plugins/structure-dump/dist/zip.mjs";
 const { buildZip, utf8Encode } =
@@ -1942,6 +1943,25 @@ test("GET /hello は、起動したリポの場所を渡されていれば root 
   try {
     const res = await fetch(`${base}/hello`, { headers: PLUGIN });
     assert.deepEqual(await json(res), { app: DEV_SERVER_APP, protocol: DEV_SERVER_PROTOCOL, root: "/work/figma-plugins" });
+  } finally {
+    close();
+  }
+});
+
+test("負例: GET /hello は、リポジトリに新しい版があれば update.behind で知らせ、無ければ update を付けない", async () => {
+  const checkedAt = "2026-10-28T00:00:00.000Z";
+  let update: RepoUpdate | null = null;
+  const { base, close } = await startServer(undefined, { repoUpdate: () => update });
+  try {
+    assert.deepEqual(await json(fetch(`${base}/hello`, { headers: PLUGIN })), { app: DEV_SERVER_APP, protocol: DEV_SERVER_PROTOCOL });
+    update = { kind: "current", checkedAt };
+    assert.deepEqual(await json(fetch(`${base}/hello`, { headers: PLUGIN })), { app: DEV_SERVER_APP, protocol: DEV_SERVER_PROTOCOL });
+    update = { kind: "behind", behind: 2, checkedAt };
+    assert.deepEqual(await json(fetch(`${base}/hello`, { headers: PLUGIN })), {
+      app: DEV_SERVER_APP,
+      protocol: DEV_SERVER_PROTOCOL,
+      update: { behind: 2 },
+    });
   } finally {
     close();
   }
