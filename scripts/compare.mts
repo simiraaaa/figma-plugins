@@ -6,6 +6,8 @@
  *   npm run compare -- <before の書き出し> <after の書き出し> --fingerprint-before <前の json> --fingerprint-after <後の json>
  *       # ファイル全体のスナップショット (scripts/fingerprint.js の返り値) も比べ、書き出した範囲の外の変化を report の先頭に出す
  *       # 書き出した範囲は after の index.json から決める。--inside <id>[,<id>...] で指定もできる
+ *   npm run compare -- <before の書き出し> <after の書き出し> ... --note <見立てのファイル>
+ *       # AI が書いた見立て (範囲の外の変化が何で、原因は何か) を report の先頭に出す。書き直すたびに compare をやり直す
  *
  * 終了コードは、変化の有無に関わらず 0 (判定は出力の JSON の欄で行う。fingerprint.mts とは違う)。
  */
@@ -14,7 +16,7 @@ import { parseArgs } from "node:util";
 import { compareExports, defaultCompareDir, isDirectory } from "./compare-lib.mts";
 
 const USAGE =
-  "使い方: npm run compare -- <before の書き出しのディレクトリ> <after の書き出しのディレクトリ> [--out <ディレクトリ>] [--fingerprint-before <前の json> --fingerprint-after <後の json> [--inside <id>[,<id>...]]]";
+  "使い方: npm run compare -- <before の書き出しのディレクトリ> <after の書き出しのディレクトリ> [--out <ディレクトリ>] [--fingerprint-before <前の json> --fingerprint-after <後の json> [--inside <id>[,<id>...]]] [--note <見立てのファイル>]";
 const { values, positionals } = parseArgs({
   allowPositionals: true,
   options: {
@@ -22,6 +24,7 @@ const { values, positionals } = parseArgs({
     "fingerprint-before": { type: "string" },
     "fingerprint-after": { type: "string" },
     inside: { type: "string" },
+    note: { type: "string" },
   },
 });
 const fpBefore = values["fingerprint-before"];
@@ -40,4 +43,5 @@ const inside = values.inside
   ?.split(",")
   .map((s) => s.trim())
   .filter((s) => s !== "");
-console.log(JSON.stringify(compareExports(beforeDir, afterDir, outDir, { fingerprint, inside }), null, 2));
+const note = values.note === undefined ? undefined : path.resolve(values.note);
+console.log(JSON.stringify(compareExports(beforeDir, afterDir, outDir, { fingerprint, inside, note }), null, 2));
