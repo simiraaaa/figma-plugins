@@ -6,7 +6,7 @@
 //
 // 返り値: { v: 1, file, fileKey, takenAt, ms, pages: { <ページ id>: <名前> }, nodes: ["<id>|<親の id>|<指紋>", ...] }
 // (ノードごとに 1 つの文字列にするのは、dev サーバーが応答を字下げつきの JSON にするので、配列だと 1 万ノードで 900 KB になるため。返り値の上限は 100 万文字)
-// ページも 1 つのノードとして入る (親は空。指紋は名前と直下の子の並び)。
+// ページも 1 つのノードとして入る (親は空。指紋は名前と直下の子の並び)。ファイル全体も id "document" のノードとして入る (指紋はページの並び)。
 // 指紋は、種類・名前・表示・ロック・位置・大きさ・回転・不透明度・塗り・線・効果・角丸・制約・レイアウト・文字 (範囲ごとの書式を含む)・
 // スタイル・コンポーネントの property・メインコンポーネント・子の並びから作る。見ていない値 (書き出し設定・プラグインデータなど) の変化は拾えない。
 const startedAt = Date.now();
@@ -59,8 +59,8 @@ const FIELDS = [
   "textAlignHorizontal",
   "textAlignVertical",
   "textAutoResize",
-  "paragraphSpacing",
-  "paragraphIndent",
+  "textTruncation",
+  "maxLines",
   "fillStyleId",
   "strokeStyleId",
   "effectStyleId",
@@ -70,7 +70,23 @@ const FIELDS = [
 ];
 
 // 文字の書式は範囲ごとに違いうる (ノード全体の fontSize などは figma.mixed になり、どの範囲を変えても同じ値のまま) ので、範囲ごとに取る
-const TEXT_SEGMENT_FIELDS = ["fontSize", "fontName", "fontWeight", "textDecoration", "textCase", "lineHeight", "letterSpacing", "fills", "textStyleId", "fillStyleId", "hyperlink"];
+const TEXT_SEGMENT_FIELDS = [
+  "fontSize",
+  "fontName",
+  "fontWeight",
+  "textDecoration",
+  "textCase",
+  "lineHeight",
+  "letterSpacing",
+  "fills",
+  "textStyleId",
+  "fillStyleId",
+  "hyperlink",
+  "paragraphSpacing",
+  "paragraphIndent",
+  "listOptions",
+  "indentation",
+];
 
 async function signature(node) {
   const parts = [node.type, node.name];
@@ -94,7 +110,8 @@ async function signature(node) {
 }
 
 const pages = {};
-const nodes = [];
+// ページ自体の並べ替えも拾えるよう、ファイル全体も 1 つのノード (id は document) にする
+const nodes = ["document||" + hash(figma.root.children.map((p) => p.id).join(","))];
 for (const page of figma.root.children) {
   pages[page.id] = page.name;
   // ページの名前の変更と直下の並べ替えも拾えるよう、ページも 1 つのノードにする

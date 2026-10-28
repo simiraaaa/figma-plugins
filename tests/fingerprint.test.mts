@@ -72,6 +72,15 @@ test("負例: 指紋が同じでも親が変わったノードは moved とし�
   assert.deepEqual(diff.outside, [{ id: "2:1", page: "P2", kind: "moved" }]);
 });
 
+test("負例: ページ自体の並べ替えは、ファイル全体のノード (id は document) の指紋の差として出す", () => {
+  const before = base();
+  before.nodes.unshift("document||order-a");
+  const after = base();
+  after.nodes.unshift("document||order-b");
+  const diff = diffFingerprints(before, after, ["1:2"]);
+  assert.deepEqual(diff.outside, [{ id: "document", page: "", kind: "changed" }]);
+});
+
 test("負例: ページの名前や直下の並びの変化は、ページのノード (親が空) の指紋の差として出す", () => {
   const before = base();
   before.nodes.push("0:1||page-hash");
