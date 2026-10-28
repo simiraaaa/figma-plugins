@@ -10,7 +10,7 @@ import { execFileSync } from "node:child_process";
 import { mkdtempSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import path from "node:path";
-import { checkRepoUpdate, updateMessage } from "../scripts/update-check.mts";
+import { checkRepoUpdate, mergeRepoUpdate, type RepoUpdate, updateMessage } from "../scripts/update-check.mts";
 
 function git(cwd: string, ...args: string[]): string {
   return execFileSync("git", ["-C", cwd, ...args], { encoding: "utf8", env: { ...process.env, GIT_CONFIG_GLOBAL: "/dev/null" } }).trim();
@@ -51,6 +51,17 @@ test("origin と同じなら current で、知らせる文は無い", async () =
   const update = await checkRepoUpdate(clone);
   assert.equal(update.kind, "current");
   assert.equal(updateMessage(update), null);
+});
+
+test("負例: 確かめ直しが失敗 (unknown) しても、前に分かっていた新しい版の知らせは消さない", () => {
+  const checkedAt = "2026-10-28T00:00:00.000Z";
+  const behind: RepoUpdate = { kind: "behind", behind: 1, checkedAt };
+  const unknown: RepoUpdate = { kind: "unknown", reason: "ネットワークが無い", checkedAt };
+  const current: RepoUpdate = { kind: "current", checkedAt };
+  assert.equal(mergeRepoUpdate(behind, unknown), behind);
+  assert.equal(mergeRepoUpdate(null, unknown), unknown);
+  assert.equal(mergeRepoUpdate(behind, current), current);
+  assert.equal(mergeRepoUpdate(unknown, behind), behind);
 });
 
 test("負例: リポジトリでない場所や origin の無いリポジトリでは unknown で、理由を返す", async () => {

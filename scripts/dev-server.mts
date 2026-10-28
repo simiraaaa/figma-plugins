@@ -7,7 +7,7 @@
 import path from "node:path";
 import { parseArgs } from "node:util";
 import { createDevServer, DEV_PORTS, listenOnCandidatePorts, notStartedMessage } from "./dev-server-lib.mts";
-import { checkRepoUpdate, type RepoUpdate, UPDATE_CHECK_INTERVAL_MS, updateMessage } from "./update-check.mts";
+import { checkRepoUpdate, mergeRepoUpdate, type RepoUpdate, UPDATE_CHECK_INTERVAL_MS, updateMessage } from "./update-check.mts";
 
 const { values } = parseArgs({
   options: { out: { type: "string", default: ".dev-dump" } },
@@ -19,12 +19,13 @@ const log = (line: string) => console.log(`[${new Date().toLocaleTimeString()}] 
 /** リポジトリに新しい版があるかの最新の確かめ。起動時と、動いているあいだ一定の間隔で確かめ直す */
 let repoUpdate: RepoUpdate | null = null;
 
-/** 新しい版があれば端末に出す (Local Bridge の画面には GET /hello で伝わる)。確かめられなかったときは理由だけ出す */
+/** 新しい版があれば端末に出す (Local Bridge の画面には GET /hello で伝わる)。確かめられなかったときは理由だけ出し、前に分かっていた結果を残す */
 async function refreshRepoUpdate(): Promise<void> {
-  repoUpdate = await checkRepoUpdate(root);
-  const message = updateMessage(repoUpdate);
+  const checked = await checkRepoUpdate(root);
+  repoUpdate = mergeRepoUpdate(repoUpdate, checked);
+  const message = updateMessage(checked);
   if (message !== null) log(message);
-  else if (repoUpdate.kind === "unknown") log(`リポジトリの新しい版を確かめられない: ${repoUpdate.reason}`);
+  else if (checked.kind === "unknown") log(`リポジトリの新しい版を確かめられない: ${checked.reason}`);
 }
 
 const handler = createDevServer({ outDir, root, repoUpdate: () => repoUpdate, log });

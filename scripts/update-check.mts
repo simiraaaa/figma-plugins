@@ -40,6 +40,15 @@ export async function checkRepoUpdate(root: string, timeoutMs = UPDATE_CHECK_TIM
   }
 }
 
+/**
+ * 確かめ直した結果で、持っている結果を置き換えるか。
+ * 確かめられなかった (unknown) ときは、前に分かっていた結果 (behind・current) を残す。一時的なネットワーク断で、分かっていた新しい版の知らせを消さないため
+ */
+export function mergeRepoUpdate(previous: RepoUpdate | null, next: RepoUpdate): RepoUpdate {
+  if (next.kind === "unknown" && previous !== null && previous.kind !== "unknown") return previous;
+  return next;
+}
+
 /** 端末と Local Bridge の画面に出す 1 行。新しい版が無ければ null */
 export function updateMessage(update: RepoUpdate): string | null {
   if (update.kind !== "behind") return null;
