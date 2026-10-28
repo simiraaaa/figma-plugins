@@ -58,7 +58,7 @@ curl -s -X POST '<URL>/export?file=<fileKey>&timeout=110' -d '{"nodeIds":["<id>"
 応答の `dir` を before として控える。
 大きいノードで時間が掛かるときの待ち方は、README の「使い方」の 3 にある。
 
-続けて、ファイル全体のノードの指紋を取り、保存する (書き出した範囲の外を script が変えていないかを 3 で確かめるため)。
+続けて、ファイル全体のスナップショット (全ノードの要約。`scripts/fingerprint.js`) を取り、保存する (書き出した範囲の外を script が変えていないかを 3 で確かめるため)。
 1 万ノードのファイルで 5 秒ほど、返り値は 500 KB ほど (2026-10-28 に実測)。
 保存先は書き出しの置き場所 (`GET /status` の `outDir`) の下の `fingerprint/` で、無ければ作る。
 
@@ -67,7 +67,7 @@ mkdir -p <書き出しの置き場所>/fingerprint
 curl -s -X POST '<URL>/run?file=<fileKey>&timeout=580' -H 'X-Run-Token: <合言葉>' --data-binary @<リポ>/scripts/fingerprint.js > <書き出しの置き場所>/fingerprint/<seq>.json
 ```
 
-`error` が返ったら (ノードが多すぎて返り値が上限を超えた、など)、指紋なしで進み、範囲の外は確かめられないことを人に伝える。
+`error` が返ったら (ノードが多すぎて返り値が上限を超えた、など)、スナップショットなしで進み、範囲の外は確かめられないことを人に伝える。
 書き出せなかったとき (HTTP 422・503・504) は、書き換えに進まない。
 README の「使い方」に従って書き出し直す。
 
@@ -123,9 +123,11 @@ return "<確かめたい値>";
 ## 3. 後を書き出して比べる
 
 1 と同じ curl で書き出し、応答の `dir` を after として控える。
+1 でスナップショットを取っていれば、もう一度取って、前後の 2 つを `compare` に渡す (書き出した範囲の外の変化も一緒に出る)。
 
 ```sh
-npm --prefix <リポ> run -s compare -- <before> <after>
+curl -s -X POST '<URL>/run?file=<fileKey>&timeout=580' -H 'X-Run-Token: <合言葉>' --data-binary @<リポ>/scripts/fingerprint.js > <書き出しの置き場所>/fingerprint/<seq>.json
+npm --prefix <リポ> run -s compare -- <before> <after> --fingerprint-before <前のスナップショット> --fingerprint-after <後のスナップショット>
 ```
 
 出力の JSON の欄は次のとおり。
@@ -138,22 +140,23 @@ npm --prefix <リポ> run -s compare -- <before> <after>
   差分の区切りの行 (`@@`) の後ろに、変わった箇所の直前に始まるノードの ID が出る (子を消した箇所では、直前の兄弟などを指すことがある)。
 - `sameChanges`: 構造の差分のうち、同じ中身の変化が 2 箇所以上あるもの (多い順。箇所の数・足した行と消した行・どのノードか)
 - `report`: 人が見る HTML。
-  変わった箇所を 1 つずつ切り出した before・after・差分の画像 (範囲が広い箇所と 31 箇所目からは、全体の画像で見る) (色が違う画素を赤くしたもの) と、どこが変わったかを枠で示した全体図を並べる。
+  先頭に書き出した範囲の外の変化 (下の `fingerprint` の `outside` と `propagated`) を、範囲の外 → インスタンスに映ったものの順で出す (`inside` は意図した変化なので載せない)。
+  続けて、変わった箇所を 1 つずつ切り出した before・after・差分 (色が違う画素を赤くしたもの) の画像 (範囲が広い箇所と 31 箇所目からは、全体の画像で見る) と、どこが変わったかを枠で示した全体図を並べる。
   構造の差分は同じ中身の変化をまとめて箇所の数を出し、ファイルごとに畳んで並べる。
   画像とノードには「Figma で開く」のリンクが付き、押すと Figma デスクトップがそのノードを選択して前に出る。
 - `fileKey`: 書き出した Figma のファイル。Local Bridge の書き出しでなければ `null` で、report にリンクは付かない。
+- `fingerprint`: ファイル全体の比較 (下の `inside`・`propagated`・`outside`)。スナップショットを渡していなければ `null`。
+  `same` は書き出しだけを見るので、書き出しに映らないノード (非表示の子など) の変化は `same: true` のまま `inside` に出る。
+  書き出した範囲は after の `index.json` の根 (1 の `nodeIds` のうち表示されているもの。ページを書き出したならそのページ)。
+  同じ名前のページが 2 つ以上あって決められないときは、`--inside <id>[,<id>...]` で 1 の `nodeIds` を渡す。
+  スナップショットの `fileKey` が書き出しの `fileKey` と違えば、取り違えなので断る。
 
 書き出しの応答に `warnings` があれば、比べた結果を使う前に見る。
 画面がスリープしているあいだの書き出しは、警告つきで画像が欠けることがある。
 普段は出ない警告があれば、人に画面を起こしてもらい、書き出し直して比べ直す。
 
-1 で指紋を取っていれば、もう一度取って比べ、書き出した範囲の外の変化を見る。
-`--inside` には 1 の `nodeIds` を渡す。
-
-```sh
-curl -s -X POST '<URL>/run?file=<fileKey>&timeout=580' -H 'X-Run-Token: <合言葉>' --data-binary @<リポ>/scripts/fingerprint.js > <書き出しの置き場所>/fingerprint/<seq>.json
-npm --prefix <リポ> run -s fingerprint -- diff <前の指紋> <後の指紋> --inside <id>[,<id>...]
-```
+`fingerprint` の 3 つの欄で、書き出した範囲の外の変化を見る。
+書き出しなしでスナップショットだけを比べるときは `npm --prefix <リポ> run -s fingerprint -- diff <前> <後> --inside <id>[,<id>...]` (同じ 3 つの欄を出す)。
 
 - `inside`: 範囲の中で変わったノード。書き出しの比較と同じものを指すはず。
 - `propagated`: 範囲の中のノードがメインコンポーネントの中にあり、その変化がインスタンスに映ったもの (`from` が元のノード)。
@@ -163,7 +166,7 @@ npm --prefix <リポ> run -s fingerprint -- diff <前の指紋> <後の指紋> -
   script がそのインスタンスも直接書き換えていた場合は、映ったものと区別できない。
   だから `propagated` を自動で「問題なし」にはしない (`diff` の終了コードも 0 にならない)。
   script が触った id を自分で照らし、触っていなければ映っただけと見て、数とページを人に伝える。
-- `outside`: それ以外の、範囲の外の変化 (`moved` は、指紋は同じでも親やページが変わったノード。`document` はページの並び)。
+- `outside`: それ以外の、範囲の外の変化 (`moved` は、中身は同じでも親やページが変わったノード。`document` はページの並び)。
   空でなければ、script が意図しない場所を変えているか、意図した書き換えの影響が範囲の外に及んでいる。
   後者の例は、インスタンスが広がって同じ自動レイアウトの隣のノードの位置が変わること (2026-10-28 の実測では、Button のメインコンポーネントに子を 1 つ足すと、`propagated` 84 件のほかに隣のノードが 14 件 `outside` に出た)。
   どちらかは id を見て自分で分け、両方とも人に伝える。
@@ -171,7 +174,7 @@ npm --prefix <リポ> run -s fingerprint -- diff <前の指紋> <後の指紋> -
 
 複製したファイルで実測した (2026-10-28): ページの並べ替えは `document`、範囲の外の文字の配置だけの変更はその TEXT、メインコンポーネントへの子の追加は本体とインスタンスが、それぞれ `outside`・`propagated` に出た。
 
-指紋に入る値は `scripts/fingerprint.js` の冒頭にある (種類・名前・表示・位置・大きさ・塗り・線・効果・制約・レイアウト・文字の範囲ごとの書式・スタイル・コンポーネントの property・子の並びなど)。
+スナップショットに入る値は `scripts/fingerprint.js` の冒頭に書いてある (種類・名前・表示・位置・大きさ・塗り・線・効果・制約・レイアウト・文字の範囲ごとの書式・スタイル・コンポーネントの property・子の並びなど)。
 見ていない値の変化は拾えない。
 
 before と after が `same: true` のときは、script の返り値で値が変わったかを見る。

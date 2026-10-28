@@ -11,7 +11,7 @@ import { existsSync, mkdirSync, mkdtempSync, readFileSync, realpathSync, statSyn
 import { tmpdir } from "node:os";
 import path from "node:path";
 import { PNG } from "pngjs";
-import { compareExports, defaultCompareDir, type CompareSummary } from "../scripts/compare-lib.mts";
+import { compareExports, type CompareOptions, defaultCompareDir, type CompareSummary } from "../scripts/compare-lib.mts";
 import { BRIDGE_META_FILE } from "../scripts/bridge-meta.mts";
 
 interface ExportSpec {
@@ -30,6 +30,10 @@ interface ExportSpec {
   fileKey?: string;
   /** そのほかに書く 1×1 の白い PNG (書き出しの中のパス) */
   blankPngs?: string[];
+  /** index.json の一番上の frames に載せる id (書き出した範囲の根)。既定は 1:2 */
+  rootIds?: string[];
+  /** index.json の meta.scope。ページを書き出したときは page:<ページ名> */
+  scope?: string;
 }
 
 function writeExport(dir: string, spec: ExportSpec): string {
@@ -38,7 +42,9 @@ function writeExport(dir: string, spec: ExportSpec): string {
   if (spec.fileKey !== undefined) {
     writeFileSync(path.join(dir, BRIDGE_META_FILE), JSON.stringify({ fileKey: spec.fileKey, fileName: "f" }));
   }
-  const index = { meta: { fileName: "f", exportedAt: spec.exportedAt ?? "2026-10-26T00:00:00.000Z" }, frames: [] };
+  const frames = (spec.rootIds ?? ["1:2"]).map((id) => ({ id }));
+  const meta = { fileName: "f", exportedAt: spec.exportedAt ?? "2026-10-26T00:00:00.000Z", scope: spec.scope ?? "nodes" };
+  const index = { meta, sections: [], frames };
   writeFileSync(path.join(dir, "index.json"), JSON.stringify(index, null, 2));
   writeFileSync(path.join(dir, `${name}.1-2.json`), JSON.stringify(spec.node ?? { name: "frame" }, null, 2) + "\n");
   if (spec.png) {
@@ -78,16 +84,52 @@ function detailsTagFor(report: string, file: string): string {
   return report.slice(open, report.indexOf(">", open) + 1);
 }
 
-function compare(before: ExportSpec, after: ExportSpec): CompareSummary {
+function compare(before: ExportSpec, after: ExportSpec, options: CompareOptions = {}): CompareSummary {
   const root = mkdtempSync(path.join(tmpdir(), "compare-"));
   return compareExports(
     writeExport(path.join(root, "before"), before),
     writeExport(path.join(root, "after"), after),
-    path.join(root, "out")
+    path.join(root, "out"),
+    options
   );
 }
 
 const PLAIN = { width: 4, height: 3, dots: [] as [number, number, number, number, number][] };
+
+/**
+ * ファイル全体のスナップショット (fingerprint.js の返り値) を POST /run の応答の形で書く。
+ * ページ P1 (0:1) に Frame 1:2 > Title 1:3 と、別の Frame 2:1 > Text 2:2 (1:3 を元にするインスタンスの中のノード I2:1;1:3) がある
+ */
+interface FingerprintSpec {
+  /** ノードごとのハッシュの上書き。無いノードは h<id> */
+  hashes?: Record<string, string>;
+  fileKey?: string | null;
+  /** ノードの行を差し替える (ページの並びの行を足す・ノードを消す) */
+  nodes?: (nodes: string[]) => string[];
+}
+
+function writeFingerprint(file: string, spec: FingerprintSpec = {}): string {
+  const h = (id: string) => spec.hashes?.[id] ?? `h${id}`;
+  const nodes = [`1:2|0:1|${h("1:2")}`, `1:3|1:2|${h("1:3")}`, `2:1|0:1|${h("2:1")}`, `I2:1;1:3|2:1|${h("I2:1;1:3")}`];
+  const value = {
+    v: 1,
+    file: "f",
+    fileKey: spec.fileKey === undefined ? "KEY" : spec.fileKey,
+    takenAt: "2026-10-28T00:00:00.000Z",
+    pages: { "0:1": "P1" },
+    nodes: spec.nodes === undefined ? nodes : spec.nodes(nodes),
+  };
+  writeFileSync(file, JSON.stringify({ seq: 1, value }));
+  return file;
+}
+
+function fingerprintPair(before: FingerprintSpec, after: FingerprintSpec): { before: string; after: string } {
+  const dir = mkdtempSync(path.join(tmpdir(), "fingerprint-"));
+  return {
+    before: writeFingerprint(path.join(dir, "before.json"), before),
+    after: writeFingerprint(path.join(dir, "after.json"), after),
+  };
+}
 
 test("負例: 1 画素だけ色を変えると、その画素を数え、差分画像のその画素を赤くする", () => {
   const summary = compare({ png: PLAIN }, { png: { ...PLAIN, dots: [[2, 1, 250, 250, 250]] } });
@@ -152,6 +194,133 @@ test("負例: after に無いノード (消えた画像・消えたノード) �
   assert.match(report, /href="figma:\/\/file\/KEY\?node-id=1-2"/);
   assert.doesNotMatch(report, /node-id=1-3"/);
   assert.doesNotMatch(report, /node-id=5-6"/);
+});
+
+test("負例: 全体スナップショットを渡すと、範囲の外 → 映った先の順で report の先頭に出し (範囲の中は載せない)、summary には 3 つとも入れる", () => {
+  const node = { id: "1:2", name: "Card", children: [{ id: "1:3", name: "Title", text: "a" }] };
+  const after = { ...node, children: [{ id: "1:3", name: "Title", text: "b" }] };
+  // 範囲 (1:2) の中の 1:3 が変わり、それがインスタンス I2:1;1:3 に映り、範囲の外の 2:1 も変わった
+  const summary = compare(
+    { node, fileKey: "KEY" },
+    { node: after, fileKey: "KEY" },
+    { fingerprint: fingerprintPair({}, { hashes: { "1:3": "x", "I2:1;1:3": "x", "2:1": "x" } }) }
+  );
+  assert.ok(summary.fingerprint !== null);
+  assert.deepEqual(summary.fingerprint.outside, [{ id: "2:1", page: "P1", kind: "changed" }]);
+  assert.deepEqual(summary.fingerprint.propagated, [{ id: "I2:1;1:3", page: "P1", kind: "changed", from: "1:3" }]);
+  assert.deepEqual(summary.fingerprint.inside, [{ id: "1:3", page: "P1", kind: "changed" }]);
+  const report = readFileSync(summary.report, "utf8");
+  assert.match(report, /<h1>書き出した範囲の外が変わっている<\/h1>/);
+  const at = (text: string) => {
+    const i = report.indexOf(text);
+    assert.ok(i !== -1, `report に ${text} が無い`);
+    return i;
+  };
+  assert.ok(at('id="outside"') < at('id="propagated"'), "範囲の外が映った先より先");
+  assert.ok(at('id="propagated"') < at('id="text"'), "範囲の外の変化が構造の差分より先");
+  // 範囲の中の変化は意図したもので、画像と構造の差分に出るので、先頭には載せない
+  assert.doesNotMatch(report, /id="inside"/);
+  // 範囲の外のノードにも Figma で開くリンクが付く (入れ子の id の ; は URL の符号化)
+  assert.match(report, /href="figma:\/\/file\/KEY\?node-id=2-1"/);
+  assert.match(report, /node-id=I2-1%3B1-3"/);
+  assert.match(readFileSync(path.join(summary.outDir, "summary.json"), "utf8"), /"outside"/);
+});
+
+test("負例: 消えたノードとページの並び (document) には Figma で開くリンクを付けず、スナップショットを渡さなければ範囲の外は見ていないと出す", () => {
+  // ページを並べ替え (document の行が変わる)、範囲の外の 2:1 を消した
+  const fingerprint = fingerprintPair(
+    { nodes: (nodes) => ["document||order-a", ...nodes] },
+    { nodes: (nodes) => ["document||order-b", ...nodes.filter((line) => !line.startsWith("2:1|"))] }
+  );
+  const summary = compare({ node: { id: "1:2" }, fileKey: "KEY" }, { node: { id: "1:2" }, fileKey: "KEY" }, { fingerprint });
+  assert.deepEqual(
+    summary.fingerprint?.outside.map((n) => [n.id, n.kind]),
+    [
+      ["document", "changed"],
+      ["2:1", "removed"],
+    ]
+  );
+  const report = readFileSync(summary.report, "utf8");
+  assert.match(report, /ページの並び/);
+  assert.doesNotMatch(report, /node-id=2-1"/);
+  assert.doesNotMatch(report, /node-id=document/);
+  const without = compare({ node: { id: "1:2" } }, { node: { id: "1:2" } });
+  assert.equal(without.fingerprint, null);
+  assert.match(readFileSync(without.report, "utf8"), /範囲の外は見ていない/);
+});
+
+test("負例: 書き出しが同じでも、スナップショットの範囲の中に変化 (非表示の子など、書き出しに映らないもの) があれば「無い」と見出しに出さない", () => {
+  const summary = compare(
+    { node: { id: "1:2" }, fileKey: "KEY" },
+    { node: { id: "1:2" }, fileKey: "KEY" },
+    { fingerprint: fingerprintPair({}, { hashes: { "1:3": "hidden-child-changed" } }) }
+  );
+  assert.equal(summary.same, true);
+  assert.deepEqual(summary.fingerprint?.inside.map((n) => n.id), ["1:3"]);
+  assert.match(readFileSync(summary.report, "utf8"), /<h1>変わったところがある<\/h1>/);
+});
+
+test("負例: 書き出しの印と別のファイルのスナップショットを渡したら、取り違えなので断る (置き場所には何も書かない)", () => {
+  const root = mkdtempSync(path.join(tmpdir(), "compare-"));
+  const out = path.join(root, "out");
+  assert.throws(
+    () =>
+      compareExports(
+        writeExport(path.join(root, "before"), { fileKey: "KEY" }),
+        writeExport(path.join(root, "after"), { fileKey: "KEY" }),
+        out,
+        { fingerprint: fingerprintPair({ fileKey: "OTHER" }, { fileKey: "OTHER" }) }
+      ),
+    /別のファイルのスナップショット/
+  );
+  assert.equal(existsSync(out), false);
+  // 前後の書き出しが別のファイル (印が KEY1 と KEY2) でも、それぞれの印と照らして断る
+  assert.throws(
+    () =>
+      compare({ fileKey: "KEY1" }, { fileKey: "KEY2" }, { fingerprint: fingerprintPair({ fileKey: "KEY1" }, { fileKey: "KEY1" }) }),
+    /別のファイルのスナップショット \(KEY1\)/
+  );
+});
+
+test("負例: ページを書き出したときは、ページ自身を範囲の根にする (直下のノードを消しても outside に出さない)。同じ名前のページが 2 つなら --inside を求める", () => {
+  // ページ P1 (0:1) を書き出した。after の根は残った直下のノード (1:2) だけで、消した 2:1 とページ自身は載らない
+  const pageLine = (hash: string) => `0:1||${hash}`;
+  const fingerprint = fingerprintPair(
+    { nodes: (nodes) => [pageLine("children-a"), ...nodes] },
+    { nodes: (nodes) => [pageLine("children-b"), ...nodes.filter((line) => !line.startsWith("2:1|") && !line.startsWith("I2:1;"))] }
+  );
+  const summary = compare(
+    { fileKey: "KEY", scope: "page:P1", rootIds: ["1:2", "2:1"] },
+    { fileKey: "KEY", scope: "page:P1", rootIds: ["1:2"] },
+    { fingerprint }
+  );
+  assert.deepEqual(summary.fingerprint?.outside, []);
+  assert.deepEqual(
+    summary.fingerprint?.inside.map((n) => [n.id, n.kind]),
+    [
+      ["0:1", "changed"],
+      ["2:1", "removed"],
+      ["I2:1;1:3", "removed"],
+    ]
+  );
+  // --inside を渡せば index.json を見ない
+  const explicit = compare(
+    { fileKey: "KEY", scope: "page:P1", rootIds: ["1:2", "2:1"] },
+    { fileKey: "KEY", scope: "page:P1", rootIds: ["1:2"] },
+    { fingerprint, inside: ["1:2"] }
+  );
+  assert.deepEqual(explicit.fingerprint?.inside, []);
+  assert.equal(explicit.fingerprint?.outside.length, 3);
+  const twoPages = fingerprintPair({}, { hashes: { "1:3": "x" } });
+  for (const file of [twoPages.before, twoPages.after]) {
+    const parsed = JSON.parse(readFileSync(file, "utf8")) as { value: { pages: Record<string, string> } };
+    parsed.value.pages["0:2"] = "P1";
+    writeFileSync(file, JSON.stringify(parsed));
+  }
+  assert.throws(
+    () => compare({ fileKey: "KEY", scope: "page:P1" }, { fileKey: "KEY", scope: "page:P1" }, { fingerprint: twoPages }),
+    /同じ名前のページが 2 件/
+  );
 });
 
 test("負例: 片方にだけ印があっても、同じファイルの書き出しと確かめられないので、Figma で開くリンクを付けない", () => {
