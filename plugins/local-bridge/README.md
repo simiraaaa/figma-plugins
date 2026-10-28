@@ -374,7 +374,7 @@ Local Bridge が繋がっていなくても、fileKey とノードの id が分�
 
    ```sh
    curl -s -X POST 'localhost:47717/run?file=<fileKey>' -H 'X-Run-Token: <合言葉>' \
-     --data-binary 'const node = await figma.getNodeByIdAsync("<id>"); if (!node) return "ノードが無い"; let page = node; while (page.type !== "PAGE") page = page.parent; await figma.setCurrentPageAsync(page); figma.currentPage.selection = [node]; figma.viewport.scrollAndZoomIntoView([node]); return figma.currentPage.name;'
+     --data-binary 'const node = await figma.getNodeByIdAsync("<id>"); if (!node) return "ノードが無い"; let page = node; while (page.type !== "PAGE") page = page.parent; await figma.setCurrentPageAsync(page); if (node.type !== "PAGE") { figma.currentPage.selection = [node]; figma.viewport.scrollAndZoomIntoView([node]); } return figma.currentPage.name;'
    ```
 
 `open` は macOS のコマンド。
