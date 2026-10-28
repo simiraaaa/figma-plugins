@@ -19,7 +19,7 @@ import {
 import path from "node:path";
 import pixelmatch from "pixelmatch";
 import { PNG } from "pngjs";
-import { readBridgeMeta } from "./bridge-meta.mts";
+import { type BridgeMeta, readBridgeMeta } from "./bridge-meta.mts";
 import { CHANGES_DIFF_FILE, cropFile, NODE_ID_LINE, reportHtml, sameChangesOf, TEXT_EXTENSIONS } from "./compare-report.mts";
 
 export interface Region {
@@ -52,8 +52,8 @@ export interface SameChange {
   count: number;
   /** 足した・消した行 (diff -u の + と - の行) */
   lines: string[];
-  /** 箇所ごとのファイルと、変わった箇所の直前に始まるノード (diff -F で分かったもの) */
-  places: { file: string; nodeId: string | null; name: string | null }[];
+  /** 箇所ごとのファイルと、変わった箇所の直前に始まるノード (diff -F で分かったもの)。inAfter は、そのノードが after の書き出しにあるか (無ければ Figma で開けない) */
+  places: { file: string; nodeId: string | null; name: string | null; inAfter: boolean }[];
 }
 
 export interface CompareSummary {
@@ -134,6 +134,15 @@ function keyed(files: readonly string[]): Map<string, string> {
   const count = new Map<string, number>();
   for (const rel of files) count.set(pairKey(rel), (count.get(pairKey(rel)) ?? 0) + 1);
   return new Map(files.map((rel) => [count.get(pairKey(rel)) === 1 ? pairKey(rel) : rel, rel]));
+}
+
+/**
+ * report のリンクに使う fileKey。before と after で違えば (別のファイルの書き出しを比べている)、
+ * どちらのノードもそのファイルに無いかもしれないので null (リンクを付けない)
+ */
+function sharedFileKey(before: BridgeMeta | null, after: BridgeMeta | null): string | null {
+  if (before !== null && after !== null && before.fileKey !== after.fileKey) return null;
+  return (after ?? before)?.fileKey ?? null;
 }
 
 function readIndex(dir: string): void {
@@ -419,7 +428,7 @@ export function compareExports(beforeDir: string, afterDir: string, outDir: stri
   const same = added.length === 0 && removed.length === 0 && renamed.length === 0 && changed.length === 0;
   const report = path.join(outDir, REPORT_FILE);
   const sameChanges = changesDiff === null ? [] : sameChangesOf(outDir, changesDiff);
-  const fileKey = (readBridgeMeta(afterDir) ?? readBridgeMeta(beforeDir))?.fileKey ?? null;
+  const fileKey = sharedFileKey(readBridgeMeta(beforeDir), readBridgeMeta(afterDir));
   const summary: CompareSummary = {
     same,
     added,

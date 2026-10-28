@@ -28,6 +28,8 @@ interface ExportSpec {
   files?: Record<string, string>;
   /** dev サーバーが添える行き先のファイルの印 (.local-bridge.json) の fileKey。undefined なら印を書かない */
   fileKey?: string;
+  /** そのほかに書く 1×1 の白い PNG (書き出しの中のパス) */
+  blankPngs?: string[];
 }
 
 function writeExport(dir: string, spec: ExportSpec): string {
@@ -58,6 +60,12 @@ function writeExport(dir: string, spec: ExportSpec): string {
   for (const [rel, text] of Object.entries(spec.files ?? {})) {
     mkdirSync(path.dirname(path.join(dir, rel)), { recursive: true });
     writeFileSync(path.join(dir, rel), text);
+  }
+  for (const rel of spec.blankPngs ?? []) {
+    const png = new PNG({ width: 1, height: 1 });
+    png.data.fill(255);
+    mkdirSync(path.dirname(path.join(dir, rel)), { recursive: true });
+    writeFileSync(path.join(dir, rel), PNG.sync.write(png));
   }
   return dir;
 }
@@ -125,6 +133,25 @@ test("負例: 行き先のファイルの印があれば、report のノード�
   // 構造の差分の区切りに出るノード (1:3) と、画像のノード (1-2) のどちらにも付く
   assert.match(report, /href="figma:\/\/file\/KEY\?node-id=1-3"/);
   assert.match(report, /href="figma:\/\/file\/KEY\?node-id=1-2"/);
+});
+
+test("負例: before と after の印の fileKey が違えば (別のファイルの書き出し)、どのノードにも Figma で開くリンクを付けない", () => {
+  const summary = compare({ node: { id: "1:2", name: "a" }, fileKey: "KEY1" }, { node: { id: "1:2", name: "b" }, fileKey: "KEY2" });
+  assert.equal(summary.fileKey, null);
+  assert.doesNotMatch(readFileSync(summary.report, "utf8"), /figma:\/\//);
+});
+
+test("負例: after に無いノード (消えた画像・消えたノード) には Figma で開くリンクを付けない", () => {
+  const before = { id: "1:2", name: "Card", children: [{ id: "1:3", name: "Gone", text: "x" }] };
+  const after = { id: "1:2", name: "Card", children: [] };
+  const summary = compare(
+    { node: before, png: PLAIN, fileKey: "KEY", blankPngs: ["old.5-6.png"] },
+    { node: after, png: { ...PLAIN, dots: [[0, 0, 250, 250, 250]] }, fileKey: "KEY" }
+  );
+  const report = readFileSync(summary.report, "utf8");
+  assert.match(report, /href="figma:\/\/file\/KEY\?node-id=1-2"/);
+  assert.doesNotMatch(report, /node-id=1-3"/);
+  assert.doesNotMatch(report, /node-id=5-6"/);
 });
 
 test("負例: 行き先のファイルの印が無い書き出し (Local Bridge 以外が置いたもの) には、Figma で開くリンクを付けない", () => {
