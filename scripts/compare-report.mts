@@ -542,8 +542,11 @@ const STYLE = `
   .page { color: var(--muted); }
   #outside b { color: var(--del); }
   .alert { color: var(--del); }
-  #toc { padding: 8px 16px 0; }
-  #toc ul { display: flex; gap: 16px; list-style: none; margin: 0; padding: 0; }
+  #toc { margin: 16px; padding: 12px 20px; border: 1px solid var(--line); border-radius: 6px; background: var(--panel); }
+  #toc h2 { margin: 0 0 8px; font-size: 16px; }
+  #toc ol { margin: 0; padding-left: 1.6em; font-size: 16px; line-height: 1.8; }
+  #toc a { text-decoration: none; }
+  #toc a:hover { text-decoration: underline; }
   #intended > h2 { margin-top: 24px; }
   footer { color: var(--muted); padding: 16px; border-top: 1px solid var(--line); }
   @media (max-width: 760px) { .row, .overview { flex-direction: column; } .map { position: static; flex-basis: auto; width: 100%; } .regions { grid-template-columns: 1fr; } }
@@ -602,7 +605,7 @@ export function reportHtml(summary: CompareSummary, beforeDir: string, afterDir:
     summary.renamed.length > 0;
   const toc =
     unintended && intended
-      ? `<nav id="toc"><ul><li><a href="#unintended">意図しない変化</a></li><li><a href="#intended">意図した変化</a></li></ul></nav>`
+      ? `<nav id="toc"><h2>目次</h2><ol><li><a class="alert" href="#unintended">意図しない変化</a></li><li><a href="#intended">意図した変化</a></li></ol></nav>`
       : "";
   const bgSwitch =
     images.length === 0
