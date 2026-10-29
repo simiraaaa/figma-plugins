@@ -715,6 +715,7 @@ test("負例: compare の引数: ディレクトリ 2 つと --out・--snapshot-
   // 省けば既定の置き場所と、options は空
   const plain = parseCompareArgs([before, after]);
   assert.ok(!("error" in plain));
+  assert.equal(plain.outDir, path.resolve(defaultCompareDir(before, after)));
   assert.deepEqual(plain.options, { snapshot: undefined, inside: undefined, note: undefined });
   for (const argv of [
     [before, after, "--snapshot-before", "b.json"],
