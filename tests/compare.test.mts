@@ -274,6 +274,21 @@ test("負例: 意図しない変化と意図した変化の片方しか無けれ
   assert.doesNotMatch(unintendedReport, /id="toc"/);
   assert.match(unintendedReport, /id="unintended"/);
   assert.doesNotMatch(unintendedReport, /id="intended"/);
+  // 書き出しに映らない範囲の中の変化 (非表示の子など) だけ: 意図した変化の節に件数の案内を出す
+  const hidden = compare(
+    { node: { id: "1:2" }, fileKey: "KEY" },
+    { node: { id: "1:2" }, fileKey: "KEY" },
+    { snapshot: snapshotPair({}, { hashes: { "1:3": "hidden-child-changed" } }) }
+  );
+  const hiddenReport = readFileSync(hidden.report, "utf8");
+  assert.match(hiddenReport, /id="intended"/);
+  assert.match(hiddenReport, /書き出した範囲の中で変わったノード 1/);
+  // 画像でも構造でもないファイル (jpg など) だけが変わった: 意図した変化の節にファイルの一覧を出す
+  const asset = compare({ node: { id: "1:2" }, files: { "asset.jpg": "a" } }, { node: { id: "1:2" }, files: { "asset.jpg": "b" } });
+  assert.deepEqual(asset.changed, ["asset.jpg"]);
+  const assetReport = readFileSync(asset.report, "utf8");
+  assert.match(assetReport, /id="intended"/);
+  assert.match(assetReport, /asset\.jpg/);
   // どちらも無い
   const none = compare({ node: { id: "1:2" }, fileKey: "KEY" }, { node: { id: "1:2" }, fileKey: "KEY" }, { snapshot: snapshotPair({}, {}) });
   const noneReport = readFileSync(none.report, "utf8");
@@ -306,6 +321,10 @@ test("負例: --note の見立ては report の一番上 (範囲の外の変化�
   const report = readFileSync(summary.report, "utf8");
   assert.ok(report.indexOf('id="unintended"') < report.indexOf('id="note"'), "見立ては「意図しない変化」の中");
   assert.ok(report.indexOf('id="note"') < report.indexOf('id="outside"'), "見立てがノードの一覧より前");
+  // 節の中なので見出しは 1 段下げる。意図しない変化が無くて単独で出るときは h2
+  assert.match(report, /<h3>AI の見立て<\/h3>/);
+  const alone = compare({ node: { id: "1:2" }, fileKey: "KEY" }, { node: { id: "1:2" }, fileKey: "KEY" }, { snapshot: snapshotPair({}, {}), note });
+  assert.match(readFileSync(alone.report, "utf8"), /<h2>AI の見立て<\/h2>/);
   assert.match(report, /<p>想定外の変化は 1 つ。<br>原因は隣が動いたこと。<\/p>/);
   assert.match(report, /<ul><li>Button ページの Frame &lt;b&gt;A&lt;\/b&gt;<\/li><li>うちらの書き換えの影響<\/li><\/ul>/);
   assert.match(readFileSync(path.join(summary.outDir, "summary.json"), "utf8"), /"note": "想定外/);

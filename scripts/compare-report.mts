@@ -285,7 +285,7 @@ export function sameChangesOf(outDir: string, changesDiff: string): SameChange[]
 
 function groupSection(groups: readonly SameChange[], fileKey: string | null): string {
   if (groups.length === 0) return "";
-  return `<h3>同じ変化のまとめ</h3>
+  return `<h4>同じ変化のまとめ</h4>
 <p class="hint">同じ中身の変化 (足した・消した行が同じもの) をまとめ、多い順に並べる。場所を開くと、どのノードかが分かる。</p>
 ${groups
   .slice(0, MAX_GROUPS)
@@ -343,7 +343,7 @@ ${groupSection(summary.sameChanges, summary.fileKey)}
   const groups = summary.sameChanges;
   const totalLines = files.reduce((n, f) => n + f.lineCount, 0);
   const openAll = files.length <= OPEN_FILES_MAX && totalLines <= OPEN_TOTAL_LINES_MAX;
-  const groupsHtml = groups.length === 0 ? "" : `${groupSection(groups, summary.fileKey)}\n<h3>ファイルごとの差分</h3>`;
+  const groupsHtml = groups.length === 0 ? "" : `${groupSection(groups, summary.fileKey)}\n<h4>ファイルごとの差分</h4>`;
   return `<section id="text"><h3>構造の差分</h3>
 <p class="hint">${
     openAll ? "SVG のコードと長い差分は閉じてある。" : "ファイルや行が多いので、全部閉じてある。"
@@ -391,7 +391,7 @@ function snapshotNode(node: ChangedNode | PropagatedNode, fileKey: string | null
  * AI が書いた見立て (compare --note) を先頭に出す。
  * 行の頭が "- " なら箇条書き、空行で段落を分ける。それ以外の記法は扱わない (文字はそのまま)
  */
-function noteSection(note: string | null): string {
+function noteSection(note: string | null, level: 2 | 3 = 2): string {
   if (note === null) return "";
   const blocks = note
     .replace(/\r\n/g, "\n")
@@ -405,7 +405,7 @@ function noteSection(note: string | null): string {
       return `<p>${lines.map(escapeHtml).join("<br>")}</p>`;
     })
     .join("\n");
-  return `<section id="note"><h2>AI の見立て</h2>
+  return `<section id="note"><h${level}>AI の見立て</h${level}>
 ${html}</section>`;
 }
 
@@ -443,7 +443,7 @@ function unintendedSection(diff: SnapshotDiff | null, note: string | null, fileK
   }
   return `<section id="unintended"><h2 class="alert">意図しない変化</h2>
 <p class="alert">意図しない範囲に変更がありました。確認してください。</p>
-${noteSection(note)}
+${noteSection(note, 3)}
 <details><summary>変わったノードの一覧 (範囲の外 ${diff.outside.length}・インスタンスに映ったもの ${diff.propagated.length})</summary>
 <p class="hint">${nodes} の前後を比べたもの。書き出した範囲の中の変化 (${diff.inside.length}) は、下の意図した変化で見る。${openHint(fileKey)}</p>
 ${snapshotGroup(
@@ -591,9 +591,12 @@ export function reportHtml(summary: CompareSummary, beforeDir: string, afterDir:
   // 書き出しに映らないノード (非表示の子など) の変化はスナップショットにだけ出るので、same だけでは「無い」と言えない
   const snapshotChanged = snapshot !== null && snapshot.inside.length > 0;
   const title = unintended ? "意図しない変化がある" : summary.same && !snapshotChanged ? "変わったところは無い" : "変わったところがある";
+  const insideHidden = snapshot === null ? 0 : snapshot.inside.length;
   const intended =
     images.length > 0 ||
     summary.changesDiff !== null ||
+    insideHidden > 0 ||
+    summary.changed.length > 0 ||
     summary.added.length > 0 ||
     summary.removed.length > 0 ||
     summary.renamed.length > 0;
@@ -635,6 +638,11 @@ ${
   !intended
     ? ""
     : `<section id="intended"><h2>意図した変化 (書き出した範囲の中)</h2>
+${
+  insideHidden === 0
+    ? ""
+    : `<p class="hint">書き出した範囲の中で変わったノード ${insideHidden} (summary.json の snapshot.inside)。書き出しに映らないノード (非表示の子など) の変化は、下の画像と構造の差分には出ない。</p>`
+}
 ${
   images.length === 0
     ? ""
