@@ -11,7 +11,7 @@ import { existsSync, mkdirSync, mkdtempSync, readFileSync, realpathSync, statSyn
 import { tmpdir } from "node:os";
 import path from "node:path";
 import { PNG } from "pngjs";
-import { compareExports, type CompareOptions, defaultCompareDir, type CompareSummary } from "../scripts/compare-lib.mts";
+import { compareExports, type CompareOptions, defaultCompareDir, parseCompareArgs, type CompareSummary } from "../scripts/compare-lib.mts";
 import { BRIDGE_META_FILE } from "../scripts/bridge-meta.mts";
 
 interface ExportSpec {
@@ -697,4 +697,34 @@ test("負例: 既定の置き場所は、latest のようなリンクをたど�
   writeExport(path.join(results, "2"), {});
   symlinkSync("2", path.join(results, "latest"));
   assert.equal(defaultCompareDir(path.join(results, "1"), path.join(results, "latest")), path.join(root, "compare", "1-2"));
+});
+
+test("負例: compare の引数: ディレクトリ 2 つと --out・--snapshot-before/after・--inside・--note を読み、片方だけのスナップショット・知らない引数・ディレクトリでないものは使い方を返す", () => {
+  const before = mkdtempSync(path.join(tmpdir(), "args-before-"));
+  const after = mkdtempSync(path.join(tmpdir(), "args-after-"));
+  const parsed = parseCompareArgs([before, after, "--out", "out", "--snapshot-before", "b.json", "--snapshot-after", "a.json", "--inside", " 1:2, 3:4,,", "--note", "n.md"]);
+  assert.ok(!("error" in parsed));
+  assert.equal(parsed.beforeDir, path.resolve(before));
+  assert.equal(parsed.afterDir, path.resolve(after));
+  assert.equal(parsed.outDir, path.resolve("out"));
+  assert.deepEqual(parsed.options, {
+    snapshot: { before: path.resolve("b.json"), after: path.resolve("a.json") },
+    inside: ["1:2", "3:4"],
+    note: path.resolve("n.md"),
+  });
+  // 省けば既定の置き場所と、options は空
+  const plain = parseCompareArgs([before, after]);
+  assert.ok(!("error" in plain));
+  assert.equal(plain.outDir, path.resolve(defaultCompareDir(before, after)));
+  assert.deepEqual(plain.options, { snapshot: undefined, inside: undefined, note: undefined });
+  for (const argv of [
+    [before, after, "--snapshot-before", "b.json"],
+    [before, after, "--fingerprint-before", "b.json", "--fingerprint-after", "a.json"],
+    [before],
+    [before, path.join(after, "missing")],
+  ]) {
+    const bad = parseCompareArgs(argv);
+    assert.ok("error" in bad, `${argv.join(" ")} を受けてしまった`);
+    assert.match(bad.error, /使い方: npm run compare/);
+  }
 });

@@ -3,6 +3,7 @@
  * 書き換えの script が意図しない場所を変えていないかを確かめるために使う。手順は .claude/skills/figma-safe-edit/SKILL.md。
  */
 import { readFileSync } from "node:fs";
+import { parseArgs } from "node:util";
 
 /** snapshot.js の返り値 (POST /run の応答の value) */
 export interface Snapshot {
@@ -189,4 +190,27 @@ function propagatedFrom(id: string, main: string, insideIdsChanged: ReadonlySet<
     if (insideIdsChanged.has(origin)) return origin;
   }
   return main !== "" && insideIdsChanged.has(main) ? main : null;
+}
+
+export const SNAPSHOT_USAGE = "使い方: npm run snapshot -- diff <before.json> <after.json> --inside <id>[,<id>...]";
+
+/** npm run snapshot の引数 (process.argv の 3 つ目から) を読む。受けられなければ使い方の文を error で返す */
+export function parseSnapshotArgs(argv: readonly string[]): { before: string; after: string; inside: string[] } | { error: string } {
+  let parsed: ReturnType<typeof parseArgs<{ options: { inside: { type: "string"; default: string } }; allowPositionals: true }>>;
+  try {
+    parsed = parseArgs({ args: [...argv], allowPositionals: true, options: { inside: { type: "string", default: "" } } });
+  } catch {
+    return { error: SNAPSHOT_USAGE };
+  }
+  const { values, positionals } = parsed;
+  if (positionals.length !== 3 || positionals[0] !== "diff") return { error: SNAPSHOT_USAGE };
+  return { before: positionals[1], after: positionals[2], inside: splitIds(values.inside) };
+}
+
+/** `--inside 1:2, 3:4,` のような並びを id の配列にする (空は捨てる) */
+export function splitIds(value: string): string[] {
+  return value
+    .split(",")
+    .map((s) => s.trim())
+    .filter((s) => s !== "");
 }
