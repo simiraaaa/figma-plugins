@@ -21,7 +21,7 @@ import pixelmatch from "pixelmatch";
 import { PNG } from "pngjs";
 import { type BridgeMeta, readBridgeMeta } from "./bridge-meta.mts";
 import { CHANGES_DIFF_FILE, cropFile, NODE_ID_LINE, reportHtml, sameChangesOf, TEXT_EXTENSIONS } from "./compare-report.mts";
-import { diffFingerprints, type Fingerprint, type FingerprintDiff, readFingerprint } from "./fingerprint-lib.mts";
+import { diffSnapshots, readSnapshot, type Snapshot, type SnapshotDiff } from "./snapshot-lib.mts";
 
 export interface Region {
   x: number;
@@ -74,17 +74,17 @@ export interface CompareSummary {
   /** 書き出した Figma のファイル (dev サーバーが添えた印から。after が無ければ before の印)。無ければ null で、report に Figma を開くリンクを付けない */
   fileKey: string | null;
   /**
-   * ファイル全体のスナップショット (scripts/fingerprint.js) の前後の比較。書き出した範囲は CompareOptions.inside か、after の index.json から決めた根。
+   * ファイル全体のスナップショット (scripts/snapshot.js) の前後の比較。書き出した範囲は CompareOptions.inside か、after の index.json から決めた根。
    * スナップショットを渡さなければ null で、範囲の外は見ていない
    */
-  fingerprint: FingerprintDiff | null;
+  snapshot: SnapshotDiff | null;
   /** AI が書いた見立て (--note のファイルの中身。report の先頭に出す)。無ければ null */
   note: string | null;
 }
 
 export interface CompareOptions {
   /** 書き換えの前後に取ったファイル全体のスナップショット (POST /run の応答を保存したファイル) */
-  fingerprint?: { before: string; after: string };
+  snapshot?: { before: string; after: string };
   /** 書き出した範囲の根の id。省略すると after の index.json から決める (/export の nodeIds か、ページを書き出したならそのページ) */
   inside?: string[];
   /** AI が書いた見立てのファイル (文字。行の頭が "- " なら箇条書き、空行で段落) */
@@ -185,7 +185,7 @@ function readIndex(dir: string): ExportIndex {
  * 書き出した範囲の根。index.json の一番上の sections と frames は、/export の nodeIds のうち表示されているもの (入れ子は子孫)。
  * ページを書き出したときの根はページ直下のノードで、ページ自身と消した子が入らないので、スナップショットの pages から名前でページの id を引く
  */
-function exportRootIds(index: ExportIndex, after: Fingerprint): string[] {
+function exportRootIds(index: ExportIndex, after: Snapshot): string[] {
   const scope = index.meta?.scope;
   if (typeof scope === "string" && scope.startsWith(PAGE_SCOPE_PREFIX)) {
     const name = scope.slice(PAGE_SCOPE_PREFIX.length);
@@ -204,24 +204,24 @@ function exportRootIds(index: ExportIndex, after: Fingerprint): string[] {
 
 /**
  * 前後のスナップショットを比べる。書き出しの印と別のファイルのスナップショットなら、取り違えなので断る
- * (前後それぞれの印と照らす。前後で別のファイルなら diffFingerprints が断る)
+ * (前後それぞれの印と照らす。前後で別のファイルなら diffSnapshots が断る)
  */
-function compareFingerprints(
+function compareSnapshots(
   files: { before: string; after: string },
   metas: { before: BridgeMeta | null; after: BridgeMeta | null },
   afterIndex: ExportIndex,
   insideIds: readonly string[] | undefined
-): FingerprintDiff {
-  const before = readFingerprint(files.before);
-  const after = readFingerprint(files.after);
+): SnapshotDiff {
+  const before = readSnapshot(files.before);
+  const after = readSnapshot(files.after);
   assertSameFile(before, metas.before);
   assertSameFile(after, metas.after);
-  return diffFingerprints(before, after, insideIds ?? exportRootIds(afterIndex, after));
+  return diffSnapshots(before, after, insideIds ?? exportRootIds(afterIndex, after));
 }
 
-function assertSameFile(fp: Fingerprint, meta: BridgeMeta | null): void {
-  if (meta === null || fp.fileKey == null || fp.fileKey === meta.fileKey) return;
-  throw new Error(`書き出し (${meta.fileKey}) と別のファイルのスナップショット (${fp.fileKey}) を渡している`);
+function assertSameFile(snapshot: Snapshot, meta: BridgeMeta | null): void {
+  if (meta === null || snapshot.fileKey == null || snapshot.fileKey === meta.fileKey) return;
+  throw new Error(`書き出し (${meta.fileKey}) と別のファイルのスナップショット (${snapshot.fileKey}) を渡している`);
 }
 
 /** 書き出しの時刻は書き出すたびに変わるので、比べる前に外す */
@@ -457,8 +457,8 @@ export function compareExports(beforeDir: string, afterDir: string, outDir: stri
   const metas = { before: readBridgeMeta(beforeDir), after: readBridgeMeta(afterDir) };
   const fileKey = sharedFileKey(metas.before, metas.after);
   // 置き場所を消す前に読み、スナップショットが読めなければ何も書かずに止める
-  const fingerprint =
-    options.fingerprint === undefined ? null : compareFingerprints(options.fingerprint, metas, afterIndex, options.inside);
+  const snapshot =
+    options.snapshot === undefined ? null : compareSnapshots(options.snapshot, metas, afterIndex, options.inside);
   const note = options.note === undefined ? null : readFileSync(options.note, "utf8");
   prepareOutDir(outDir, [beforeDir, afterDir]);
 
@@ -515,7 +515,7 @@ export function compareExports(beforeDir: string, afterDir: string, outDir: stri
     sameChanges,
     report,
     fileKey,
-    fingerprint,
+    snapshot,
     note,
   };
   writeFile(report, reportHtml(summary, beforeDir, afterDir));

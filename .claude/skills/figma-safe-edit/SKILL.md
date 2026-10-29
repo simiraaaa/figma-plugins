@@ -59,14 +59,14 @@ curl -s -X POST '<URL>/export?file=<fileKey>&timeout=110' -d '{"nodeIds":["<id>"
 応答の `dir` を before として控える。
 大きいノードで時間が掛かるときの待ち方は、README の「使い方」の 3 にある。
 
-続けて、ファイル全体のスナップショット (全ノードの要約。`scripts/fingerprint.js`) を取り、保存する (書き出した範囲の外を script が変えていないかを 3 で確かめるため)。
+続けて、ファイル全体のスナップショット (全ノードの要約。`scripts/snapshot.js`) を取り、保存する (書き出した範囲の外を script が変えていないかを 3 で確かめるため)。
 1 万ノードのファイルで数秒。
 返り値の大きさの実測と、上限の 100 万文字に届くノード数の計算は、README の「書き出した範囲の外の変化を見つける」にある。
-保存先は書き出しの置き場所 (`GET /status` の `outDir`) の下の `fingerprint/` で、無ければ作る。
+保存先は書き出しの置き場所 (`GET /status` の `outDir`) の下の `snapshot/` で、無ければ作る。
 
 ```sh
-mkdir -p <書き出しの置き場所>/fingerprint
-curl -s -X POST '<URL>/run?file=<fileKey>&timeout=580' -H 'X-Run-Token: <合言葉>' --data-binary @<リポ>/scripts/fingerprint.js > <書き出しの置き場所>/fingerprint/<seq>.json
+mkdir -p <書き出しの置き場所>/snapshot
+curl -s -X POST '<URL>/run?file=<fileKey>&timeout=580' -H 'X-Run-Token: <合言葉>' --data-binary @<リポ>/scripts/snapshot.js > <書き出しの置き場所>/snapshot/<seq>.json
 ```
 
 `error` が返ったら (ノードが多すぎて返り値が上限を超えた、など)、スナップショットなしで進み、範囲の外は確かめられないことを人に伝える。
@@ -155,11 +155,11 @@ return "<確かめたい値>";
 
 1 と同じ curl で書き出し、応答の `dir` を after として控える。
 1 でスナップショットを取っていれば、もう一度取って、前後の 2 つを `compare` に渡す (書き出した範囲の外の変化も一緒に出る)。
-前か後のどちらかでスナップショットを取れなかったとき (ノードが増えて返り値が上限を超えた、など) は、ここから先 (3 と 4) の確かめは書き出しの比較だけで行い (`--fingerprint-before`・`--fingerprint-after` を付けず、`fingerprint` は `null`)、書き出した範囲の外は確かめられないことを人に伝える。
+前か後のどちらかでスナップショットを取れなかったとき (ノードが増えて返り値が上限を超えた、など) は、ここから先 (3 と 4) の確かめは書き出しの比較だけで行い (`--snapshot-before`・`--snapshot-after` を付けず、`snapshot` は `null`)、書き出した範囲の外は確かめられないことを人に伝える。
 
 ```sh
-curl -s -X POST '<URL>/run?file=<fileKey>&timeout=580' -H 'X-Run-Token: <合言葉>' --data-binary @<リポ>/scripts/fingerprint.js > <書き出しの置き場所>/fingerprint/<seq>.json
-npm --prefix <リポ> run -s compare -- <before> <after> --fingerprint-before <前のスナップショット> --fingerprint-after <後のスナップショット>
+curl -s -X POST '<URL>/run?file=<fileKey>&timeout=580' -H 'X-Run-Token: <合言葉>' --data-binary @<リポ>/scripts/snapshot.js > <書き出しの置き場所>/snapshot/<seq>.json
+npm --prefix <リポ> run -s compare -- <before> <after> --snapshot-before <前のスナップショット> --snapshot-after <後のスナップショット>
 ```
 
 出力の JSON の欄は次のとおり。
@@ -172,12 +172,12 @@ npm --prefix <リポ> run -s compare -- <before> <after> --fingerprint-before <�
   差分の区切りの行 (`@@`) の後ろに、変わった箇所の直前に始まるノードの ID が出る (子を消した箇所では、直前の兄弟などを指すことがある)。
 - `sameChanges`: 構造の差分のうち、同じ中身の変化が 2 箇所以上あるもの (多い順。箇所の数・足した行と消した行・どのノードか)
 - `report`: 人が見る HTML。
-  先頭に AI の見立て (`--note` を渡したとき) と、書き出した範囲の外の変化 (下の `fingerprint` の `outside` と `propagated`) を、範囲の外 → インスタンスに映ったものの順で出す (`inside` は意図した変化なので載せない)。
+  先頭に AI の見立て (`--note` を渡したとき) と、書き出した範囲の外の変化 (下の `snapshot` の `outside` と `propagated`) を、範囲の外 → インスタンスに映ったものの順で出す (`inside` は意図した変化なので載せない)。
   続けて、変わった箇所を 1 つずつ切り出した before・after・差分 (色が違う画素を赤くしたもの) の画像 (範囲が広い箇所と 31 箇所目からは、全体の画像で見る) と、どこが変わったかを枠で示した全体図を並べる。
   構造の差分は同じ中身の変化をまとめて箇所の数を出し、ファイルごとに畳んで並べる。
   画像とノードには「Figma で開く」のリンクが付き、押すと Figma デスクトップがそのノードを選択して前に出る。
 - `fileKey`: 書き出した Figma のファイル。Local Bridge の書き出しでなければ `null` で、report にリンクは付かない。
-- `fingerprint`: ファイル全体の比較 (下の `inside`・`propagated`・`outside`)。スナップショットを渡していなければ `null`。
+- `snapshot`: ファイル全体の比較 (下の `inside`・`propagated`・`outside`)。スナップショットを渡していなければ `null`。
   `same` は書き出しだけを見るので、書き出しに映らないノード (非表示の子など) の変化は `same: true` のまま `inside` に出る。
   書き出した範囲は after の `index.json` の根 (1 の `nodeIds` のうち表示されているもの。ページを書き出したならそのページ)。
   同じ名前のページが 2 つ以上あって決められないときは、`--inside <id>[,<id>...]` で 1 の `nodeIds` を渡す。
@@ -188,8 +188,8 @@ npm --prefix <リポ> run -s compare -- <before> <after> --fingerprint-before <�
 画面がスリープしているあいだの書き出しは、警告つきで画像が欠けることがある。
 普段は出ない警告があれば、人に画面を起こしてもらい、書き出し直して比べ直す。
 
-`fingerprint` の 3 つの欄で、書き出した範囲の外の変化を見る。
-書き出しなしでスナップショットだけを比べるときは `npm --prefix <リポ> run -s fingerprint -- diff <前> <後> --inside <id>[,<id>...]` (同じ 3 つの欄を出す)。
+`snapshot` の 3 つの欄で、書き出した範囲の外の変化を見る。
+書き出しなしでスナップショットだけを比べるときは `npm --prefix <リポ> run -s snapshot -- diff <前> <後> --inside <id>[,<id>...]` (同じ 3 つの欄を出す)。
 
 - `inside`: 範囲の中で変わったノード。書き出しの比較と同じものを指すはず。
 - `propagated`: 範囲の中のノードがメインコンポーネントの中にあり、その変化がインスタンスに映ったもの (`from` が元のノード)。
@@ -247,7 +247,7 @@ npm --prefix <リポ> run -s compare -- <before> <after> --fingerprint-before <�
 
 複製したファイルで実測した (2026-10-28): ページの並べ替えは `document`、範囲の外の文字の配置だけの変更はその TEXT、メインコンポーネントへの子の追加は本体とインスタンスが、それぞれ `outside`・`propagated` に出た。
 
-スナップショットに入る値は `scripts/fingerprint.js` の冒頭に書いてある (種類・名前・表示・位置・大きさ・塗り・線・効果・制約・レイアウト・文字の範囲ごとの書式・スタイル・コンポーネントの property・子の並びなど)。
+スナップショットに入る値は `scripts/snapshot.js` の冒頭に書いてある (種類・名前・表示・位置・大きさ・塗り・線・効果・制約・レイアウト・文字の範囲ごとの書式・スタイル・コンポーネントの property・子の並びなど)。
 見ていない値の変化は拾えない。
 
 before と after が `same: true` のときは、script の返り値で値が変わったかを見る。
@@ -288,8 +288,8 @@ script からのページの移動・選択・表示の変更は履歴に積ま�
    スナップショットを取り直し、3 の after のスナップショットと比べる (書き出していないので、`--inside` に 1 の `nodeIds` を渡す)。
 
    ```sh
-   curl -s -X POST '<URL>/run?file=<fileKey>&timeout=580' -H 'X-Run-Token: <合言葉>' --data-binary @<リポ>/scripts/fingerprint.js > <書き出しの置き場所>/fingerprint/<after の seq>-now.json
-   npm --prefix <リポ> run -s fingerprint -- diff <after のスナップショット> <今のスナップショット> --inside <id>[,<id>...]
+   curl -s -X POST '<URL>/run?file=<fileKey>&timeout=580' -H 'X-Run-Token: <合言葉>' --data-binary @<リポ>/scripts/snapshot.js > <書き出しの置き場所>/snapshot/<after の seq>-now.json
+   npm --prefix <リポ> run -s snapshot -- diff <after のスナップショット> <今のスナップショット> --inside <id>[,<id>...]
    ```
 
    保存する名前は 1 と 3 で使っていないものにする (3 の after のスナップショットに上書きすると、同じファイル同士の比較になって変化が見えない)。
@@ -327,10 +327,10 @@ script からのページの移動・選択・表示の変更は履歴に積ま�
 3. もう一度書き出してスナップショットも取り、1 の before と比べる。
 
    ```sh
-   npm --prefix <リポ> run -s compare -- <before> <reverted> --fingerprint-before <1 のスナップショット> --fingerprint-after <今のスナップショット>
+   npm --prefix <リポ> run -s compare -- <before> <reverted> --snapshot-before <1 のスナップショット> --snapshot-after <今のスナップショット>
    ```
 
-   `same` が `true` で、`fingerprint` の `inside`・`propagated`・`outside` がどれも空なら、戻せた。
+   `same` が `true` で、`snapshot` の `inside`・`propagated`・`outside` がどれも空なら、戻せた。
    スナップショットが無いとき (3 の注記) は、`same` が `true` なら戻せたと見る。
    そうでなければ、3 のとおり、書き出しの `warnings` を見て、画像が欠けていないかを先に確かめる。
    欠けていなければ、印まで戻したのに書き換える前と違う。

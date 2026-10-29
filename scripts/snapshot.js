@@ -1,8 +1,8 @@
 // Local Bridge の /run に送る script (async 関数の本体)。ファイル全体のスナップショット (全ノードの要約) を返す。
-// 書き換える前と後に 1 回ずつ取り、npm run compare (または scripts/fingerprint.mts の diff) で比べると、書き出した範囲の外で変わったノードと、何が変わったかの区分が分かる。
+// 書き換える前と後に 1 回ずつ取り、npm run compare (または scripts/snapshot.mts の diff) で比べると、書き出した範囲の外で変わったノードと、何が変わったかの区分が分かる。
 // 使い方は .claude/skills/figma-safe-edit/SKILL.md。
 //
-//   curl -s -X POST '<URL>/run?file=<fileKey>&timeout=580' -H 'X-Run-Token: <合言葉>' --data-binary @<リポ>/scripts/fingerprint.js > <保存先>.json
+//   curl -s -X POST '<URL>/run?file=<fileKey>&timeout=580' -H 'X-Run-Token: <合言葉>' --data-binary @<リポ>/scripts/snapshot.js > <保存先>.json
 //
 // 返り値: { v: 2, file, fileKey, takenAt, ms, pages: { <ページ id>: <名前> }, nodes: ["<id>|<親の id>|<要約>[|<メインコンポーネントの id>]", ...] }
 // (4 つ目はインスタンスだけ)
@@ -13,7 +13,7 @@
 const startedAt = Date.now();
 await figma.loadAllPagesAsync();
 
-// 区分ごとのハッシュは 24 ビットを base64url の 4 文字にする (scripts/fingerprint-lib.mts の HASH_WIDTH と同じ)。
+// 区分ごとのハッシュは 24 ビットを base64url の 4 文字にする (scripts/snapshot-lib.mts の HASH_WIDTH と同じ)。
 // 16 進 8 桁だと区分 7 つで 1 万ノードの返り値が 100 万文字に近づく
 const HASH_ALPHABET = "ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789-_";
 
@@ -37,7 +37,7 @@ function safeJson(value) {
   }
 }
 
-// 要約の区分 (順番は scripts/fingerprint-lib.mts の ASPECTS と同じにする)。
+// 要約の区分 (順番は scripts/snapshot-lib.mts の ASPECTS と同じにする)。
 // name: 名前 / geometry: 位置・大きさ・回転・制約・親のレイアウトの中での伸び方 / look: 表示・塗り・線・効果・角丸・ベクターの形 /
 // text: 文字と書式 / layout: 自動レイアウトの設定 / component: 種類・コンポーネントの property・メインコンポーネント / children: 子の並び
 const ASPECT_FIELDS = {

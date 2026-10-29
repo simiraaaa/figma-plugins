@@ -18,7 +18,7 @@
     "typecheck": "npm run build:dump-test && npm run build:spec-test && npm run build:local-bridge-test && tsc --noEmit && tsc --noEmit -p tsconfig.tests.json",
     "dev:server": "node scripts/dev-server.mts",
     "compare": "node scripts/compare.mts",
-    "fingerprint": "node scripts/fingerprint.mts"
+    "snapshot": "node scripts/snapshot.mts"
   },
   "devDependencies": {
     "@figma/plugin-typings": "^1.123.0",
