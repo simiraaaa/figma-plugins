@@ -323,8 +323,8 @@ script からのページの移動・選択・表示の変更は履歴に積ま�
    npm --prefix <リポ> run -s compare -- <before> <reverted> --fingerprint-before <1 のスナップショット> --fingerprint-after <今のスナップショット>
    ```
 
-   書き換える前 (1) にスナップショットを取れなかったときは、`--fingerprint-before`・`--fingerprint-after` を付けずに比べ、書き出した範囲の外は確かめられないことを人に伝える。
    `same` が `true` で、`fingerprint` の `inside`・`propagated`・`outside` がどれも空なら、戻せた。
+   書き換える前 (1) にスナップショットを取れなかったときは、`--fingerprint-before`・`--fingerprint-after` を付けずに比べ (`fingerprint` は `null` になる)、`same` が `true` なら戻せたと見て、書き出した範囲の外は確かめられないことを人に伝える。
    そうでなければ、3 のとおり、書き出しの `warnings` を見て、画像が欠けていないかを先に確かめる。
    欠けていなければ、印まで戻したのに書き換える前と違う。
    `triggerUndo` はもう送らず、変わったノードを 3 の見立てと同じ手で読み、「誰かの編集があるかも (書き換える前と後のあいだに、別の人が触っているか、スナップショットに映らない形で触られている)」として、変わったノードと一緒に人に伝える。
