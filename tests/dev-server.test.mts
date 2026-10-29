@@ -1994,6 +1994,16 @@ test("負例: リポジトリに新しい版があれば、AI が読む GET /sta
     await pluginPost(base, "result", job, sampleZip());
     const dump = await json<StatusReply>(exported);
     assert.equal(dump.update?.behind, 3);
+    // 時間切れの 504 と、そのあと GET /status?seq で回収する応答にも付く (名前の確かめが時間切れになっても気づけるように)
+    const polled3 = pluginNext(base, `?server=${next.server}&after=2`);
+    const late = await runRequest(base, "return 1;", "?timeout=0.2");
+    const third = await json<RunNext>(polled3);
+    assert.equal(late.status, 504);
+    assert.equal((await json<RunReply>(late)).update?.behind, 3);
+    await pluginRunResult(base, third, { ok: true, value: 1 });
+    const recovered = await json<RequestReply>(fetch(`${base}/status?seq=3`));
+    assert.equal(recovered.state, "done");
+    assert.equal(recovered.update?.behind, 3);
   } finally {
     close();
   }

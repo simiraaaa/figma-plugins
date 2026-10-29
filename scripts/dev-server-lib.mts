@@ -307,6 +307,7 @@ export interface RequestReply extends Partial<DevStatus> {
   seq: number;
   kind: DevRequest["kind"];
   fileKey: string;
+  update?: UpdateNotice;
   state: RequestState;
   value?: unknown;
   plugin: PluginState[];
@@ -785,7 +786,7 @@ export function createDevServer(options: DevServerOptions): DevServerHandler {
     const plugin = pluginState();
     const { kind, fileKey } = request;
     if (outcome !== undefined) {
-      return { ...outcome.body, seq, kind, fileKey, state: outcome.ok ? "done" : "failed", plugin };
+      return { ...outcome.body, seq, kind, fileKey, state: outcome.ok ? "done" : "failed", plugin, ...updateNotice() };
     }
     return {
       seq,
@@ -1075,6 +1076,7 @@ export function createDevServer(options: DevServerOptions): DevServerHandler {
             error: `${seconds} 秒待ってもプラグインに渡せなかったので取り消した (実行していない。送り直してよい)`,
             seq: request.seq,
             plugin,
+            ...updateNotice(),
           });
           return;
         }
@@ -1088,6 +1090,7 @@ export function createDevServer(options: DevServerOptions): DevServerHandler {
           error: `${seconds} 秒待ってもプラグインから結果が来ない (${hint})`,
           seq: request.seq,
           plugin,
+          ...updateNotice(),
         });
       },
       () => cancelIfPending(request)
