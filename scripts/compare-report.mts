@@ -6,7 +6,7 @@ import { existsSync, readFileSync, statSync } from "node:fs";
 import path from "node:path";
 import { figmaNodeLink, isNodeId } from "./bridge-meta.mts";
 import type { CompareSummary, ImageChange, SameChange } from "./compare-lib.mts";
-import type { ChangedNode, FingerprintDiff, PropagatedNode } from "./fingerprint-lib.mts";
+import { type Aspect, type ChangedNode, DOCUMENT_ID, type FingerprintDiff, type PropagatedNode } from "./fingerprint-lib.mts";
 
 export const TEXT_EXTENSIONS: ReadonlySet<string> = new Set([".json", ".md", ".svg", ".txt"]);
 export const CHANGES_DIFF_FILE = "changes.diff";
@@ -363,8 +363,20 @@ const KIND_LABEL: Record<ChangedNode["kind"], string> = {
   moved: "移った",
 };
 
-/** ページの並びの変化は、ノードの id でなく document で出る */
-const DOCUMENT_ID = "document";
+const ASPECT_LABEL: Record<Aspect, string> = {
+  name: "名前",
+  geometry: "位置・大きさ",
+  look: "見た目",
+  text: "文字",
+  layout: "レイアウト",
+  component: "コンポーネント",
+  children: "子の並び",
+};
+
+function kindLabel(node: ChangedNode): string {
+  if (node.kind !== "changed" || node.aspects === undefined || node.aspects.length === 0) return KIND_LABEL[node.kind];
+  return `${KIND_LABEL[node.kind]}: ${node.aspects.map((a) => ASPECT_LABEL[a]).join("・")}`;
+}
 
 function fingerprintNode(node: ChangedNode | PropagatedNode, fileKey: string | null): string {
   const id = node.id === DOCUMENT_ID ? "ページの並び" : `<code>${escapeHtml(node.id)}</code>`;
@@ -372,7 +384,29 @@ function fingerprintNode(node: ChangedNode | PropagatedNode, fileKey: string | n
   const link = node.kind === "removed" ? "" : openInFigma(fileKey, node.id);
   const page = node.page === "" ? "" : ` <span class="page">${escapeHtml(node.page)}</span>`;
   const from = "from" in node ? ` <span class="note">(元のノード <code>${escapeHtml(node.from)}</code>)</span>` : "";
-  return `<li><span class="tag">${KIND_LABEL[node.kind]}</span>${page} ${id}${link}${from}</li>`;
+  return `<li><span class="tag">${kindLabel(node)}</span>${page} ${id}${link}${from}</li>`;
+}
+
+/**
+ * AI が書いた見立て (compare --note) を先頭に出す。
+ * 行の頭が "- " なら箇条書き、空行で段落を分ける。それ以外の記法は扱わない (文字はそのまま)
+ */
+function noteSection(note: string | null): string {
+  if (note === null) return "";
+  const blocks = note
+    .replace(/\r\n/g, "\n")
+    .split(/\n{2,}/)
+    .map((b) => b.trim())
+    .filter((b) => b !== "");
+  const html = blocks
+    .map((block) => {
+      const lines = block.split("\n");
+      if (lines.every((l) => l.startsWith("- "))) return `<ul>${lines.map((l) => `<li>${escapeHtml(l.slice(2))}</li>`).join("")}</ul>`;
+      return `<p>${lines.map(escapeHtml).join("<br>")}</p>`;
+    })
+    .join("\n");
+  return `<section id="note"><h2>AI の見立て</h2>
+${html}</section>`;
 }
 
 function fingerprintGroup(id: string, title: string, hint: string, nodes: readonly ChangedNode[], fileKey: string | null): string {
@@ -486,6 +520,8 @@ const STYLE = `
   pre .node { font-weight: 600; }
   pre .node code { color: var(--muted); font-weight: normal; }
   a.figma { font-weight: normal; color: var(--muted); font-size: 12px; }
+  #note { border: 1px solid var(--line); border-radius: 6px; padding: 8px 12px; margin-top: 16px; }
+  #note h2 { margin-top: 0; }
   ul.nodes { margin: 4px 0; padding-left: 0; list-style: none; }
   ul.nodes li { padding: 1px 0; }
   .page { color: var(--muted); }
@@ -568,6 +604,7 @@ ${bgSwitch}
 </ul>
 </header>
 <main>
+${noteSection(summary.note)}
 ${fingerprintSection(fp, summary.fileKey)}
 ${
   images.length === 0

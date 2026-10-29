@@ -112,7 +112,7 @@ function writeFingerprint(file: string, spec: FingerprintSpec = {}): string {
   const h = (id: string) => spec.hashes?.[id] ?? `h${id}`;
   const nodes = [`1:2|0:1|${h("1:2")}`, `1:3|1:2|${h("1:3")}`, `2:1|0:1|${h("2:1")}`, `I2:1;1:3|2:1|${h("I2:1;1:3")}`];
   const value = {
-    v: 1,
+    v: 2,
     file: "f",
     fileKey: spec.fileKey === undefined ? "KEY" : spec.fileKey,
     takenAt: "2026-10-28T00:00:00.000Z",
@@ -258,6 +258,38 @@ test("負例: 書き出しが同じでも、スナップショットの範囲の
   assert.equal(summary.same, true);
   assert.deepEqual(summary.fingerprint?.inside.map((n) => n.id), ["1:3"]);
   assert.match(readFileSync(summary.report, "utf8"), /<h1>変わったところがある<\/h1>/);
+});
+
+test("負例: --note の見立ては report の一番上 (範囲の外の変化より前) に、箇条書きと段落で出し、summary にも入れる。HTML は文字として扱う", () => {
+  const dir = mkdtempSync(path.join(tmpdir(), "note-"));
+  const note = path.join(dir, "note.md");
+  writeFileSync(note, "想定外の変化は 1 つ。\n原因は隣が動いたこと。\n\n- Button ページの Frame <b>A</b>\n- うちらの書き換えの影響\n");
+  const summary = compare(
+    { node: { id: "1:2" }, fileKey: "KEY" },
+    { node: { id: "1:2" }, fileKey: "KEY" },
+    { fingerprint: fingerprintPair({}, { hashes: { "2:1": "x" } }), note }
+  );
+  assert.equal(summary.note, readFileSync(note, "utf8"));
+  const report = readFileSync(summary.report, "utf8");
+  assert.ok(report.indexOf('id="note"') < report.indexOf('id="fingerprint"'), "見立てが範囲の外の変化より前");
+  assert.match(report, /<p>想定外の変化は 1 つ。<br>原因は隣が動いたこと。<\/p>/);
+  assert.match(report, /<ul><li>Button ページの Frame &lt;b&gt;A&lt;\/b&gt;<\/li><li>うちらの書き換えの影響<\/li><\/ul>/);
+  assert.match(readFileSync(path.join(summary.outDir, "summary.json"), "utf8"), /"note": "想定外/);
+  const without = compare({ node: { id: "1:2" } }, { node: { id: "1:2" } });
+  assert.equal(without.note, null);
+  assert.doesNotMatch(readFileSync(without.report, "utf8"), /id="note"/);
+});
+
+test("負例: 変わった区分 (aspects) があれば、report のノードに「変わった: 位置・大きさ」のように出す", () => {
+  const summaryOf = (overrides: Record<string, string> = {}) =>
+    ["name", "geometry", "look", "text", "layout", "component", "children"].map((a) => overrides[a] ?? a.slice(0, 4).toUpperCase()).join("");
+  const summary = compare(
+    { node: { id: "1:2" }, fileKey: "KEY" },
+    { node: { id: "1:2" }, fileKey: "KEY" },
+    { fingerprint: fingerprintPair({ hashes: { "2:1": summaryOf() } }, { hashes: { "2:1": summaryOf({ geometry: "GGGG", text: "TTTT" }) } }) }
+  );
+  assert.deepEqual(summary.fingerprint?.outside, [{ id: "2:1", page: "P1", kind: "changed", aspects: ["geometry", "text"] }]);
+  assert.match(readFileSync(summary.report, "utf8"), /<span class="tag">変わった: 位置・大きさ・文字<\/span>/);
 });
 
 test("負例: 書き出しの印と別のファイルのスナップショットを渡したら、取り違えなので断る (置き場所には何も書かない)", () => {

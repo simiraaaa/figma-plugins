@@ -78,6 +78,8 @@ export interface CompareSummary {
    * スナップショットを渡さなければ null で、範囲の外は見ていない
    */
   fingerprint: FingerprintDiff | null;
+  /** AI が書いた見立て (--note のファイルの中身。report の先頭に出す)。無ければ null */
+  note: string | null;
 }
 
 export interface CompareOptions {
@@ -85,6 +87,8 @@ export interface CompareOptions {
   fingerprint?: { before: string; after: string };
   /** 書き出した範囲の根の id。省略すると after の index.json から決める (/export の nodeIds か、ページを書き出したならそのページ) */
   inside?: string[];
+  /** AI が書いた見立てのファイル (文字。行の頭が "- " なら箇条書き、空行で段落) */
+  note?: string;
 }
 
 /** 比べた結果の置き場所の印。--out に既にある置き場所を消してよいかは、これに SUMMARY_MARK が入っているかで決める */
@@ -455,6 +459,7 @@ export function compareExports(beforeDir: string, afterDir: string, outDir: stri
   // 置き場所を消す前に読み、スナップショットが読めなければ何も書かずに止める
   const fingerprint =
     options.fingerprint === undefined ? null : compareFingerprints(options.fingerprint, metas, afterIndex, options.inside);
+  const note = options.note === undefined ? null : readFileSync(options.note, "utf8");
   prepareOutDir(outDir, [beforeDir, afterDir]);
 
   const beforeFiles = keyed(listFiles(beforeDir));
@@ -511,6 +516,7 @@ export function compareExports(beforeDir: string, afterDir: string, outDir: stri
     report,
     fileKey,
     fingerprint,
+    note,
   };
   writeFile(report, reportHtml(summary, beforeDir, afterDir));
   writeFile(path.join(outDir, SUMMARY_FILE), JSON.stringify({ ...SUMMARY_MARK, ...summary }, null, 2) + "\n");

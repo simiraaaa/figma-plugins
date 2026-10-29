@@ -1,5 +1,5 @@
 /**
- * ファイル全体のノードの指紋 (scripts/fingerprint.js の返り値) を 2 つ比べる。手順は .claude/skills/figma-safe-edit/SKILL.md。
+ * ファイル全体のノードのスナップショット (scripts/fingerprint.js の返り値) を 2 つ比べる。手順は .claude/skills/figma-safe-edit/SKILL.md。
  *
  *   npm run fingerprint -- diff <before.json> <after.json> --inside <id>[,<id>...]   # 書き出した範囲の外で変わったノードを出す
  *

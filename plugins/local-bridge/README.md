@@ -365,11 +365,12 @@ Plugin API のコードを送ると、Local Bridge が実行して返り値を J
 
 ### 書き出した範囲の外の変化を見つける
 
-書き換えの script が意図しない場所を変えていないかは、ファイル全体のスナップショット (全ノードの要約。`scripts/fingerprint.js` を `/run` で実行した返り値) を書き換えの前後で取り、`npm run compare` に `--fingerprint-before`・`--fingerprint-after` で渡して確かめる (report の先頭に、範囲の外 → インスタンスに映ったものの順で出る。範囲の中の変化は summary.json の `fingerprint.inside` にだけ入る)。
+書き換えの script が意図しない場所を変えていないかは、ファイル全体のスナップショット (全ノードの要約。`scripts/fingerprint.js` を `/run` で実行した返り値) を書き換えの前後で取り、`npm run compare` に `--fingerprint-before`・`--fingerprint-after` で渡して確かめる (report の先頭に、範囲の外 → インスタンスに映ったものの順で、変わった区分 (位置・文字など) つきで出る。範囲の中の変化は summary.json の `fingerprint.inside` にだけ入る)。
+範囲の外の変化があるときは、AI が見立て (何がどう変わったか・原因・他の人の変更の疑い) を書き、`--note` で report の先頭に載せる。
 スナップショットだけを比べるなら `npm run fingerprint -- diff`。
 手順は[書き換えの手順](../../.claude/skills/figma-safe-edit/SKILL.md)の 1 と 3 にある。
-1 万ノード (17 ページ) のファイルで 1 回 5 秒ほど、返り値は 500 KB ほど (2026-10-28 に実測)。
-返り値の上限 (100 万文字) を超える大きさのファイルは未確認。
+9,992 ノード (17 ページ) のファイルで、1 回 5.7 秒、返り値は 621,137 文字 (1 ノードあたり 62 文字。2026-10-29 に実測)。
+返り値の上限 (100 万文字) には 1.6 万ノードほどで達する計算で、超える大きさのファイルは未確認。
 
 ### Figma の画面を目的のノードへ飛ばす
 
