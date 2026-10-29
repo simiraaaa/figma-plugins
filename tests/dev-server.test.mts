@@ -2004,6 +2004,18 @@ test("負例: リポジトリに新しい版があれば、AI が読む GET /sta
     const recovered = await json<RequestReply>(fetch(`${base}/status?seq=3`));
     assert.equal(recovered.state, "done");
     assert.equal(recovered.update?.behind, 3);
+    // 結果を待つ /status?seq の 504 と、400 (file 無し)・503 (繋がっていない) にも付く (AI が読む JSON の応答は全部)
+    const queued = runRequest(base, "return 2;", "?timeout=5");
+    queued.catch(() => {});
+    await sleep(50);
+    const waiting = await fetch(`${base}/status?seq=4&timeout=0.2`);
+    assert.equal(waiting.status, 504);
+    assert.equal((await json<RequestReply>(waiting)).update?.behind, 3);
+    const noFile = await fetch(`${base}/run`, { method: "POST", headers: { "X-Run-Token": "t1" }, body: "return 1;" });
+    assert.equal(noFile.status, 400);
+    assert.equal((await json<RunReply>(noFile)).update?.behind, 3);
+    // プラグインが読む GET /hello の形は変えない (behind だけ)
+    assert.deepEqual((await json<{ update?: unknown }>(fetch(`${base}/hello`, { headers: PLUGIN }))).update, { behind: 3 });
   } finally {
     close();
   }

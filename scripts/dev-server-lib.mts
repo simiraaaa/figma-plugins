@@ -353,7 +353,7 @@ function readBody(req: http.IncomingMessage): Promise<Buffer> {
   });
 }
 
-function send(res: http.ServerResponse, code: number, body?: unknown): void {
+function sendJson(res: http.ServerResponse, code: number, body?: unknown): void {
   if (body === undefined) {
     res.writeHead(code);
     res.end();
@@ -770,8 +770,17 @@ export function createDevServer(options: DevServerOptions): DevServerHandler {
     return update?.kind === "behind" && message !== null ? { update: { behind: update.behind, message } } : {};
   }
 
+  /**
+   * JSON の応答には全部、新しい版の知らせ (update) を付ける (/run・/export・/status の 200・4xx・504 のどれで気づいてもよいように)。
+   * 本文がもう update を持つもの (GET /hello。プラグインが読む形を変えない) には付けない
+   */
+  function send(res: http.ServerResponse, code: number, body?: unknown): void {
+    const plain = typeof body === "object" && body !== null && !Array.isArray(body);
+    sendJson(res, code, plain && !("update" in body) ? { ...body, ...updateNotice() } : body);
+  }
+
   function statusReply(fileKey: string | undefined): StatusReply {
-    return { ...lastStatus(fileKey), outDir, plugin: pluginState(), ...updateNotice() };
+    return { ...lastStatus(fileKey), outDir, plugin: pluginState() };
   }
 
   function setProcessing(bridge: Bridge, next: Bridge["processing"]): void {
@@ -786,7 +795,7 @@ export function createDevServer(options: DevServerOptions): DevServerHandler {
     const plugin = pluginState();
     const { kind, fileKey } = request;
     if (outcome !== undefined) {
-      return { ...outcome.body, seq, kind, fileKey, state: outcome.ok ? "done" : "failed", plugin, ...updateNotice() };
+      return { ...outcome.body, seq, kind, fileKey, state: outcome.ok ? "done" : "failed", plugin };
     }
     return {
       seq,
@@ -1061,7 +1070,7 @@ export function createDevServer(options: DevServerOptions): DevServerHandler {
       (wake) => {
         resolveOutcome = (outcome) => {
           wake();
-          send(res, outcome.ok ? 200 : 422, { ...outcome.body, ...updateNotice() });
+          send(res, outcome.ok ? 200 : 422, outcome.body);
         };
         const set = outcomeWaiters.get(request.seq) ?? new Set();
         set.add(resolveOutcome);
@@ -1076,7 +1085,6 @@ export function createDevServer(options: DevServerOptions): DevServerHandler {
             error: `${seconds} 秒待ってもプラグインに渡せなかったので取り消した (実行していない。送り直してよい)`,
             seq: request.seq,
             plugin,
-            ...updateNotice(),
           });
           return;
         }
@@ -1090,7 +1098,6 @@ export function createDevServer(options: DevServerOptions): DevServerHandler {
           error: `${seconds} 秒待ってもプラグインから結果が来ない (${hint})`,
           seq: request.seq,
           plugin,
-          ...updateNotice(),
         });
       },
       () => cancelIfPending(request)
