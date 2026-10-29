@@ -445,7 +445,7 @@ function unintendedSection(diff: SnapshotDiff | null, note: string | null, fileK
 <p class="alert">意図しない範囲に変更がありました。確認してください。</p>
 ${noteSection(note, 3)}
 <details><summary>変わったノードの一覧 (範囲の外 ${diff.outside.length}・インスタンスに映ったもの ${diff.propagated.length})</summary>
-<p class="hint">${nodes} の前後を比べたもの。書き出した範囲の中の変化 (${diff.inside.length}) は、下の意図した変化で見る。${openHint(fileKey)}</p>
+<p class="hint">${nodes} の前後を比べたもの。${diff.inside.length === 0 ? "" : `書き出した範囲の中の変化 (${diff.inside.length}) は、下の意図した変化で見る。`}${openHint(fileKey)}</p>
 ${snapshotGroup(
   "outside",
   "書き出した範囲の外で変わったノード",
