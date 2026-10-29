@@ -24,7 +24,7 @@ import {
 import http from "node:http";
 import path from "node:path";
 import { BRIDGE_META_FILE, type BridgeMeta } from "./bridge-meta.mts";
-import type { RepoUpdate } from "./update-check.mts";
+import { type RepoUpdate, updateMessage } from "./update-check.mts";
 
 /**
  * 待ち受けるポートの候補。前から順に、空いている最初のポートで起動する。
@@ -265,17 +265,27 @@ export interface PluginState {
 }
 
 /** POST /run の応答。script の結果は書き出しの結果ではないので、status.json と version は動かさない */
+/** リポジトリに新しい版があることの、AI (依頼した側) への知らせ。GET /status と /run・/export の応答に付く (無ければ欄ごと無い) */
+export interface UpdateNotice {
+  /** origin/main が HEAD より先にあるコミットの数 */
+  behind: number;
+  /** 人に伝える文 (dev サーバーの端末と Local Bridge の画面と同じ) */
+  message: string;
+}
+
 export interface RunReply {
   seq: number;
   /** script が return した値。return しなければ null */
   value?: unknown;
   error?: string;
+  update?: UpdateNotice;
 }
 
 export interface StatusReply extends DevStatus {
   /** 結果の置き場所。ほかのセッションが起動した dev サーバーに相乗りしたとき、どこに届くかを知るため */
   outDir: string;
   plugin: PluginState[];
+  update?: UpdateNotice;
 }
 
 /**
@@ -297,6 +307,7 @@ export interface RequestReply extends Partial<DevStatus> {
   seq: number;
   kind: DevRequest["kind"];
   fileKey: string;
+  update?: UpdateNotice;
   state: RequestState;
   value?: unknown;
   plugin: PluginState[];
@@ -342,7 +353,7 @@ function readBody(req: http.IncomingMessage): Promise<Buffer> {
   });
 }
 
-function send(res: http.ServerResponse, code: number, body?: unknown): void {
+function sendJson(res: http.ServerResponse, code: number, body?: unknown): void {
   if (body === undefined) {
     res.writeHead(code);
     res.end();
@@ -750,6 +761,22 @@ export function createDevServer(options: DevServerOptions): DevServerHandler {
   function lastStatus(fileKey: string | undefined): DevStatus {
     if (fileKey === undefined) return status;
     return fileStatuses.get(fileKey) ?? { version: 0 };
+  }
+
+  /** リポジトリに新しい版があれば、依頼した側 (AI) への応答に付ける欄。AI はこれを見て人に取り込みを促す */
+  function updateNotice(): { update?: UpdateNotice } {
+    const update = options.repoUpdate?.() ?? null;
+    const message = update === null ? null : updateMessage(update);
+    return update?.kind === "behind" && message !== null ? { update: { behind: update.behind, message } } : {};
+  }
+
+  /**
+   * JSON の応答には全部、新しい版の知らせ (update) を付ける (/run・/export・/status の 200・4xx・504 のどれで気づいてもよいように)。
+   * 本文がもう update を持つもの (GET /hello。プラグインが読む形を変えない) には付けない
+   */
+  function send(res: http.ServerResponse, code: number, body?: unknown): void {
+    const plain = typeof body === "object" && body !== null && !Array.isArray(body);
+    sendJson(res, code, plain && !("update" in body) ? { ...body, ...updateNotice() } : body);
   }
 
   function statusReply(fileKey: string | undefined): StatusReply {

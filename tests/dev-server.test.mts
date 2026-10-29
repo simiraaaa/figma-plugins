@@ -32,6 +32,7 @@ import {
   type PluginState,
   readStoredZip,
   type RequestReply,
+  type RunReply,
   type RunRequest,
   type StatusReply,
 } from "../scripts/dev-server-lib.mts";
@@ -1962,6 +1963,59 @@ test("負例: GET /hello は、リポジトリに新しい版があれば update
       protocol: DEV_SERVER_PROTOCOL,
       update: { behind: 2 },
     });
+  } finally {
+    close();
+  }
+});
+
+test("負例: リポジトリに新しい版があれば、AI が読む GET /status と /run・/export の応答に update (件数と、取り込みの文) を付け、無ければ付けない", async () => {
+  const checkedAt = "2026-10-29T00:00:00.000Z";
+  let update: RepoUpdate | null = { kind: "current", checkedAt };
+  const { base, close } = await startServer(undefined, { repoUpdate: () => update });
+  try {
+    assert.equal("update" in (await json<StatusReply>(fetch(`${base}/status`))), false);
+    update = { kind: "behind", behind: 3, checkedAt };
+    const status = await json<StatusReply>(fetch(`${base}/status`));
+    assert.equal(status.update?.behind, 3);
+    assert.match(status.update?.message ?? "", /新しい版がある \(3 コミット\)/);
+    // script の実行の応答 (手順の最初の return figma.root.name で AI が気づく)
+    const polled = pluginNext(base);
+    const ran = runRequest(base, "return figma.root.name;");
+    const next = await json<RunNext>(polled);
+    await pluginRunResult(base, next, { ok: true, value: "Rabee UI" });
+    const reply = await json<RunReply>(ran);
+    assert.equal(reply.value, "Rabee UI");
+    assert.equal(reply.update?.behind, 3);
+    // 書き出しの応答にも付く
+    const exporting = pluginNext(base, `?server=${next.server}&after=1`);
+    const exported = fetch(`${base}/export?file=${FILE}`, { method: "POST", body: JSON.stringify({ nodeIds: ["1:2"] }) });
+    const job = await json<Next>(exporting);
+    assert.equal(job.kind, "export");
+    await pluginPost(base, "result", job, sampleZip());
+    const dump = await json<StatusReply>(exported);
+    assert.equal(dump.update?.behind, 3);
+    // 時間切れの 504 と、そのあと GET /status?seq で回収する応答にも付く (名前の確かめが時間切れになっても気づけるように)
+    const polled3 = pluginNext(base, `?server=${next.server}&after=2`);
+    const late = await runRequest(base, "return 1;", "?timeout=0.2");
+    const third = await json<RunNext>(polled3);
+    assert.equal(late.status, 504);
+    assert.equal((await json<RunReply>(late)).update?.behind, 3);
+    await pluginRunResult(base, third, { ok: true, value: 1 });
+    const recovered = await json<RequestReply>(fetch(`${base}/status?seq=3`));
+    assert.equal(recovered.state, "done");
+    assert.equal(recovered.update?.behind, 3);
+    // 結果を待つ /status?seq の 504 と、400 (file 無し)・503 (繋がっていない) にも付く (AI が読む JSON の応答は全部)
+    const queued = runRequest(base, "return 2;", "?timeout=5");
+    queued.catch(() => {});
+    await sleep(50);
+    const waiting = await fetch(`${base}/status?seq=4&timeout=0.2`);
+    assert.equal(waiting.status, 504);
+    assert.equal((await json<RequestReply>(waiting)).update?.behind, 3);
+    const noFile = await fetch(`${base}/run`, { method: "POST", headers: { "X-Run-Token": "t1" }, body: "return 1;" });
+    assert.equal(noFile.status, 400);
+    assert.equal((await json<RunReply>(noFile)).update?.behind, 3);
+    // プラグインが読む GET /hello の形は変えない (behind だけ)
+    assert.deepEqual((await json<{ update?: unknown }>(fetch(`${base}/hello`, { headers: PLUGIN }))).update, { behind: 3 });
   } finally {
     close();
   }
