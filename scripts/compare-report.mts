@@ -334,7 +334,7 @@ function textSection(summary: CompareSummary): string {
   if (summary.changesDiff === null) return "";
   const size = statSync(summary.changesDiff).size;
   if (size > REPORT_TEXT_DIFF_MAX) {
-    return `<section id="text"><h2>構造の差分</h2>
+    return `<section id="text"><h3>構造の差分</h3>
 ${groupSection(summary.sameChanges, summary.fileKey)}
 <p>ファイルごとの差分は大きい (${Math.round(size / 1024)} KB) ので載せていない。<a href="${CHANGES_DIFF_FILE}">${CHANGES_DIFF_FILE}</a> を開く。</p></section>`;
   }
@@ -344,7 +344,7 @@ ${groupSection(summary.sameChanges, summary.fileKey)}
   const totalLines = files.reduce((n, f) => n + f.lineCount, 0);
   const openAll = files.length <= OPEN_FILES_MAX && totalLines <= OPEN_TOTAL_LINES_MAX;
   const groupsHtml = groups.length === 0 ? "" : `${groupSection(groups, summary.fileKey)}\n<h3>ファイルごとの差分</h3>`;
-  return `<section id="text"><h2>構造の差分</h2>
+  return `<section id="text"><h3>構造の差分</h3>
 <p class="hint">${
     openAll ? "SVG のコードと長い差分は閉じてある。" : "ファイルや行が多いので、全部閉じてある。"
   }見出しを押すと開く。区切りの行には、変わった箇所の直前に始まるノードの名前と ID が出る。${openHint(summary.fileKey)}全部は <a href="${CHANGES_DIFF_FILE}">${CHANGES_DIFF_FILE}</a></p>
@@ -422,16 +422,30 @@ function snapshotGroup(id: string, title: string, hint: string, nodes: readonly 
   return `<div id="${id}" class="group"><p><b>${title} ${nodes.length}</b></p><p class="hint">${hint}</p>${body}</div>`;
 }
 
-/** 範囲の外 → 映った先の順。範囲の中の変化は意図したもので、下の画像と構造の差分に出るので載せない (summary.json の inside にはある) */
-function snapshotSection(diff: SnapshotDiff | null, fileKey: string | null): string {
+/** 書き出した範囲の外 (outside と propagated) に変化があるか。人には「意図しない変化」として見せる */
+function hasUnintended(diff: SnapshotDiff | null): diff is SnapshotDiff {
+  return diff !== null && (diff.outside.length > 0 || diff.propagated.length > 0);
+}
+
+/**
+ * 意図しない変化 (書き出した範囲の外)。見立て → 閉じたノードの一覧 (範囲の外 → 映った先) の順。
+ * 一覧は人が読んでも意味が取りにくいので閉じておき、見立てで伝える。範囲の中の変化は意図したもので、下の画像と構造の差分に出るので載せない (summary.json の inside にはある)
+ */
+function unintendedSection(diff: SnapshotDiff | null, note: string | null, fileKey: string | null): string {
   if (diff === null) {
-    return `<section id="snapshot"><h2>書き出した範囲の外の変化</h2>
-<p class="hint">前後の全体スナップショットを渡していないので、書き出した範囲の外は見ていない (compare に --snapshot-before と --snapshot-after を渡すと出る)。</p></section>`;
+    return `${noteSection(note)}
+<p class="hint">前後の全体スナップショットを渡していないので、意図しない範囲の変化は見ていない (compare に --snapshot-before と --snapshot-after を渡すと出る)。</p>`;
   }
-  return `<section id="snapshot"><h2>書き出した範囲の外の変化 (全体スナップショット)</h2>
-<p class="hint">ファイル全体のノード (${diff.nodes.before.toLocaleString("en-US")} → ${diff.nodes.after.toLocaleString(
-    "en-US"
-  )}) の前後を比べたもの。書き出した範囲の中の変化 (${diff.inside.length}) は、下の画像と構造の差分で見る。${openHint(fileKey)}</p>
+  const nodes = `ファイル全体のノード (${diff.nodes.before.toLocaleString("en-US")} → ${diff.nodes.after.toLocaleString("en-US")})`;
+  if (!hasUnintended(diff)) {
+    return `${noteSection(note)}
+<p class="hint">意図しない範囲の変化は無い (${nodes} の前後を比べた)。</p>`;
+  }
+  return `<section id="unintended"><h2 class="alert">意図しない変化</h2>
+<p class="alert">意図しない範囲に変更がありました。確認してください。</p>
+${noteSection(note)}
+<details><summary>変わったノードの一覧 (範囲の外 ${diff.outside.length}・インスタンスに映ったもの ${diff.propagated.length})</summary>
+<p class="hint">${nodes} の前後を比べたもの。書き出した範囲の中の変化 (${diff.inside.length}) は、下の意図した変化で見る。${openHint(fileKey)}</p>
 ${snapshotGroup(
   "outside",
   "書き出した範囲の外で変わったノード",
@@ -446,6 +460,7 @@ ${snapshotGroup(
   diff.propagated,
   fileKey
 )}
+</details>
 </section>`;
 }
 
@@ -526,6 +541,10 @@ const STYLE = `
   ul.nodes li { padding: 1px 0; }
   .page { color: var(--muted); }
   #outside b { color: var(--del); }
+  .alert { color: var(--del); }
+  #toc { padding: 8px 16px 0; }
+  #toc ul { display: flex; gap: 16px; list-style: none; margin: 0; padding: 0; }
+  #intended > h2 { margin-top: 24px; }
   footer { color: var(--muted); padding: 16px; border-top: 1px solid var(--line); }
   @media (max-width: 760px) { .row, .overview { flex-direction: column; } .map { position: static; flex-basis: auto; width: 100%; } .regions { grid-template-columns: 1fr; } }
 `;
@@ -568,14 +587,20 @@ export function reportHtml(summary: CompareSummary, beforeDir: string, afterDir:
   const count = (label: string, n: number, href: string) =>
     n === 0 ? "" : `<li><a href="${href}">${label}</a> <b>${n}</b></li>`;
   const snapshot = summary.snapshot;
-  const outsideChanged = snapshot !== null && snapshot.outside.length > 0;
+  const unintended = hasUnintended(snapshot);
   // 書き出しに映らないノード (非表示の子など) の変化はスナップショットにだけ出るので、same だけでは「無い」と言えない
-  const snapshotChanged = snapshot !== null && (snapshot.inside.length > 0 || snapshot.propagated.length > 0);
-  const title = outsideChanged
-    ? "書き出した範囲の外が変わっている"
-    : summary.same && !snapshotChanged
-      ? "変わったところは無い"
-      : "変わったところがある";
+  const snapshotChanged = snapshot !== null && snapshot.inside.length > 0;
+  const title = unintended ? "意図しない変化がある" : summary.same && !snapshotChanged ? "変わったところは無い" : "変わったところがある";
+  const intended =
+    images.length > 0 ||
+    summary.changesDiff !== null ||
+    summary.added.length > 0 ||
+    summary.removed.length > 0 ||
+    summary.renamed.length > 0;
+  const toc =
+    unintended && intended
+      ? `<nav id="toc"><ul><li><a href="#unintended">意図しない変化</a></li><li><a href="#intended">意図した変化</a></li></ul></nav>`
+      : "";
   const bgSwitch =
     images.length === 0
       ? ""
@@ -593,8 +618,8 @@ export function reportHtml(summary: CompareSummary, beforeDir: string, afterDir:
 <header>
 <h1>${title}</h1>
 <ul class="counts">
-${snapshot === null ? "" : count("範囲の外で変わったノード", snapshot.outside.length, "#outside")}
-${snapshot === null ? "" : count("インスタンスに映ったノード", snapshot.propagated.length, "#propagated")}
+${snapshot === null ? "" : count("意図しない変化 (範囲の外)", snapshot.outside.length, "#unintended")}
+${snapshot === null ? "" : count("インスタンスに映ったノード", snapshot.propagated.length, "#unintended")}
 ${count("見た目が変わった画像", images.length, "#images")}
 ${count("構造の差分があるファイル", textFiles, "#text")}
 ${count("足された", summary.added.length, "#files")}
@@ -603,25 +628,31 @@ ${count("名前が変わった", summary.renamed.length, "#files")}
 ${bgSwitch}
 </ul>
 </header>
+${toc}
 <main>
-${noteSection(summary.note)}
-${snapshotSection(snapshot, summary.fileKey)}
+${unintendedSection(snapshot, summary.note, summary.fileKey)}
+${
+  !intended
+    ? ""
+    : `<section id="intended"><h2>意図した変化 (書き出した範囲の中)</h2>
 ${
   images.length === 0
     ? ""
-    : `<section id="images"><h2>見た目が変わった画像 (違う画素の多い順)</h2>
+    : `<section id="images"><h3>見た目が変わった画像 (違う画素の多い順)</h3>
 <p class="hint">離れた所の変化は、1 箇所ずつ切り出して並べる。左の図の枠の番号が、切り出しの番号。画像を押すと原寸で開く。${openHint(summary.fileKey)}</p>
 <div class="grid">${cards}</div>
 ${images.map((image, i) => imageArticle(image, i, summary)).join("\n")}
 </section>`
 }
 ${textSection(summary)}
-<section id="files"><h2>ファイルの一覧</h2>
+<section id="files"><h3>ファイルの一覧</h3>
 ${fileList("変わった", summary.changed)}
 ${fileList("足された", summary.added)}
 ${fileList("消えた", summary.removed)}
 ${fileList("名前が変わった", summary.renamed.map((r) => `${r.before} → ${r.after}`))}
 </section>
+</section>`
+}
 </main>
 <footer>before: <code>${escapeHtml(beforeDir)}</code><br>after: <code>${escapeHtml(afterDir)}</code></footer>
 <script>${SCRIPT}</script>
