@@ -6,7 +6,7 @@ import { existsSync, readFileSync, statSync } from "node:fs";
 import path from "node:path";
 import { figmaNodeLink, isNodeId } from "./bridge-meta.mts";
 import type { CompareSummary, ImageChange, SameChange } from "./compare-lib.mts";
-import { type Aspect, type ChangedNode, DOCUMENT_ID, type FingerprintDiff, type PropagatedNode } from "./fingerprint-lib.mts";
+import { type Aspect, type ChangedNode, DOCUMENT_ID, type PropagatedNode, type SnapshotDiff } from "./snapshot-lib.mts";
 
 export const TEXT_EXTENSIONS: ReadonlySet<string> = new Set([".json", ".md", ".svg", ".txt"]);
 export const CHANGES_DIFF_FILE = "changes.diff";
@@ -24,7 +24,7 @@ const MAX_GROUPS = 20;
 /** 「同じ変化」で最初に見せる行の数。残りは畳む */
 const GROUP_PREVIEW_LINES = 8;
 /** ファイル全体の比較で、区分ごとに最初に見せるノードの数。残りは畳む */
-const FINGERPRINT_PREVIEW_NODES = 50;
+const SNAPSHOT_PREVIEW_NODES = 50;
 
 /** 離れた変化ごとの切り出し画像の置き場所 (index は 0 から) */
 export function cropFile(side: "before" | "after" | "diff", rel: string, index: number): string {
@@ -378,7 +378,7 @@ function kindLabel(node: ChangedNode): string {
   return `${KIND_LABEL[node.kind]}: ${node.aspects.map((a) => ASPECT_LABEL[a]).join("・")}`;
 }
 
-function fingerprintNode(node: ChangedNode | PropagatedNode, fileKey: string | null): string {
+function snapshotNode(node: ChangedNode | PropagatedNode, fileKey: string | null): string {
   const id = node.id === DOCUMENT_ID ? "ページの並び" : `<code>${escapeHtml(node.id)}</code>`;
   // 消えたノードは after に無く、Figma で開けない
   const link = node.kind === "removed" ? "" : openInFigma(fileKey, node.id);
@@ -409,13 +409,13 @@ function noteSection(note: string | null): string {
 ${html}</section>`;
 }
 
-function fingerprintGroup(id: string, title: string, hint: string, nodes: readonly ChangedNode[], fileKey: string | null): string {
-  const head = nodes.slice(0, FINGERPRINT_PREVIEW_NODES).map((n) => fingerprintNode(n, fileKey)).join("");
+function snapshotGroup(id: string, title: string, hint: string, nodes: readonly ChangedNode[], fileKey: string | null): string {
+  const head = nodes.slice(0, SNAPSHOT_PREVIEW_NODES).map((n) => snapshotNode(n, fileKey)).join("");
   const rest =
-    nodes.length > FINGERPRINT_PREVIEW_NODES
-      ? `<details><summary>ほか ${nodes.length - FINGERPRINT_PREVIEW_NODES} 件</summary><ul class="nodes">${nodes
-          .slice(FINGERPRINT_PREVIEW_NODES)
-          .map((n) => fingerprintNode(n, fileKey))
+    nodes.length > SNAPSHOT_PREVIEW_NODES
+      ? `<details><summary>ほか ${nodes.length - SNAPSHOT_PREVIEW_NODES} 件</summary><ul class="nodes">${nodes
+          .slice(SNAPSHOT_PREVIEW_NODES)
+          .map((n) => snapshotNode(n, fileKey))
           .join("")}</ul></details>`
       : "";
   const body = nodes.length === 0 ? `<p class="hint">なし</p>` : `<ul class="nodes">${head}</ul>${rest}`;
@@ -423,23 +423,23 @@ function fingerprintGroup(id: string, title: string, hint: string, nodes: readon
 }
 
 /** 範囲の外 → 映った先の順。範囲の中の変化は意図したもので、下の画像と構造の差分に出るので載せない (summary.json の inside にはある) */
-function fingerprintSection(diff: FingerprintDiff | null, fileKey: string | null): string {
+function snapshotSection(diff: SnapshotDiff | null, fileKey: string | null): string {
   if (diff === null) {
-    return `<section id="fingerprint"><h2>書き出した範囲の外の変化</h2>
-<p class="hint">前後の全体スナップショットを渡していないので、書き出した範囲の外は見ていない (compare に --fingerprint-before と --fingerprint-after を渡すと出る)。</p></section>`;
+    return `<section id="snapshot"><h2>書き出した範囲の外の変化</h2>
+<p class="hint">前後の全体スナップショットを渡していないので、書き出した範囲の外は見ていない (compare に --snapshot-before と --snapshot-after を渡すと出る)。</p></section>`;
   }
-  return `<section id="fingerprint"><h2>書き出した範囲の外の変化 (全体スナップショット)</h2>
+  return `<section id="snapshot"><h2>書き出した範囲の外の変化 (全体スナップショット)</h2>
 <p class="hint">ファイル全体のノード (${diff.nodes.before.toLocaleString("en-US")} → ${diff.nodes.after.toLocaleString(
     "en-US"
   )}) の前後を比べたもの。書き出した範囲の中の変化 (${diff.inside.length}) は、下の画像と構造の差分で見る。${openHint(fileKey)}</p>
-${fingerprintGroup(
+${snapshotGroup(
   "outside",
   "書き出した範囲の外で変わったノード",
   "script が意図しない場所を変えたか、書き換えの影響 (自動レイアウトで隣が動くなど) が範囲の外に及んでいる。「移った」は中身は同じで親やページが変わったもの。",
   diff.outside,
   fileKey
 )}
-${fingerprintGroup(
+${snapshotGroup(
   "propagated",
   "範囲の中の変化がインスタンスに映ったノード",
   "範囲の中のメインコンポーネントを変えた結果。そのコンポーネントを変えてよかったかで判断する。",
@@ -567,10 +567,10 @@ export function reportHtml(summary: CompareSummary, beforeDir: string, afterDir:
   ).length;
   const count = (label: string, n: number, href: string) =>
     n === 0 ? "" : `<li><a href="${href}">${label}</a> <b>${n}</b></li>`;
-  const fp = summary.fingerprint;
-  const outsideChanged = fp !== null && fp.outside.length > 0;
+  const snapshot = summary.snapshot;
+  const outsideChanged = snapshot !== null && snapshot.outside.length > 0;
   // 書き出しに映らないノード (非表示の子など) の変化はスナップショットにだけ出るので、same だけでは「無い」と言えない
-  const snapshotChanged = fp !== null && (fp.inside.length > 0 || fp.propagated.length > 0);
+  const snapshotChanged = snapshot !== null && (snapshot.inside.length > 0 || snapshot.propagated.length > 0);
   const title = outsideChanged
     ? "書き出した範囲の外が変わっている"
     : summary.same && !snapshotChanged
@@ -593,8 +593,8 @@ export function reportHtml(summary: CompareSummary, beforeDir: string, afterDir:
 <header>
 <h1>${title}</h1>
 <ul class="counts">
-${fp === null ? "" : count("範囲の外で変わったノード", fp.outside.length, "#outside")}
-${fp === null ? "" : count("インスタンスに映ったノード", fp.propagated.length, "#propagated")}
+${snapshot === null ? "" : count("範囲の外で変わったノード", snapshot.outside.length, "#outside")}
+${snapshot === null ? "" : count("インスタンスに映ったノード", snapshot.propagated.length, "#propagated")}
 ${count("見た目が変わった画像", images.length, "#images")}
 ${count("構造の差分があるファイル", textFiles, "#text")}
 ${count("足された", summary.added.length, "#files")}
@@ -605,7 +605,7 @@ ${bgSwitch}
 </header>
 <main>
 ${noteSection(summary.note)}
-${fingerprintSection(fp, summary.fileKey)}
+${snapshotSection(snapshot, summary.fileKey)}
 ${
   images.length === 0
     ? ""

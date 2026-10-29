@@ -1,11 +1,11 @@
 /**
- * ファイル全体のノードのスナップショット (scripts/fingerprint.js が返すもの) を 2 つ比べ、変わったノードを、書き出した範囲の中と外に分ける。
+ * ファイル全体のノードのスナップショット (scripts/snapshot.js が返すもの) を 2 つ比べ、変わったノードを、書き出した範囲の中と外に分ける。
  * 書き換えの script が意図しない場所を変えていないかを確かめるために使う。手順は .claude/skills/figma-safe-edit/SKILL.md。
  */
 import { readFileSync } from "node:fs";
 
-/** fingerprint.js の返り値 (POST /run の応答の value) */
-export interface Fingerprint {
+/** snapshot.js の返り値 (POST /run の応答の value) */
+export interface Snapshot {
   v: 2;
   file: string;
   /** figma.fileKey。取れないプラグインでは null */
@@ -19,10 +19,10 @@ export interface Fingerprint {
   nodes: string[];
 }
 
-/** 要約の区分 (fingerprint.js の ASPECT_FIELDS と同じ順)。変わったノードについて、どの区分が変わったかを出す */
+/** 要約の区分 (snapshot.js の ASPECT_FIELDS と同じ順)。変わったノードについて、どの区分が変わったかを出す */
 export const ASPECTS = ["name", "geometry", "look", "text", "layout", "component", "children"] as const;
 export type Aspect = (typeof ASPECTS)[number];
-/** 区分ごとのハッシュの文字数 (fingerprint.js の hash と同じ) */
+/** 区分ごとのハッシュの文字数 (snapshot.js の hash と同じ) */
 export const HASH_WIDTH = 4;
 const PAGE_ASPECTS: readonly Aspect[] = ["name", "children"];
 const DOCUMENT_ASPECTS: readonly Aspect[] = ["children"];
@@ -45,7 +45,7 @@ export interface PropagatedNode extends ChangedNode {
   from: string;
 }
 
-export interface FingerprintDiff {
+export interface SnapshotDiff {
   /** スナップショットを取ったファイルの名前 (before と after で違えば、別のファイルを比べている) */
   file: { before: string; after: string };
   nodes: { before: number; after: number };
@@ -61,16 +61,16 @@ export interface FingerprintDiff {
 }
 
 /** POST /run の応答 ({ seq, value }) か、value そのものを読む */
-export function readFingerprint(file: string): Fingerprint {
-  const parsed = JSON.parse(readFileSync(file, "utf8")) as { value?: unknown } & Partial<Fingerprint>;
-  const candidate = (parsed.value ?? parsed) as Partial<Fingerprint> & { v?: unknown };
+export function readSnapshot(file: string): Snapshot {
+  const parsed = JSON.parse(readFileSync(file, "utf8")) as { value?: unknown } & Partial<Snapshot>;
+  const candidate = (parsed.value ?? parsed) as Partial<Snapshot> & { v?: unknown };
   if (typeof candidate.v !== "number" || !Array.isArray(candidate.nodes) || typeof candidate.pages !== "object" || candidate.pages === null) {
-    throw new Error(`スナップショットのファイルでない (fingerprint.js の返り値を保存したものを渡す): ${file}`);
+    throw new Error(`スナップショットのファイルでない (snapshot.js の返り値を保存したものを渡す): ${file}`);
   }
   if (candidate.v !== SUPPORTED_VERSION) {
-    throw new Error(`古い形のスナップショット (v${candidate.v}。今の fingerprint.js は v${SUPPORTED_VERSION})。取り直す: ${file}`);
+    throw new Error(`古い形のスナップショット (v${candidate.v}。今の snapshot.js は v${SUPPORTED_VERSION})。取り直す: ${file}`);
   }
-  return candidate as Fingerprint;
+  return candidate as Snapshot;
 }
 
 function chunks(summary: string): string[] {
@@ -103,9 +103,9 @@ interface Entry {
   main: string;
 }
 
-function index(fp: Fingerprint): Map<string, Entry> {
+function index(snapshot: Snapshot): Map<string, Entry> {
   return new Map(
-    fp.nodes.map((line) => {
+    snapshot.nodes.map((line) => {
       const [id, parent, hash, main = ""] = line.split("|");
       return [id, { parent, hash, main }];
     })
@@ -139,7 +139,7 @@ function pageOf(id: string, entries: Map<string, Entry>, pages: Record<string, s
  * before と after を比べる。insideIds は書き出した範囲の根 (export の nodeIds)。
  * 範囲の根のスナップショットには子の並びが入るので、子を足す・消すと根も changed に出る (範囲の中)
  */
-export function diffFingerprints(before: Fingerprint, after: Fingerprint, insideIds: readonly string[]): FingerprintDiff {
+export function diffSnapshots(before: Snapshot, after: Snapshot, insideIds: readonly string[]): SnapshotDiff {
   if (before.fileKey != null && after.fileKey != null && before.fileKey !== after.fileKey) {
     throw new Error(`別のファイルのスナップショットを比べている (before: ${before.fileKey}, after: ${after.fileKey})`);
   }
