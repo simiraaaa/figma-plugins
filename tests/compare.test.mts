@@ -210,14 +210,22 @@ test("負例: 全体スナップショットを渡すと、範囲の外 → 映�
   assert.deepEqual(summary.snapshot.propagated, [{ id: "I2:1;1:3", page: "P1", kind: "changed", from: "1:3" }]);
   assert.deepEqual(summary.snapshot.inside, [{ id: "1:3", page: "P1", kind: "changed" }]);
   const report = readFileSync(summary.report, "utf8");
-  assert.match(report, /<h1>書き出した範囲の外が変わっている<\/h1>/);
+  assert.match(report, /<h1>意図しない変化がある<\/h1>/);
   const at = (text: string) => {
     const i = report.indexOf(text);
     assert.ok(i !== -1, `report に ${text} が無い`);
     return i;
   };
+  assert.ok(at('id="unintended"') < at('id="outside"'), "範囲の外は「意図しない変化」の中");
   assert.ok(at('id="outside"') < at('id="propagated"'), "範囲の外が映った先より先");
-  assert.ok(at('id="propagated"') < at('id="text"'), "範囲の外の変化が構造の差分より先");
+  assert.ok(at('id="propagated"') < at('id="intended"'), "意図しない変化が意図した変化より先");
+  assert.ok(at('id="intended"') < at('id="text"'), "構造の差分は「意図した変化」の中");
+  // 両方あるので目次が出る。意図しない変化は赤い見出しと確認の文を付け、ノードの一覧は閉じた details に入れる
+  assert.match(report, /<nav id="toc">[\s\S]*href="#unintended"[\s\S]*href="#intended"[\s\S]*<\/nav>/);
+  assert.match(report, /<h2 class="alert">意図しない変化<\/h2>/);
+  assert.match(report, /<p class="alert">意図しない範囲に変更がありました。確認してください。<\/p>/);
+  const list = report.slice(report.lastIndexOf("<details", at('id="outside"')), at('id="outside"'));
+  assert.match(list, /^<details><summary>/, "ノードの一覧は閉じた details の中");
   // 範囲の中の変化は意図したもので、画像と構造の差分に出るので、先頭には載せない
   assert.doesNotMatch(report, /id="inside"/);
   // 範囲の外のノードにも Figma で開くリンクが付く (入れ子の id の ; は URL の符号化)
@@ -246,7 +254,47 @@ test("負例: 消えたノードとページの並び (document) には Figma �
   assert.doesNotMatch(report, /node-id=document/);
   const without = compare({ node: { id: "1:2" } }, { node: { id: "1:2" } });
   assert.equal(without.snapshot, null);
-  assert.match(readFileSync(without.report, "utf8"), /範囲の外は見ていない/);
+  assert.match(readFileSync(without.report, "utf8"), /意図しない範囲の変化は見ていない/);
+});
+
+test("負例: 意図しない変化と意図した変化の片方しか無ければ目次を出さず、無いほうの節も出さない", () => {
+  // 意図した変化だけ (スナップショット無しで構造が変わった)
+  const intended = compare({ node: { id: "1:2", name: "A" } }, { node: { id: "1:2", name: "B" } });
+  const intendedReport = readFileSync(intended.report, "utf8");
+  assert.doesNotMatch(intendedReport, /id="toc"/);
+  assert.doesNotMatch(intendedReport, /id="unintended"/);
+  assert.match(intendedReport, /id="intended"/);
+  // 意図しない変化だけ (書き出しは同じで、範囲の外のノードが変わった)
+  const unintended = compare(
+    { node: { id: "1:2" }, fileKey: "KEY" },
+    { node: { id: "1:2" }, fileKey: "KEY" },
+    { snapshot: snapshotPair({}, { hashes: { "2:1": "x" } }) }
+  );
+  const unintendedReport = readFileSync(unintended.report, "utf8");
+  assert.doesNotMatch(unintendedReport, /id="toc"/);
+  assert.match(unintendedReport, /id="unintended"/);
+  assert.doesNotMatch(unintendedReport, /id="intended"/);
+  // 書き出しに映らない範囲の中の変化 (非表示の子など) だけ: 意図した変化の節に件数の案内を出す
+  const hidden = compare(
+    { node: { id: "1:2" }, fileKey: "KEY" },
+    { node: { id: "1:2" }, fileKey: "KEY" },
+    { snapshot: snapshotPair({}, { hashes: { "1:3": "hidden-child-changed" } }) }
+  );
+  const hiddenReport = readFileSync(hidden.report, "utf8");
+  assert.match(hiddenReport, /id="intended"/);
+  assert.match(hiddenReport, /書き出した範囲の中で変わったノード 1/);
+  // 画像でも構造でもないファイル (jpg など) だけが変わった: 意図した変化の節にファイルの一覧を出す
+  const asset = compare({ node: { id: "1:2" }, files: { "asset.jpg": "a" } }, { node: { id: "1:2" }, files: { "asset.jpg": "b" } });
+  assert.deepEqual(asset.changed, ["asset.jpg"]);
+  const assetReport = readFileSync(asset.report, "utf8");
+  assert.match(assetReport, /id="intended"/);
+  assert.match(assetReport, /asset\.jpg/);
+  // どちらも無い
+  const none = compare({ node: { id: "1:2" }, fileKey: "KEY" }, { node: { id: "1:2" }, fileKey: "KEY" }, { snapshot: snapshotPair({}, {}) });
+  const noneReport = readFileSync(none.report, "utf8");
+  assert.match(noneReport, /<h1>変わったところは無い<\/h1>/);
+  assert.match(noneReport, /意図しない範囲の変化は無い/);
+  assert.doesNotMatch(noneReport, /id="unintended"|id="intended"|id="toc"/);
 });
 
 test("負例: 書き出しが同じでも、スナップショットの範囲の中に変化 (非表示の子など、書き出しに映らないもの) があれば「無い」と見出しに出さない", () => {
@@ -271,7 +319,12 @@ test("負例: --note の見立ては report の一番上 (範囲の外の変化�
   );
   assert.equal(summary.note, readFileSync(note, "utf8"));
   const report = readFileSync(summary.report, "utf8");
-  assert.ok(report.indexOf('id="note"') < report.indexOf('id="snapshot"'), "見立てが範囲の外の変化より前");
+  assert.ok(report.indexOf('id="unintended"') < report.indexOf('id="note"'), "見立ては「意図しない変化」の中");
+  assert.ok(report.indexOf('id="note"') < report.indexOf('id="outside"'), "見立てがノードの一覧より前");
+  // 節の中なので見出しは 1 段下げる。意図しない変化が無くて単独で出るときは h2
+  assert.match(report, /<h3>AI の見立て<\/h3>/);
+  const alone = compare({ node: { id: "1:2" }, fileKey: "KEY" }, { node: { id: "1:2" }, fileKey: "KEY" }, { snapshot: snapshotPair({}, {}), note });
+  assert.match(readFileSync(alone.report, "utf8"), /<h2>AI の見立て<\/h2>/);
   assert.match(report, /<p>想定外の変化は 1 つ。<br>原因は隣が動いたこと。<\/p>/);
   assert.match(report, /<ul><li>Button ページの Frame &lt;b&gt;A&lt;\/b&gt;<\/li><li>うちらの書き換えの影響<\/li><\/ul>/);
   assert.match(readFileSync(path.join(summary.outDir, "summary.json"), "utf8"), /"note": "想定外/);
