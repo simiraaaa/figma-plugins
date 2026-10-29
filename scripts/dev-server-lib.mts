@@ -24,7 +24,7 @@ import {
 import http from "node:http";
 import path from "node:path";
 import { BRIDGE_META_FILE, type BridgeMeta } from "./bridge-meta.mts";
-import type { RepoUpdate } from "./update-check.mts";
+import { type RepoUpdate, updateMessage } from "./update-check.mts";
 
 /**
  * 待ち受けるポートの候補。前から順に、空いている最初のポートで起動する。
@@ -265,17 +265,27 @@ export interface PluginState {
 }
 
 /** POST /run の応答。script の結果は書き出しの結果ではないので、status.json と version は動かさない */
+/** リポジトリに新しい版があることの、AI (依頼した側) への知らせ。GET /status と /run・/export の応答に付く (無ければ欄ごと無い) */
+export interface UpdateNotice {
+  /** origin/main が HEAD より先にあるコミットの数 */
+  behind: number;
+  /** 人に伝える文 (dev サーバーの端末と Local Bridge の画面と同じ) */
+  message: string;
+}
+
 export interface RunReply {
   seq: number;
   /** script が return した値。return しなければ null */
   value?: unknown;
   error?: string;
+  update?: UpdateNotice;
 }
 
 export interface StatusReply extends DevStatus {
   /** 結果の置き場所。ほかのセッションが起動した dev サーバーに相乗りしたとき、どこに届くかを知るため */
   outDir: string;
   plugin: PluginState[];
+  update?: UpdateNotice;
 }
 
 /**
@@ -752,8 +762,15 @@ export function createDevServer(options: DevServerOptions): DevServerHandler {
     return fileStatuses.get(fileKey) ?? { version: 0 };
   }
 
+  /** リポジトリに新しい版があれば、依頼した側 (AI) への応答に付ける欄。AI はこれを見て人に取り込みを促す */
+  function updateNotice(): { update?: UpdateNotice } {
+    const update = options.repoUpdate?.() ?? null;
+    const message = update === null ? null : updateMessage(update);
+    return update?.kind === "behind" && message !== null ? { update: { behind: update.behind, message } } : {};
+  }
+
   function statusReply(fileKey: string | undefined): StatusReply {
-    return { ...lastStatus(fileKey), outDir, plugin: pluginState() };
+    return { ...lastStatus(fileKey), outDir, plugin: pluginState(), ...updateNotice() };
   }
 
   function setProcessing(bridge: Bridge, next: Bridge["processing"]): void {
@@ -1043,7 +1060,7 @@ export function createDevServer(options: DevServerOptions): DevServerHandler {
       (wake) => {
         resolveOutcome = (outcome) => {
           wake();
-          send(res, outcome.ok ? 200 : 422, outcome.body);
+          send(res, outcome.ok ? 200 : 422, { ...outcome.body, ...updateNotice() });
         };
         const set = outcomeWaiters.get(request.seq) ?? new Set();
         set.add(resolveOutcome);

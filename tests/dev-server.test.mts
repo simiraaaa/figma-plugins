@@ -32,6 +32,7 @@ import {
   type PluginState,
   readStoredZip,
   type RequestReply,
+  type RunReply,
   type RunRequest,
   type StatusReply,
 } from "../scripts/dev-server-lib.mts";
@@ -1962,6 +1963,37 @@ test("負例: GET /hello は、リポジトリに新しい版があれば update
       protocol: DEV_SERVER_PROTOCOL,
       update: { behind: 2 },
     });
+  } finally {
+    close();
+  }
+});
+
+test("負例: リポジトリに新しい版があれば、AI が読む GET /status と /run・/export の応答に update (件数と、取り込みの文) を付け、無ければ付けない", async () => {
+  const checkedAt = "2026-10-29T00:00:00.000Z";
+  let update: RepoUpdate | null = { kind: "current", checkedAt };
+  const { base, close } = await startServer(undefined, { repoUpdate: () => update });
+  try {
+    assert.equal("update" in (await json<StatusReply>(fetch(`${base}/status`))), false);
+    update = { kind: "behind", behind: 3, checkedAt };
+    const status = await json<StatusReply>(fetch(`${base}/status`));
+    assert.equal(status.update?.behind, 3);
+    assert.match(status.update?.message ?? "", /新しい版がある \(3 コミット\)/);
+    // script の実行の応答 (手順の最初の return figma.root.name で AI が気づく)
+    const polled = pluginNext(base);
+    const ran = runRequest(base, "return figma.root.name;");
+    const next = await json<RunNext>(polled);
+    await pluginRunResult(base, next, { ok: true, value: "Rabee UI" });
+    const reply = await json<RunReply>(ran);
+    assert.equal(reply.value, "Rabee UI");
+    assert.equal(reply.update?.behind, 3);
+    // 書き出しの応答にも付く
+    const exporting = pluginNext(base, `?server=${next.server}&after=1`);
+    const exported = fetch(`${base}/export?file=${FILE}`, { method: "POST", body: JSON.stringify({ nodeIds: ["1:2"] }) });
+    const job = await json<Next>(exporting);
+    assert.equal(job.kind, "export");
+    await pluginPost(base, "result", job, sampleZip());
+    const dump = await json<StatusReply>(exported);
+    assert.equal(dump.update?.behind, 3);
   } finally {
     close();
   }
