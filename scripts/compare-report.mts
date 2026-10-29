@@ -115,7 +115,7 @@ function imageArticle(image: ImageChange, index: number, summary: CompareSummary
   const id = `img-${index + 1}`;
   // 消えた画像のノードは after に無く、Figma で開けない
   const link = summary.removed.includes(image.file) ? "" : openImageInFigma(summary.fileKey, image.file);
-  const title = `<h3><code>${escapeHtml(image.file)}</code>${link}</h3>`;
+  const title = `<h4><code>${escapeHtml(image.file)}</code>${link}</h4>`;
   if (summary.added.includes(image.file) || summary.removed.includes(image.file)) {
     const added = summary.added.includes(image.file);
     const row = added
@@ -137,7 +137,7 @@ function imageArticle(image: ImageChange, index: number, summary: CompareSummary
   const cards = crops
     .map((i) => {
       const r = image.regions[i];
-      return `<div class="region"><h4><span class="num">${i + 1}</span> x ${r.x} y ${r.y} ・ ${r.width}×${r.height}</h4><div class="row">${figure(
+      return `<div class="region"><h5><span class="num">${i + 1}</span> x ${r.x} y ${r.y} ・ ${r.width}×${r.height}</h5><div class="row">${figure(
         "before",
         src(cropFile("before", image.file, i))
       )}${figure("after", src(cropFile("after", image.file, i)))}${figure("差分", src(cropFile("diff", image.file, i)))}</div></div>`;
@@ -496,7 +496,9 @@ const STYLE = `
   .card { display: flex; flex-direction: column; gap: 2px; padding: 6px; border: 1px solid var(--line); border-radius: 6px; text-decoration: none; }
   .card img { height: 96px; object-fit: contain; }
   .card .name { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
-  article { border-top: 1px solid var(--line); padding: 16px 0; scroll-margin-top: 80px; }
+  article, #unintended, #intended { scroll-margin-top: 80px; }
+  article { border-top: 1px solid var(--line); padding: 16px 0; }
+  article h4, .region h5 { margin: 0 0 4px; font-size: 14px; }
   .row { display: flex; gap: 12px; align-items: flex-start; margin-top: 8px; }
   figure { flex: 1; min-width: 0; margin: 0; }
   img { display: block; max-width: 100%; border: 1px solid var(--line); background: repeating-conic-gradient(#c8c8c8 0 25%, #e8e8e8 0 50%) 0 0 / 16px 16px; }
