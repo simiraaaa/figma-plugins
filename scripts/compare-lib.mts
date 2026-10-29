@@ -17,11 +17,12 @@ import {
   writeFileSync,
 } from "node:fs";
 import path from "node:path";
+import { parseArgs } from "node:util";
 import pixelmatch from "pixelmatch";
 import { PNG } from "pngjs";
 import { type BridgeMeta, readBridgeMeta } from "./bridge-meta.mts";
 import { CHANGES_DIFF_FILE, cropFile, NODE_ID_LINE, reportHtml, sameChangesOf, TEXT_EXTENSIONS } from "./compare-report.mts";
-import { diffSnapshots, readSnapshot, type Snapshot, type SnapshotDiff } from "./snapshot-lib.mts";
+import { diffSnapshots, readSnapshot, type Snapshot, type SnapshotDiff, splitIds } from "./snapshot-lib.mts";
 
 export interface Region {
   x: number;
@@ -532,4 +533,55 @@ export function defaultCompareDir(beforeDir: string, afterDir: string): string {
 
 export function isDirectory(p: string): boolean {
   return existsSync(p) && statSync(p).isDirectory();
+}
+
+export const COMPARE_USAGE =
+  "使い方: npm run compare -- <before の書き出しのディレクトリ> <after の書き出しのディレクトリ> [--out <ディレクトリ>] [--snapshot-before <前の json> --snapshot-after <後の json> [--inside <id>[,<id>...]]] [--note <見立てのファイル>]";
+
+const COMPARE_OPTIONS = {
+  out: { type: "string" },
+  "snapshot-before": { type: "string" },
+  "snapshot-after": { type: "string" },
+  inside: { type: "string" },
+  note: { type: "string" },
+} as const;
+
+export interface CompareArgs {
+  beforeDir: string;
+  afterDir: string;
+  outDir: string;
+  options: CompareOptions;
+}
+
+/**
+ * npm run compare の引数 (process.argv の 3 つ目から) を読む。手順書 (figma-safe-edit) が AI に打たせる引数の約束ごとなので、形はここで固定する。
+ * 受けられなければ使い方の文を error で返す (知らない引数・ディレクトリでないもの・片方だけのスナップショット)
+ */
+export function parseCompareArgs(argv: readonly string[]): CompareArgs | { error: string } {
+  let parsed: ReturnType<typeof parseArgs<{ options: typeof COMPARE_OPTIONS; allowPositionals: true }>>;
+  try {
+    parsed = parseArgs({ args: [...argv], allowPositionals: true, options: COMPARE_OPTIONS });
+  } catch {
+    return { error: COMPARE_USAGE };
+  }
+  const { values, positionals } = parsed;
+  const snapshotBefore = values["snapshot-before"];
+  const snapshotAfter = values["snapshot-after"];
+  // スナップショットは前後そろえて渡す。片方だけでは比べられない
+  const halfGiven = (snapshotBefore === undefined) !== (snapshotAfter === undefined);
+  if (positionals.length !== 2 || !positionals.every(isDirectory) || halfGiven) return { error: COMPARE_USAGE };
+  const [beforeDir, afterDir] = positionals.map((p) => path.resolve(p));
+  return {
+    beforeDir,
+    afterDir,
+    outDir: path.resolve(values.out ?? defaultCompareDir(beforeDir, afterDir)),
+    options: {
+      snapshot:
+        snapshotBefore === undefined || snapshotAfter === undefined
+          ? undefined
+          : { before: path.resolve(snapshotBefore), after: path.resolve(snapshotAfter) },
+      inside: values.inside === undefined ? undefined : splitIds(values.inside),
+      note: values.note === undefined ? undefined : path.resolve(values.note),
+    },
+  };
 }

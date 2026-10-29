@@ -9,7 +9,7 @@ import assert from "node:assert/strict";
 import { mkdtempSync, readFileSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import path from "node:path";
-import { diffSnapshots, readSnapshot, type Snapshot } from "../scripts/snapshot-lib.mts";
+import { diffSnapshots, parseSnapshotArgs, readSnapshot, type Snapshot } from "../scripts/snapshot-lib.mts";
 
 const root = path.resolve(path.dirname(new URL(import.meta.url).pathname), "..");
 
@@ -153,4 +153,15 @@ test("snapshot.js は async 関数の本体として構文が通る (Local Bridg
   const source = readFileSync(path.join(root, "scripts", "snapshot.js"), "utf8");
   const AsyncFunction = Object.getPrototypeOf(async () => {}).constructor as new (...args: string[]) => unknown;
   assert.doesNotThrow(() => new AsyncFunction("figma", source));
+});
+
+test("負例: snapshot の引数: diff <before> <after> --inside を読み、diff 以外・数が違う・知らない引数は使い方を返す", () => {
+  const parsed = parseSnapshotArgs(["diff", "b.json", "a.json", "--inside", "1:2, 3:4,"]);
+  assert.deepEqual(parsed, { before: "b.json", after: "a.json", inside: ["1:2", "3:4"] });
+  assert.deepEqual(parseSnapshotArgs(["diff", "b.json", "a.json"]), { before: "b.json", after: "a.json", inside: [] });
+  for (const argv of [["b.json", "a.json"], ["diff", "b.json"], ["diff", "b.json", "a.json", "--outside", "x"]]) {
+    const bad = parseSnapshotArgs(argv);
+    assert.ok("error" in bad, `${argv.join(" ")} を受けてしまった`);
+    assert.match(bad.error, /使い方: npm run snapshot -- diff/);
+  }
 });
